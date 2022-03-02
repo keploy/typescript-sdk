@@ -5,6 +5,10 @@
   "files": [
     "dist"
   ],
+  "scripts": {
+    "build": "tsc",
+    "prepare": "tsc"
+  },
   "repository": "git@github.com:keploy/typescript-sdk.git",
   "author": "Rajat Sharma <lunasunkaiser@gmail.com>",
   "license": "MIT",
