@@ -1,85 +1,125 @@
+import HttpClient, { Request } from "./client";
+
 type AppConfigFilter = {
-  urlRegex: string
-}
+  urlRegex: string;
+};
 
 type AppConfig = {
-  name: string,
-  host: string,
-  port: number,
-  delay: number,
-  timeout: number,
-  filter: AppConfigFilter
-}
+  name: string;
+  host: string;
+  port: number;
+  delay: number;
+  timeout: number;
+  filter: AppConfigFilter;
+};
 
 type ServerConfig = {
-  url: string,
-  licenseKey: string
-}
+  url: string;
+  licenseKey: string;
+};
 
-type ID = string
+type ID = string;
 
-type HttpResponse = any
+type HttpResponse = unknown;
 
-type HttpRequest = any
+type TestCase = unknown;
 
-type TestCase = any
-
-type TestCaseRequest = any
+type TestCaseRequest = {
+  captured: number;
+  appId: string;
+  uri: string;
+  httpReq: object;
+  httpRes: object;
+};
 
 export default class Keploy {
+  appConfig: AppConfig;
+  serverConfig: ServerConfig;
+  responses: Record<ID, unknown>;
+  dependencies: Record<ID, unknown>;
+  client: HttpClient;
+
   constructor(app: AppConfig, server: ServerConfig) {
-    throw new Error("Not implemented")
+    this.appConfig = app;
+    this.serverConfig = server;
+    this.responses = {};
+    this.dependencies = {};
+    this.client = new HttpClient(this.serverConfig.url);
   }
 
   getDependencies(id: ID) {
-    throw new Error("Not implemented")
+    this.dependencies[id];
   }
 
   getResp(id: ID) {
-    throw new Error("Not implemented")
+    this.responses[id];
   }
 
   putResp(id: ID, resp: HttpResponse) {
-    throw new Error("Not implemented")
+    this.responses[id] = resp;
   }
 
   capture(req: TestCaseRequest) {
-    throw new Error("Not implemented")
+    return this.put(req);
   }
 
   test() {
-    throw new Error("Not implemented")
+    throw new Error("Not implemented");
   }
 
-  get() {
-    throw new Error("Not implemented")
+  async get(id: ID) {
+    const requestUrl = `/regression/testcase/${id}`;
+    const request = new Request();
+    request.setHttpHeader("key", this.serverConfig.licenseKey);
+
+    return this.client.makeHttpRequest(request.get(requestUrl));
   }
 
   private start(total: number) {
-    throw new Error("Not implemented")
+    const app = this.appConfig.name;
+    const requestUrl = `/regression/start?app=${app}&total=${total}`;
+    return this.client.makeHttpRequest(new Request().get(requestUrl));
   }
 
   private end(id: ID, status: boolean) {
-    throw new Error("Not implemented")
+    const requestUrl = `/regression/start?status=${status}&id=${id}`;
+    return this.client.makeHttpRequest(new Request().get(requestUrl));
   }
 
   private simulate(tc: TestCase) {
-    throw new Error("Not implemented")
+    throw new Error("Not implemented");
   }
 
-  private put(tcs: TestCaseRequest) {
-    throw new Error("Not implemented")
+  private async put(tcs: TestCaseRequest) {
+    if (tcs.uri.match(this.appConfig.filter.urlRegex)) {
+      return;
+    }
+
+    const request = new Request();
+    this.setKey(request);
+    request.setHttpHeader("Content-Type", "application/json");
+
+    return this.client.makeHttpRequest(
+      request.post("/regression/testcase", Buffer.from(JSON.stringify(tcs)))
+    );
   }
 
   private denoise(id: string, tcs: TestCaseRequest) {
-    throw new Error("Not implemented")
+    throw new Error("Not implemented");
   }
 
   private fetch() {
-    throw new Error("Not implemented")
+    const offset = 0;
+    const limit = 25;
+    const app = this.appConfig.name;
+    const requestUrl = `/regression/testcase?app=${app}&offset=${offset}&limit=${limit}`;
+    const request = new Request();
+    this.setKey(request);
+
+    return this.client.makeHttpRequest(request.get(requestUrl));
   }
 
-  private setKey(req: HttpRequest) {
-    throw new Error("Not implemented")
+  private setKey(request: Request) {
+    request.setHttpHeader("key", this.serverConfig.licenseKey);
   }
 }
