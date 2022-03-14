@@ -82,7 +82,7 @@ export default class Keploy {
   }
 
   private end(id: ID, status: boolean) {
-    const requestUrl = `/regression/start?status=${status}&id=${id}`;
+    const requestUrl = `/regression/end?status=${status}&id=${id}`;
     return this.client.makeHttpRequest(new Request().get(requestUrl));
   }
 
@@ -108,15 +108,28 @@ export default class Keploy {
     throw new Error("Not implemented");
   }
 
-  private fetch() {
+  private async fetch(): Promise<TestCase[]> {
     const offset = 0;
     const limit = 25;
     const app = this.appConfig.name;
-    const requestUrl = `/regression/testcase?app=${app}&offset=${offset}&limit=${limit}`;
-    const request = new Request();
-    this.setKey(request);
+    const testCases = [];
 
-    return this.client.makeHttpRequest(request.get(requestUrl));
+    while (true) {
+      const requestUrl = `/regression/testcase?app=${app}&offset=${offset}&limit=${limit}`;
+      const request = new Request();
+      this.setKey(request);
+      const response = await this.client.makeHttpRequest(
+        request.get(requestUrl)
+      );
+
+      testCases.push(response);
+
+      if (response.length == 0) {
+        break;
+      }
+    }
+
+    return testCases;
   }
 
   private setKey(request: Request) {
