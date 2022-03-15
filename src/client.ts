@@ -24,7 +24,7 @@ export class Request {
     return this;
   }
 
-  post(requestUrl: string, body: Buffer) {
+  post(requestUrl: string, body: string) {
     this.options = {
       body,
       url: requestUrl,
@@ -49,6 +49,7 @@ export default class HttpClient {
   }
 
   async makeHttpRequest(request: Request) {
-    return http(request.raw()).buffer();
+    const options = { ...request.raw(), prefixUrl: this.baseUrl };
+    return http(options).buffer();
   }
 }
