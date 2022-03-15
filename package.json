@@ -8,7 +8,6 @@
   "scripts": {
     "build": "tsc",
     "prepare": "tsc",
-    "postinstall": "husky install",
     "commit": "cz"
   },
   "repository": "git@github.com:keploy/typescript-sdk.git",
@@ -35,6 +34,6 @@
     }
   },
   "dependencies": {
-    "got": "^12.0.1"
+    "got": "^11.5.2"
   }
 }

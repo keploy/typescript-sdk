@@ -1,7 +1,7 @@
 import HttpClient, { Request } from "./client";
 
 type AppConfigFilter = {
-  urlRegex: string;
+  urlRegex?: string;
 };
 
 type AppConfig = {
@@ -26,10 +26,10 @@ type TestCase = unknown;
 
 type TestCaseRequest = {
   captured: number;
-  appId: string;
+  app_id: string;
   uri: string;
-  httpReq: object;
-  httpRes: object;
+  http_req: object;
+  http_res: object;
 };
 
 export default class Keploy {
@@ -68,7 +68,7 @@ export default class Keploy {
   }
 
   async get(id: ID) {
-    const requestUrl = `/regression/testcase/${id}`;
+    const requestUrl = `regression/testcase/${id}`;
     const request = new Request();
     request.setHttpHeader("key", this.serverConfig.licenseKey);
 
@@ -77,12 +77,12 @@ export default class Keploy {
 
   private start(total: number) {
     const app = this.appConfig.name;
-    const requestUrl = `/regression/start?app=${app}&total=${total}`;
+    const requestUrl = `regression/start?app=${app}&total=${total}`;
     return this.client.makeHttpRequest(new Request().get(requestUrl));
   }
 
   private end(id: ID, status: boolean) {
-    const requestUrl = `/regression/end?status=${status}&id=${id}`;
+    const requestUrl = `regression/end?status=${status}&id=${id}`;
     return this.client.makeHttpRequest(new Request().get(requestUrl));
   }
 
@@ -91,7 +91,10 @@ export default class Keploy {
   }
 
   private async put(tcs: TestCaseRequest) {
-    if (tcs.uri.match(this.appConfig.filter.urlRegex)) {
+    if (
+      this.appConfig.filter.urlRegex &&
+      tcs.uri.match(this.appConfig.filter.urlRegex)
+    ) {
       return;
     }
 
@@ -100,7 +103,7 @@ export default class Keploy {
     request.setHttpHeader("Content-Type", "application/json");
 
     return this.client.makeHttpRequest(
-      request.post("/regression/testcase", Buffer.from(JSON.stringify(tcs)))
+      request.post("regression/testcase", JSON.stringify(tcs))
     );
   }
 
@@ -108,14 +111,14 @@ export default class Keploy {
     throw new Error("Not implemented");
   }
 
-  private async fetch(): Promise<TestCase[]> {
+  async fetch(): Promise<TestCase[]> {
     const offset = 0;
     const limit = 25;
     const app = this.appConfig.name;
     const testCases = [];
 
     while (true) {
-      const requestUrl = `/regression/testcase?app=${app}&offset=${offset}&limit=${limit}`;
+      const requestUrl = `regression/testcase?app=${app}&offset=${offset}&limit=${limit}`;
       const request = new Request();
       this.setKey(request);
       const response = await this.client.makeHttpRequest(
@@ -133,6 +136,8 @@ export default class Keploy {
   }
 
   private setKey(request: Request) {
-    request.setHttpHeader("key", this.serverConfig.licenseKey);
+    if (this.serverConfig.licenseKey) {
+      request.setHttpHeader("key", this.serverConfig.licenseKey);
+    }
   }
 }
