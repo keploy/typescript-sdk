@@ -13,12 +13,18 @@ export class Request {
     this.headers[key] = value;
   }
 
-  get(requestUrl: string) {
+  get(
+    requestUrl: string,
+    searchParams?: Record<string, string | number | boolean | undefined>,
+    prefixUrl?: string
+  ) {
     this.options = {
       url: requestUrl,
       method: "GET",
       headers: this.headers,
       responseType: "json",
+      searchParams,
+      prefixUrl,
     };
 
     return this;
