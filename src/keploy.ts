@@ -72,7 +72,7 @@ export default class Keploy {
     const request = new Request();
     request.setHttpHeader("key", this.serverConfig.licenseKey);
 
-    return this.client.makeHttpRequest(request.get(requestUrl, undefined, id));
+    return this.client.makeHttpRequest(request.get(requestUrl, { id }));
   }
 
   private start(total: number) {

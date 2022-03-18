@@ -15,8 +15,7 @@ export class Request {
 
   get(
     requestUrl: string,
-    searchParams?: Record<string, string | number | boolean | undefined>,
-    prefixUrl?: string
+    searchParams?: Record<string, string | number | boolean | undefined>
   ) {
     this.options = {
       url: requestUrl,
@@ -24,7 +23,6 @@ export class Request {
       headers: this.headers,
       responseType: "json",
       searchParams,
-      prefixUrl,
     };
 
     return this;
