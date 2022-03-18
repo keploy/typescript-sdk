@@ -77,13 +77,17 @@ export default class Keploy {
 
   private start(total: number) {
     const app = this.appConfig.name;
-    const requestUrl = `regression/start?app=${app}&total=${total}`;
-    return this.client.makeHttpRequest(new Request().get(requestUrl));
+    const requestUrl = "regression/start";
+    return this.client.makeHttpRequest(
+      new Request().get(requestUrl, { app, total })
+    );
   }
 
   private end(id: ID, status: boolean) {
-    const requestUrl = `regression/end?status=${status}&id=${id}`;
-    return this.client.makeHttpRequest(new Request().get(requestUrl));
+    const requestUrl = "regression/end";
+    return this.client.makeHttpRequest(
+      new Request().get(requestUrl, { status, id })
+    );
   }
 
   private simulate(tc: TestCase) {
@@ -118,11 +122,11 @@ export default class Keploy {
     const testCases = [];
 
     while (true) {
-      const requestUrl = `regression/testcase?app=${app}&offset=${offset}&limit=${limit}`;
+      const requestUrl = "regression/testcase";
       const request = new Request();
       this.setKey(request);
       const response = await this.client.makeHttpRequest(
-        request.get(requestUrl)
+        request.get(requestUrl, { app, offset, limit })
       );
 
       testCases.push(response);
