@@ -68,25 +68,25 @@ export default class Keploy {
   }
 
   async get(id: ID) {
-    const requestUrl = "regression/testcase";
+    const requestUrl = `regression/testcase/${id}`;
     const request = new Request();
     request.setHttpHeader("key", this.serverConfig.licenseKey);
 
-    return this.client.makeHttpRequest(request.get(requestUrl, id));
+    return this.client.makeHttpRequest(request.get(requestUrl));
   }
 
   private start(total: number) {
     const app = this.appConfig.name;
     const requestUrl = "regression/start";
     return this.client.makeHttpRequest(
-      new Request().get(requestUrl, undefined, { app, total })
+      new Request().get(requestUrl, { app, total })
     );
   }
 
   private end(id: ID, status: boolean) {
     const requestUrl = "regression/end";
     return this.client.makeHttpRequest(
-      new Request().get(requestUrl, undefined, { status, id })
+      new Request().get(requestUrl, { status, id })
     );
   }
 
@@ -126,7 +126,7 @@ export default class Keploy {
       const request = new Request();
       this.setKey(request);
       const response = await this.client.makeHttpRequest(
-        request.get(requestUrl, undefined, { app, offset, limit })
+        request.get(requestUrl, { app, offset, limit })
       );
 
       testCases.push(response);

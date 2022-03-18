@@ -15,11 +15,10 @@ export class Request {
 
   get(
     requestUrl: string,
-    path: string = "",
     searchParams?: Record<string, string | number | boolean | undefined>
   ) {
     this.options = {
-      url: requestUrl + `/${path}`,
+      url: requestUrl,
       method: "GET",
       headers: this.headers,
       responseType: "json",
