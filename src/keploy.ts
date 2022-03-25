@@ -1,4 +1,5 @@
 import HttpClient, { Request } from "./client";
+import { transformToSnakeCase } from "./util/util";
 
 type AppConfigFilter = {
   urlRegex?: string;
@@ -26,10 +27,10 @@ type TestCase = unknown;
 
 type TestCaseRequest = {
   captured: number;
-  app_id: string;
+  appId: string;
   uri: string;
-  http_req: object;
-  http_res: object;
+  httpReq: object;
+  httpRes: object;
 };
 
 export default class Keploy {
@@ -107,7 +108,10 @@ export default class Keploy {
     request.setHttpHeader("Content-Type", "application/json");
 
     return this.client.makeHttpRequest(
-      request.post("regression/testcase", JSON.stringify(tcs))
+      request.post(
+        "regression/testcase",
+        JSON.stringify(transformToSnakeCase(tcs))
+      )
     );
   }
 
