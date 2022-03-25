@@ -1,5 +1,5 @@
 import HttpClient, { Request } from "./client";
-import { transformToSnakeCase } from "./util/util";
+import { transformToSnakeCase } from "./util";
 
 type AppConfigFilter = {
   urlRegex?: string;
