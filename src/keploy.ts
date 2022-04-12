@@ -1,5 +1,6 @@
 import HttpClient, { Request } from "./client";
 import { transformToSnakeCase } from "./util";
+import {OutgoingHttpHeaders} from "http"
 
 type AppConfigFilter = {
   urlRegex?: string;
@@ -21,7 +22,11 @@ type ServerConfig = {
 
 type ID = string;
 
-type HttpResponse = unknown;
+export type HttpResponse = {
+  statusCode: number,
+  headers: OutgoingHttpHeaders,
+  body: any[]
+};
 
 type TestCase = unknown;
 
