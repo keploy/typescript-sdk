@@ -11,6 +11,7 @@ export class Request {
 
   setHttpHeader(key: string, value: string) {
     this.headers[key] = value;
+    return this;
   }
 
   get(requestUrl: string) {
@@ -36,6 +37,14 @@ export class Request {
     return this;
   }
 
+  create(requestMethod: "get" | "post", requestUrl: string, body: string) {
+    if (requestMethod === "get") {
+      return this.get(requestUrl);
+    } else {
+      return this.post(requestUrl, body);
+    }
+  }
+
   raw() {
     return this.options;
   }
@@ -48,8 +57,8 @@ export default class HttpClient {
     this.baseUrl = baseUrl;
   }
 
-  async makeHttpRequest(request: Request) {
+  async makeHttpRequest<T>(request: Request): Promise<T> {
     const options = { ...request.raw(), prefixUrl: this.baseUrl };
-    return http(options).buffer();
+    return http(options).json();
   }
 }
