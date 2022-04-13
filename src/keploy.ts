@@ -22,10 +22,10 @@ type ServerConfig = {
 
 type ID = string;
 
-export type HttpResponse = {
+type HttpResponse = {
   statusCode: number,
   headers: OutgoingHttpHeaders,
-  body: any[]
+  body: object[]
 };
 
 type TestCase = unknown;
