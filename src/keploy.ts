@@ -1,4 +1,5 @@
 import HttpClient, { Request } from "./client";
+import { transformToSnakeCase } from "./util";
 
 type AppConfigFilter = {
   urlRegex?: string;
@@ -31,10 +32,10 @@ type TestCase = {
 
 type TestCaseRequest = {
   captured: number;
-  app_id: string;
+  appId: string;
   uri: string;
-  http_req: object;
-  http_res: object;
+  httpReq: object;
+  httpRes: object;
 };
 
 export default class Keploy {
@@ -90,15 +91,17 @@ export default class Keploy {
 
   private start(total: number): Promise<ID> {
     const app = this.appConfig.name;
-    const requestUrl = `regression/start?app=${app}&total=${total}`;
-    return this.client
-      .makeHttpRequest<ID>(new Request().get(requestUrl))
-      .then((x) => x.toString());
+    const requestUrl = "regression/start";
+    return this.client.makeHttpRequest(
+      new Request().get(requestUrl, { app, total })
+    );
   }
 
   private end(id: ID, status: boolean) {
-    const requestUrl = `regression/end?status=${status}&id=${id}`;
-    return this.client.makeHttpRequest(new Request().get(requestUrl));
+    const requestUrl = "regression/end";
+    return this.client.makeHttpRequest(
+      new Request().get(requestUrl, { status, id })
+    );
   }
 
   private simulate(tc: TestCase) {
@@ -127,7 +130,10 @@ export default class Keploy {
     request.setHttpHeader("Content-Type", "application/json");
 
     return this.client.makeHttpRequest(
-      request.post("regression/testcase", JSON.stringify(tcs))
+      request.post(
+        "regression/testcase",
+        JSON.stringify(transformToSnakeCase(tcs))
+      )
     );
   }
 
@@ -142,11 +148,11 @@ export default class Keploy {
     const testCases = [];
 
     while (true) {
-      const requestUrl = `regression/testcase?app=${app}&offset=${offset}&limit=${limit}`;
+      const requestUrl = "regression/testcase";
       const request = new Request();
       this.setKey(request);
       const response = await this.client.makeHttpRequest<TestCase[]>(
-        request.get(requestUrl)
+        request.get(requestUrl, { app, offset, limit })
       );
 
       testCases.push(...response);
