@@ -1,6 +1,6 @@
 import HttpClient, { Request } from "./client";
 import { transformToSnakeCase } from "./util";
-import {OutgoingHttpHeaders} from "http"
+import { OutgoingHttpHeaders } from "http";
 
 type AppConfigFilter = {
   urlRegex?: string;
@@ -23,9 +23,9 @@ type ServerConfig = {
 type ID = string;
 
 type HttpResponse = {
-  statusCode: number,
-  headers: OutgoingHttpHeaders,
-  body: object[]
+  statusCode: number;
+  headers: OutgoingHttpHeaders;
+  body: object[];
 };
 
 type TestCase = unknown;
@@ -41,7 +41,7 @@ type TestCaseRequest = {
 export default class Keploy {
   appConfig: AppConfig;
   serverConfig: ServerConfig;
-  responses: Record<ID, unknown>;
+  responses: Record<ID, object>;
   dependencies: Record<ID, unknown>;
   client: HttpClient;
 
