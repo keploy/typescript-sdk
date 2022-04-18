@@ -23,7 +23,12 @@ type ID = string;
 
 type HttpResponse = unknown;
 
-type TestCase = unknown;
+type TestCase = {
+  id: ID;
+  method: "get" | "post";
+  url: string;
+  body: string;
+};
 
 type TestCaseRequest = {
   captured: number;
@@ -64,8 +69,16 @@ export default class Keploy {
     return this.put(req);
   }
 
-  test() {
-    throw new Error("Not implemented");
+  async test() {
+    const testCases = await this.fetch();
+    const totalTests = testCases.length;
+    const testId = await this.start(totalTests);
+    let passed = true;
+    testCases.forEach((testCase) => {
+      passed = this.check(testId, testCase);
+    });
+    this.end(testId, passed);
+    return passed;
   }
 
   async get(id: ID) {
@@ -76,7 +89,7 @@ export default class Keploy {
     return this.client.makeHttpRequest(request.get(requestUrl));
   }
 
-  private start(total: number) {
+  private start(total: number): Promise<ID> {
     const app = this.appConfig.name;
     const requestUrl = "regression/start";
     return this.client.makeHttpRequest(
@@ -92,6 +105,15 @@ export default class Keploy {
   }
 
   private simulate(tc: TestCase) {
+    const requestUrl = `http://${this.appConfig.host}:${this.appConfig.port}${tc.url}`;
+    return this.client.makeHttpRequest(
+      new Request()
+        .setHttpHeader("KEPLOY_TEST_ID", tc.id)
+        .create(tc.method, requestUrl, tc.body)
+    );
+  }
+
+  private check(runId: ID, testcase: TestCase): boolean {
     throw new Error("Not implemented");
   }
 
@@ -129,11 +151,11 @@ export default class Keploy {
       const requestUrl = "regression/testcase";
       const request = new Request();
       this.setKey(request);
-      const response = await this.client.makeHttpRequest(
+      const response = await this.client.makeHttpRequest<TestCase[]>(
         request.get(requestUrl, { app, offset, limit })
       );
 
-      testCases.push(response);
+      testCases.push(...response);
 
       if (response.length == 0) {
         break;
