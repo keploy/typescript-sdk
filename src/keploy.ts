@@ -111,7 +111,7 @@ export default class Keploy {
 
   private simulate(tc: TestCase) {
     const requestUrl = `http://${this.appConfig.host}:${this.appConfig.port}${tc.url}`;
-    return this.client.makeHttpRequest(
+    return this.client.makeHttpRequest<object>(
       new Request()
         .setHttpHeader("KEPLOY_TEST_ID", tc.id)
         .create(tc.method, requestUrl, tc.body)
@@ -142,8 +142,27 @@ export default class Keploy {
     );
   }
 
-  private denoise(id: string, tcs: TestCaseRequest) {
-    throw new Error("Not implemented");
+  private async denoise(id: string, tcs: TestCaseRequest) {
+    const test = await this.simulate({
+      id: id,
+      method: "get",
+      url: tcs.uri,
+      body: JSON.stringify(tcs.httpReq),
+    });
+
+    const testRequest = {
+      id,
+      appId: this.appConfig.name,
+      httpRes: test,
+    };
+
+    const requestUrl = "regression/denoise";
+    const request = new Request();
+    this.setKey(request);
+    request.setHttpHeader("Content-Type", "application/json");
+    return this.client.makeHttpRequest(
+      request.post(requestUrl, JSON.stringify(testRequest))
+    );
   }
 
   async fetch(): Promise<TestCase[]> {
