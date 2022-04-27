@@ -138,7 +138,9 @@ export function normalizeRequestArgs(
 function hijackHttpModule() {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const httpModule = require("http");
+  //@ts-ignore
   fill(httpModule, "get", wrappedRequestMethodFactory);
+  //@ts-ignore
   fill(httpModule, "request", wrappedRequestMethodFactory);
 }
 
