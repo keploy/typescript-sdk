@@ -1,5 +1,5 @@
 import express from "express";
-import Keploy from "../src/keploy";
+import Keploy from "../../src/keploy";
 import { Request, Response, NextFunction } from "express";
 
 type Dependency = {

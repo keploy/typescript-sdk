@@ -1,5 +1,6 @@
 // @ts-ignore
 import Hook from "require-in-the-middle";
+import expressMiddleware from "./middleware";
 
 // @ts-ignore
 Hook(["express"], function (exports) {
@@ -8,12 +9,8 @@ Hook(["express"], function (exports) {
   function keployWrappedExpress() {
     const keployApp = expressApp();
 
-    // @ts-ignore
-    keployApp.use("*", (req, res, next) => {
-      console.log(req.path);
-      next();
-    });
-    keployApp.hijacked = true;
+    keployApp.use(expressMiddleware);
+    keployApp.appliedMiddleware = true;
 
     return keployApp;
   }
