@@ -56,7 +56,6 @@ export default function middleware(
       return;
     }
 
-
     const id = req.get("KEPLOY_TEST_ID");
     // test mode
     if (id != undefined && id != "") {
@@ -75,8 +74,8 @@ export default function middleware(
     // record mode
     const ctx = new Context("record");
     Context.set(req, ctx);
-    const data = captureResp(res, next); 
-  
+    const data = captureResp(res, next);
+
     keploy.capture({
       captured: Date.now(),
       appId: keploy.appConfig.name,
@@ -96,7 +95,6 @@ export default function middleware(
     });
   };
 }
-
 
 function captureResp(res: express.Response, next: express.NextFunction) {
   // const oldWrite = res.write
