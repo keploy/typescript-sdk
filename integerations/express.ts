@@ -97,6 +97,7 @@ export default function middleware(
   };
 }
 
+
 function captureResp(res: express.Response, next: express.NextFunction) {
   // const oldWrite = res.write
   // const oldEnd = res.end;
