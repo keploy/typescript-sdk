@@ -55,6 +55,7 @@ export default function middleware(
       next();
       return;
     }
+    console.log("local sdk")
 
     const id = req.get("KEPLOY_TEST_ID");
     // test mode
@@ -74,8 +75,8 @@ export default function middleware(
     // record mode
     const ctx = new Context("record");
     Context.set(req, ctx);
-    const data = captureResp(res, next);
-
+    const data = captureResp(res, next); 
+    const header = req.headers
     keploy.capture({
       captured: Date.now(),
       appId: keploy.appConfig.name,
@@ -84,8 +85,8 @@ export default function middleware(
         Method: req.method,
         URL: req.url,
         URLParams: req.params,
-        Header: req.headers,
-        Body: req.body,
+        Header: req.headers.values,
+        Body: String(req.body),
       },
       httpRes: {
         statusCode: res.statusCode,
