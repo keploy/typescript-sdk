@@ -40,7 +40,7 @@ type TestCaseRequest = {
   appId: string;
   uri: string;
   httpReq: object;
-  httpRes: object;
+  httpResp: object;
 };
 
 export default class Keploy {
