@@ -1,6 +1,7 @@
 import express from "express";
 import Keploy from "../../src/keploy";
 import { Request, Response, NextFunction } from "express";
+import http = require("http");
 
 type Dependency = {
   name: string;
@@ -44,9 +45,10 @@ class Context {
 
 // middleware
 export default function middleware(
-  keploy: Keploy
+  keployFn: () => Keploy
 ): (req: Request, res: Response, next: NextFunction) => void {
   return (req: Request, res: Response, next: NextFunction) => {
+    const keploy = keployFn();
     if (
       (process.env.KEPLOY_MODE != undefined &&
         process.env.KEPLOY_MODE == "off") ||
@@ -75,6 +77,19 @@ export default function middleware(
     const ctx = new Context("record");
     Context.set(req, ctx);
     const data = captureResp(res, next);
+    //const a = new Map(Object.entries(req.headers));
+    // req.headers
+    const map: { [key: string]: string[] } = {};
+    for (const key in req.headers) {
+      let val = new Array<string>();
+      if (typeof req.headers[key] === typeof "s") {
+        val.push(req.headers[key] as string);
+      } else if (typeof req.headers[key] === typeof ["s"]) {
+        val = req.headers[key] as string[];
+      }
+      map[key] = val;
+    }
+    console.log(map);
 
     // req.headers
     const reqHeader: { [key: string]: string[] } = {};
@@ -117,6 +132,7 @@ export default function middleware(
         body: String(data),
       },
     });
+    console.log(map);
   };
 }
 

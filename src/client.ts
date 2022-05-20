@@ -1,4 +1,4 @@
-import http, { Headers, OptionsOfJSONResponseBody } from "got";
+import http, { Headers, OptionsOfJSONResponseBody, Response } from "got";
 
 export class Request {
   headers: Headers;
@@ -62,7 +62,14 @@ export default class HttpClient {
   }
 
   async makeHttpRequest<T>(request: Request): Promise<T> {
+    console.log("makeHttpRequest req: ", request);
     const options = { ...request.raw(), prefixUrl: this.baseUrl };
     return http(options).json();
+  }
+
+  async makeHttpRequestRaw<T>(request: Request): Promise<Response<T>> {
+    console.log("makeHttpRequestRaw req: ", request);
+    const options = { ...request.raw(), prefixUrl: this.baseUrl };
+    return http(options);
   }
 }
