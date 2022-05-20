@@ -58,6 +58,12 @@ export default class Keploy {
     this.client = new HttpClient(this.serverConfig.url);
   }
 
+  async create() {
+    if (process.env.KEPLOY_MODE == "test") {
+      await this.test();
+    }
+  }
+
   getDependencies(id: ID) {
     this.dependencies[id];
   }
