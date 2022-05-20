@@ -41,7 +41,7 @@ type TestCaseRequest = {
   appId: string;
   uri: string;
   httpReq: object;
-  httpRes: object;
+  httpResp: object;
 };
 
 export default class Keploy {
@@ -80,9 +80,9 @@ export default class Keploy {
     const totalTests = testCases.length;
     const testId = await this.start(totalTests);
     let passed = true;
-    testCases.forEach((testCase) => {
-      passed = this.check(testId, testCase);
-    });
+    for (const testCase of testCases) {
+      passed = await this.check(testId, testCase);
+    }
     this.end(testId, passed);
     return passed;
   }
@@ -112,30 +112,34 @@ export default class Keploy {
 
   private simulate(tc: TestCase) {
     const requestUrl = `http://${this.appConfig.host}:${this.appConfig.port}${tc.url}`;
-    return this.client.makeHttpRequest<object>(
+    return this.client.makeHttpRequestRaw<object>(
       new Request()
         .setHttpHeader("KEPLOY_TEST_ID", tc.id)
         .create(tc.method, requestUrl, tc.body)
     );
   }
 
-  private async check(runId: ID, testcase: TestCase): boolean {
-    const resp = this.simulate(testcase);
+  private async check(runId: ID, testcase: TestCase) {
+    const resp = await this.simulate(testcase);
     const testreq = {
       id: testcase.id,
       AppID: this.appConfig.name,
       runId,
-      httpRes: resp,
+      httpRes: {
+        status_code: resp.statusCode,
+        headers: resp.headers,
+        body: resp.rawBody.toString(),
+      },
     };
     const requestUrl = "/regression/test";
     const request = new Request();
     this.setKey(request);
     request.setHttpHeader("Content-Type", "application/json");
-    const resp2 = await this.client.makeHttpRequest<object>(
+    const resp2 = await this.client.makeHttpRequest<{ pass: boolean }>(
       request.post(requestUrl, JSON.stringify(testreq))
     );
     //const a = request.post(requestUrl,JSON.stringify(testreq));
-    return resp2.pass as boolean;
+    return resp2.pass;
   }
 
   private async put(tcs: TestCaseRequest) {
