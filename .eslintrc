@@ -11,6 +11,9 @@
     "prettier"
   ],
   "plugins": ["prettier", "@typescript-eslint", "import"],
+  "rules": {
+    "@typescript-eslint/ban-ts-comment": "off"
+  },
   "env": {
     "es6": true,
     "node": true
