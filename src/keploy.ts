@@ -1,6 +1,7 @@
 import HttpClient, { Request } from "./client";
 import { transformToSnakeCase } from "./util";
 import { OutgoingHttpHeaders } from "http";
+import { request } from "express";
 
 type AppConfigFilter = {
   urlRegex?: string;
@@ -118,8 +119,23 @@ export default class Keploy {
     );
   }
 
-  private check(runId: ID, testcase: TestCase): boolean {
-    throw new Error("Not implemented");
+  private async check(runId: ID, testcase: TestCase): boolean {
+    const resp = this.simulate(testcase);
+    const testreq = {
+      id: testcase.id,
+      AppID: this.appConfig.name,
+      runId,
+      httpRes: resp,
+    };
+    const requestUrl = "/regression/test";
+    const request = new Request();
+    this.setKey(request);
+    request.setHttpHeader("Content-Type", "application/json");
+    const resp2 = await this.client.makeHttpRequest<object>(
+      request.post(requestUrl, JSON.stringify(testreq))
+    );
+    //const a = request.post(requestUrl,JSON.stringify(testreq));
+    return resp2.pass as boolean;
   }
 
   private async put(tcs: TestCaseRequest) {
