@@ -1,7 +1,16 @@
-import express, { request } from "express";
+//import fastify from "fastify";
+import plugin from "@fastify/express";
 import Keploy from "../src/keploy";
-import { Request, Response, NextFunction } from "express";
-import http = require("http");
+import fastify, { FastifyRequest, FastifyReply } from "fastify";
+import { P } from "pino";
+import * as core from "express-serve-static-core";
+import { NextFunction } from "express";
+const server = fastify();
+
+(async () => {
+  await server.register(plugin);
+})();
+server.use(require("cors")());
 
 type Dependency = {
   name: string;
@@ -17,8 +26,7 @@ type KeployContext = {
 };
 
 class Context {
-  static _bindings = new WeakMap<Request, Context>();
-
+  static _bindings = new WeakMap<FastifyRequest, Context>();
   public keployContext: KeployContext;
 
   constructor(mode?: string, testId?: string, deps?: Dependency[]) {
@@ -28,40 +36,35 @@ class Context {
       deps,
     };
   }
-  // bind sets an empty Context for req as a key in _bindings.
-  static bind(req: Request): void {
+
+  static bind(req: FastifyRequest): void {
     const ctx = new Context();
     Context._bindings.set(req, ctx);
   }
-  // get returns the value of Context stored for the req key. It returns null if req key is not present
-  static get(req: Request): Context | null {
+  static get(req: FastifyRequest): Context | null {
     return Context._bindings.get(req) || null;
   }
-  // set is used to make a key-value pair for the  req and ctx
-  static set(req: Request, ctx: Context): void {
+
+  static set(req: FastifyRequest, ctx: Context): void {
     Context._bindings.set(req, ctx);
   }
 }
 
-// middleware
 export default function middleware(
   keploy: Keploy
-): (req: Request, res: Response, next: NextFunction) => void {
-  return (req: Request, res: Response, next: NextFunction) => {
+): (req: FastifyRequest, res: FastifyReply, next: NextFunction) => void {
+  return (req: FastifyRequest, res: FastifyReply, next: NextFunction) => {
     if (
       (process.env.KEPLOY_MODE != undefined &&
         process.env.KEPLOY_MODE == "off") ||
       keploy == undefined
     ) {
-      next();
+      server.use(next());
       return;
     }
-
     const id = req.get("KEPLOY_TEST_ID");
-    // test mode
     if (id != undefined && id != "") {
       const ctx = new Context("test", id, []);
-      Context.set(req, ctx);
       const data = captureResp(res, next);
       const resp = {
         statusCode: res.statusCode,
@@ -72,12 +75,10 @@ export default function middleware(
       return;
     }
 
-    // record mode
     const ctx = new Context("record");
     Context.set(req, ctx);
     const data = captureResp(res, next);
-    //const a = new Map(Object.entries(req.headers));
-    // req.headers
+
     const map: { [key: string]: string[] } = {};
     for (const key in req.headers) {
       let val = new Array<string>();
@@ -125,18 +126,4 @@ function captureResp(res: express.Response, next: express.NextFunction) {
   };
   next();
   return chunks;
-
-  // res.write = (chunk:any, cb?: ((error: Error | null | undefined) => void) | undefined) => {
-  // chunks.push(chunk);
-  // return oldWrite.apply(res, [chunk, cb]);
-  // };
-
-  // res.end = (chunk, ...args) => {
-  //     if (chunk) {
-  //         chunks.push(chunk);
-  //     }
-  //     const body = Buffer.concat(chunks).toString('utf8');
-  //     console.log(req.path, body);
-  //     return oldEnd.apply(res, [chunk, ...args]);
-  // };
 }
