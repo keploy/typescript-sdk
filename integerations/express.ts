@@ -1,4 +1,4 @@
-import express from "express";
+import express, { json } from "express";
 import Keploy from "../src/keploy";
 import { Request, Response, NextFunction } from "express";
 
@@ -76,29 +76,51 @@ export default function middleware(
     Context.set(req, ctx);
     const data = captureResp(res, next);
 
+    // req.headers
+    const reqHeader: { [key: string]: string[] } = {};
+    for (const key in req.headers) {
+      let val = new Array<string>();
+      if (typeof req.headers[key] === typeof "s") {
+        val.push(req.headers[key] as string);
+      } else if (typeof req.headers[key] === typeof ["s"]) {
+        val = req.headers[key] as string[];
+      }
+      reqHeader[key] = val;
+    }
+    // response headers
+    const respHeader: { [key: string]: string[] } = {};
+    const header = res.getHeaders();
+    for (const key in header) {
+      let val = new Array<string>();
+      if (typeof header[key] === typeof "s") {
+        val.push(header[key] as string);
+      } else if (typeof header[key] === typeof ["s"]) {
+        val = header[key] as string[];
+      }
+      respHeader[key] = val;
+    }
+
     keploy.capture({
       captured: Date.now(),
       appId: keploy.appConfig.name,
       uri: req.url,
       httpReq: {
-        Method: req.method,
-        URL: req.url,
-        URLParams: req.params,
-        Header: req.headers,
-        Body: req.body,
+        method: req.method,
+        url: req.url,
+        url_params: req.params,
+        header: reqHeader,
+        body: JSON.stringify(req.body),
       },
-      httpRes: {
-        statusCode: res.statusCode,
-        headers: res.getHeaders(),
-        body: data,
+      httpResp: {
+        status_code: res.statusCode,
+        header: respHeader,
+        body: String(data),
       },
     });
   };
 }
 
 function captureResp(res: express.Response, next: express.NextFunction) {
-  // const oldWrite = res.write
-  // const oldEnd = res.end;
   const oldSend = res.send;
 
   const chunks = [] as object[];
@@ -109,18 +131,4 @@ function captureResp(res: express.Response, next: express.NextFunction) {
   };
   next();
   return chunks;
-
-  // res.write = (chunk:any, cb?: ((error: Error | null | undefined) => void) | undefined) => {
-  // chunks.push(chunk);
-  // return oldWrite.apply(res, [chunk, cb]);
-  // };
-
-  // res.end = (chunk, ...args) => {
-  //     if (chunk) {
-  //         chunks.push(chunk);
-  //     }
-  //     const body = Buffer.concat(chunks).toString('utf8');
-  //     console.log(req.path, body);
-  //     return oldEnd.apply(res, [chunk, ...args]);
-  // };
 }
