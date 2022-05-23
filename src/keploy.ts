@@ -118,10 +118,12 @@ export default class Keploy {
   }
 
   private simulate(tc: TestCase) {
+    // @ts-ignore
     const requestUrl = `http://${this.appConfig.host}:${this.appConfig.port}${tc.http_req.url}`;
     return this.client.makeHttpRequestRaw<object>(
       new Request()
         .setHttpHeader("KEPLOY_TEST_ID", tc.id)
+        // @ts-ignore
         .create(tc.http_req.method, requestUrl, tc.body)
     );
   }

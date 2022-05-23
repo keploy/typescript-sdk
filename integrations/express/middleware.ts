@@ -44,11 +44,8 @@ class Context {
 }
 
 // middleware
-export default function middleware(
-  keployFn: () => Keploy
-): (req: Request, res: Response, next: NextFunction) => void {
+export default function middleware(keploy: Keploy) {
   return (req: Request, res: Response, next: NextFunction) => {
-    const keploy = keployFn();
     if (
       (process.env.KEPLOY_MODE != undefined &&
         process.env.KEPLOY_MODE == "off") ||
@@ -115,24 +112,31 @@ export default function middleware(
       respHeader[key] = val;
     }
 
-    keploy.capture({
-      captured: Date.now(),
-      appId: keploy.appConfig.name,
-      uri: req.url,
-      httpReq: {
-        method: req.method,
-        url: req.url,
-        url_params: req.params,
-        header: reqHeader,
-        body: JSON.stringify(req.body),
-      },
-      httpResp: {
-        status_code: res.statusCode,
-        header: respHeader,
-        body: String(data),
-      },
-    });
-    console.log(map);
+    keploy
+      .create()
+      .then((k) =>
+        k.capture({
+          captured: Date.now(),
+          appId: keploy.appConfig.name,
+          uri: req.url,
+          httpReq: {
+            method: req.method,
+            url: req.url,
+            url_params: req.params,
+            header: reqHeader,
+            body: JSON.stringify(req.body),
+          },
+          httpResp: {
+            status_code: res.statusCode,
+            header: respHeader,
+            body: String(data),
+          },
+        })
+      )
+      .then(() => {
+        console.log(map);
+        next();
+      });
   };
 }
 
