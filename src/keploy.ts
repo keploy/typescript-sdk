@@ -1,7 +1,7 @@
 import HttpClient, { Request } from "./client";
 import { transformToSnakeCase } from "./util";
 import { OutgoingHttpHeaders } from "http";
-import { request } from "express";
+import { getRequestHeader } from "../integrations/express/middleware";
 
 type AppConfigFilter = {
   urlRegex?: string;
@@ -31,9 +31,8 @@ type HttpResponse = {
 
 type TestCase = {
   id: ID;
-  method: "get" | "post";
-  url: string;
-  body: string;
+  uri: string;
+  http_req: object;
 };
 
 type TestCaseRequest = {
@@ -60,7 +59,9 @@ export default class Keploy {
   }
 
   async create() {
+    // const keploy = new Keploy(app, server);
     if (process.env.KEPLOY_MODE == "test") {
+      // setTimeout(keploy.test, 5000);
       await this.test();
     }
     return this;
@@ -102,15 +103,16 @@ export default class Keploy {
     return this.client.makeHttpRequest(request.get(requestUrl));
   }
 
-  private start(total: number): Promise<ID> {
+  private async start(total: number) {
     const app = this.appConfig.name;
     const requestUrl = "regression/start";
-    return this.client.makeHttpRequest(
+    const resp: { [key: string]: string } = await this.client.makeHttpRequest(
       new Request().get(requestUrl, { app, total })
     );
+    return resp.id;
   }
 
-  private end(id: ID, status: boolean) {
+  private end(id: string, status: boolean) {
     const requestUrl = "regression/end";
     return this.client.makeHttpRequest(
       new Request().get(requestUrl, { status, id })
@@ -118,36 +120,40 @@ export default class Keploy {
   }
 
   private simulate(tc: TestCase) {
-    const requestUrl = `http://${this.appConfig.host}:${this.appConfig.port}${tc.http_req.url}`;
-    return this.client.makeHttpRequestRaw<object>(
+    const client = new HttpClient(
+      `http://${this.appConfig.host}:${this.appConfig.port}`
+    );
+    //@ts-ignore
+    const requestUrl = `${tc.http_req.url.substr(1)}`;
+    return client.makeHttpRequestRaw<object>(
       new Request()
         .setHttpHeader("KEPLOY_TEST_ID", tc.id)
-        .create(tc.http_req.method, requestUrl, tc.body)
+        //@ts-ignore
+        .create(tc.http_req.method, requestUrl, tc.http_req.body)
     );
   }
 
-  private async check(runId: ID, testcase: TestCase) {
+  private async check(runId: string, testcase: TestCase) {
     const resp = await this.simulate(testcase);
-    console.log("after simulate: ", resp);
+    const header = getRequestHeader(resp.headers);
     const testreq = {
       id: testcase.id,
-      AppID: this.appConfig.name,
-      runId,
-      httpRes: {
+      appId: this.appConfig.name,
+      runId: runId,
+      resp: {
         status_code: resp.statusCode,
-        headers: resp.headers,
+        header: header,
         body: resp.rawBody.toString(),
       },
     };
-    const requestUrl = "/regression/test";
+    const requestUrl = "regression/test";
     const request = new Request();
     this.setKey(request);
     request.setHttpHeader("Content-Type", "application/json");
     const resp2 = await this.client.makeHttpRequest<{ pass: boolean }>(
-      request.post(requestUrl, JSON.stringify(testreq))
+      request.post(requestUrl, JSON.stringify(transformToSnakeCase(testreq)))
     );
     //const a = request.post(requestUrl,JSON.stringify(testreq));
-    console.log("after post to keploy server: ", resp2);
     return resp2.pass;
   }
 
@@ -163,26 +169,33 @@ export default class Keploy {
     this.setKey(request);
     request.setHttpHeader("Content-Type", "application/json");
 
-    return this.client.makeHttpRequest(
+    const resp = await this.client.makeHttpRequest<{ id: string }>(
       request.post(
         "regression/testcase",
         JSON.stringify(transformToSnakeCase(tcs))
       )
     );
+    if (resp.id === "") {
+      return;
+    }
+    this.denoise(resp.id, tcs);
   }
 
   private async denoise(id: string, tcs: TestCaseRequest) {
-    const test = await this.simulate({
+    const resp = await this.simulate({
       id: id,
-      method: "get",
-      url: tcs.uri,
-      body: JSON.stringify(tcs.httpReq),
+      uri: tcs.uri,
+      http_req: tcs.httpReq,
     });
-
+    const header = getRequestHeader(resp.headers);
     const testRequest = {
       id,
       appId: this.appConfig.name,
-      httpRes: test,
+      resp: {
+        status_code: resp.statusCode,
+        header: header,
+        body: resp.rawBody.toString(),
+      },
     };
 
     const requestUrl = "regression/denoise";
@@ -190,7 +203,10 @@ export default class Keploy {
     this.setKey(request);
     request.setHttpHeader("Content-Type", "application/json");
     return this.client.makeHttpRequest(
-      request.post(requestUrl, JSON.stringify(testRequest))
+      request.post(
+        requestUrl,
+        JSON.stringify(transformToSnakeCase(testRequest))
+      )
     );
   }
 

@@ -43,12 +43,39 @@ class Context {
   }
 }
 
+export function getRequestHeader(headers: http.IncomingHttpHeaders) {
+  const result: { [key: string]: string[] } = {};
+  for (const key in headers) {
+    let val = new Array<string>();
+    if (typeof headers[key] === typeof "s") {
+      val.push(headers[key] as string);
+    } else if (typeof headers[key] === typeof ["s"]) {
+      val = headers[key] as string[];
+    }
+    result[key] = val;
+  }
+  return result;
+}
+
+export function getResponseHeader(header: http.OutgoingHttpHeaders) {
+  const result: { [key: string]: string[] } = {};
+  for (const key in header) {
+    let val = new Array<string>();
+    if (typeof header[key] === typeof "s" || typeof header[key] === typeof 1) {
+      val.push(header[key] as string);
+    } else if (typeof header[key] === typeof ["s"]) {
+      val = header[key] as string[];
+    }
+    result[key] = val;
+  }
+  return result;
+}
+
 // middleware
 export default function middleware(
-  keployFn: () => Keploy
+  keploy: Keploy
 ): (req: Request, res: Response, next: NextFunction) => void {
   return (req: Request, res: Response, next: NextFunction) => {
-    const keploy = keployFn();
     if (
       (process.env.KEPLOY_MODE != undefined &&
         process.env.KEPLOY_MODE == "off") ||
@@ -63,11 +90,11 @@ export default function middleware(
     if (id != undefined && id != "") {
       const ctx = new Context("test", id, []);
       Context.set(req, ctx);
-      const data = captureResp(res, next);
+      const response = captureResp(res, next);
       const resp = {
-        statusCode: res.statusCode,
+        statusCode: response.code,
         headers: res.getHeaders(),
-        body: data,
+        body: response.body,
       };
       keploy.putResp(id, resp);
       return;
@@ -76,44 +103,17 @@ export default function middleware(
     // record mode
     const ctx = new Context("record");
     Context.set(req, ctx);
-    const data = captureResp(res, next);
-    //const a = new Map(Object.entries(req.headers));
-    // req.headers
-    const map: { [key: string]: string[] } = {};
-    for (const key in req.headers) {
-      let val = new Array<string>();
-      if (typeof req.headers[key] === typeof "s") {
-        val.push(req.headers[key] as string);
-      } else if (typeof req.headers[key] === typeof ["s"]) {
-        val = req.headers[key] as string[];
-      }
-      map[key] = val;
-    }
-    console.log(map);
+    const response = captureResp(res, next);
 
     // req.headers
-    const reqHeader: { [key: string]: string[] } = {};
-    for (const key in req.headers) {
-      let val = new Array<string>();
-      if (typeof req.headers[key] === typeof "s") {
-        val.push(req.headers[key] as string);
-      } else if (typeof req.headers[key] === typeof ["s"]) {
-        val = req.headers[key] as string[];
-      }
-      reqHeader[key] = val;
-    }
+    const reqHeader: { [key: string]: string[] } = getRequestHeader(
+      req.headers
+    );
+
     // response headers
-    const respHeader: { [key: string]: string[] } = {};
-    const header = res.getHeaders();
-    for (const key in header) {
-      let val = new Array<string>();
-      if (typeof header[key] === typeof "s") {
-        val.push(header[key] as string);
-      } else if (typeof header[key] === typeof ["s"]) {
-        val = header[key] as string[];
-      }
-      respHeader[key] = val;
-    }
+    const respHeader: { [key: string]: string[] } = getResponseHeader(
+      res.getHeaders()
+    );
 
     keploy.capture({
       captured: Date.now(),
@@ -127,12 +127,11 @@ export default function middleware(
         body: JSON.stringify(req.body),
       },
       httpResp: {
-        status_code: res.statusCode,
+        status_code: response.code,
         header: respHeader,
-        body: String(data),
+        body: String(response.body),
       },
     });
-    console.log(map);
   };
 }
 
@@ -145,6 +144,14 @@ function captureResp(res: express.Response, next: express.NextFunction) {
     chunks.push(chunk);
     return oldSend.apply(res, [chunk]);
   };
+
+  const status = res.status;
+  let status_code: number = res.statusCode;
+  res.status = (code) => {
+    status_code = code;
+    return status.apply(res, [code]);
+  };
+
   next();
-  return chunks;
+  return { code: status_code, body: chunks };
 }
