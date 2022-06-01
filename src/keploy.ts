@@ -105,6 +105,13 @@ export default class Keploy {
     return { name, host, port, delay, timeout, filter };
   }
 
+  async create() {
+    if (process.env.KEPLOY_MODE == "test") {
+      await this.test();
+    }
+    return this;
+  }
+
   getDependencies(id: ID) {
     this.dependencies[id];
   }
