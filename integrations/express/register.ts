@@ -14,7 +14,9 @@ Hook(["express"], function (exports) {
 
     keployApp.use(expressMiddleware(keploy));
     keployApp.appliedMiddleware = true;
-    keployApp.test = keploy.create;
+    keployApp.on("listening", function () {
+      keploy.create();
+    });
 
     return keployApp;
   }
