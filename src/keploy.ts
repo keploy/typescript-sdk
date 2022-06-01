@@ -1,6 +1,7 @@
 import HttpClient, { Request } from "./client";
 import { transformToSnakeCase } from "./util";
 import { OutgoingHttpHeaders } from "http";
+import { name as packageName } from "../package.json";
 
 type AppConfigFilter = {
   urlRegex?: string;
@@ -50,12 +51,66 @@ export default class Keploy {
   dependencies: Record<ID, unknown>;
   client: HttpClient;
 
-  constructor(app: AppConfig, server: ServerConfig) {
-    this.appConfig = app;
-    this.serverConfig = server;
+  constructor(
+    app: Partial<AppConfig> = {},
+    server: Partial<ServerConfig> = {}
+  ) {
+    this.appConfig = this.validateAppConfig(app);
+    this.serverConfig = this.validateServerConfig(server);
     this.responses = {};
     this.dependencies = {};
     this.client = new HttpClient(this.serverConfig.url);
+  }
+
+  validateServerConfig({
+    url = process.env.KEPLOY_SERVER_URL || "http://localhost:8081/api",
+    licenseKey = process.env.KEPLOY_LICENSE_KEY || "",
+  }) {
+    return { url, licenseKey };
+  }
+
+  validateAppConfig({
+    name = process.env.KEPLOY_APP_NAME || packageName,
+    host = process.env.KEPLOY_APP_HOST || "localhost",
+    port = process.env.KEPLOY_APP_PORT || 8080,
+    delay = process.env.KEPLOY_APP_DELAY || 5,
+    timeout = process.env.KEPLOY_APP_TIMEOUT || 60,
+    filter = process.env.KEPLOY_APP_FILTER || {},
+  }) {
+    const errorFactory = (key: string) =>
+      new Error(`Invalid App config key: ${key}`);
+
+    port = Number(port);
+    if (Number.isNaN(port)) {
+      throw errorFactory("port");
+    }
+
+    delay = Number(delay);
+    if (Number.isNaN(delay)) {
+      throw errorFactory("delay");
+    }
+
+    timeout = Number(timeout);
+    if (Number.isNaN(timeout)) {
+      throw errorFactory("timeout");
+    }
+
+    if (typeof filter === "string") {
+      try {
+        filter = JSON.parse(filter);
+      } catch {
+        throw errorFactory("filter");
+      }
+    }
+
+    return { name, host, port, delay, timeout, filter };
+  }
+
+  async create() {
+    if (process.env.KEPLOY_MODE == "test") {
+      await this.test();
+    }
+    return this;
   }
 
   getDependencies(id: ID) {
