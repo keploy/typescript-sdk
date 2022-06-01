@@ -87,12 +87,44 @@ export default class Keploy {
     const testCases = await this.fetch();
     const totalTests = testCases.length;
     const testId = await this.start(totalTests);
-    let passed = true;
-    for (const testCase of testCases) {
-      passed = await this.check(testId, testCase);
+    console.log(
+      "starting test execution. { id: ",
+      testId,
+      " }, { total tests: ",
+      totalTests,
+      " }"
+    );
+    let pass = true;
+    for (const [i, testCase] of testCases.entries()) {
+      console.log(
+        "testing ",
+        i + 1,
+        " of ",
+        totalTests,
+        " { testcase id: ",
+        testCase.id,
+        " }"
+      );
+      const passed = await this.check(testId, testCase);
+      if (!passed) {
+        pass = false;
+      }
+      console.log(
+        "result { testcase id: ",
+        testCase.id,
+        " }, { passed: ",
+        passed,
+        " }"
+      );
     }
-    this.end(testId, passed);
-    return passed;
+    this.end(testId, pass);
+    console.log(
+      "test run completed { run id: ",
+      testId,
+      " }, passed overall: ",
+      pass
+    );
+    return pass;
   }
 
   async get(id: ID) {
