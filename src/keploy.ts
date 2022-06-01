@@ -1,6 +1,7 @@
 import HttpClient, { Request } from "./client";
 import { transformToSnakeCase } from "./util";
 import { OutgoingHttpHeaders } from "http";
+import { name as packageName } from "../package.json";
 
 type AppConfigFilter = {
   urlRegex?: string;
@@ -69,7 +70,7 @@ export default class Keploy {
   }
 
   validateAppConfig({
-    name = process.env.KEPLOY_APP_NAME || "keploy-app",
+    name = process.env.KEPLOY_APP_NAME || packageName,
     host = process.env.KEPLOY_APP_HOST || "localhost",
     port = process.env.KEPLOY_APP_PORT || 8080,
     delay = process.env.KEPLOY_APP_DELAY || 5,
