@@ -43,10 +43,18 @@ class Context {
   }
 }
 
+// got package identifies header fields to identify request and response therefore, request headers
+// should not contain header fields (like: content-length, connection)
 export function getRequestHeader(headers: http.IncomingHttpHeaders) {
   const result: { [key: string]: string[] } = {};
   for (const key in headers) {
     let val = new Array<string>();
+    if (
+      key.toLowerCase() === "content-length" ||
+      key.toLowerCase() === "connection"
+    ) {
+      continue;
+    }
     if (typeof headers[key] === typeof "s") {
       val.push(headers[key] as string);
     } else if (typeof headers[key] === typeof ["s"]) {
@@ -90,10 +98,6 @@ export default function middleware(
     if (id != undefined && id != "") {
       const ctx = new Context("test", id, []);
       Context.set(req, ctx);
-      const reqHeader: { [key: string]: string[] } = getRequestHeader(
-        req.headers
-      );
-      console.log(" request headers: ", reqHeader);
       const response = captureResp(res, next);
       const respHeader: { [key: string]: string[] } = getResponseHeader(
         res.getHeaders()

@@ -203,19 +203,6 @@ export default class Keploy {
     );
     //@ts-ignore
     const requestUrl = `${tc.http_req.url.substr(1)}`;
-    // const x = tc.http_req.header;
-    // console.log(tc);
-    // client.gotHandler(
-    //   new Request()
-    //     // .setHttpHeader("KEPLOY_TEST_ID", tc.id)
-    //     //@ts-ignore
-    //     .setHttpHeaders(tc.http_req.header)
-    //     //@ts-ignore
-    //     .create(tc.http_req.method, requestUrl, tc.http_req.body),
-    //   //@ts-ignore
-    //   tc.http_req.header
-    // );
-    // let http_resp: Response<object>;
 
     const http_resp = await client.makeHttpRequestRaw<object>(
       new Request()
@@ -225,7 +212,6 @@ export default class Keploy {
         //@ts-ignore
         .create(tc.http_req.method, requestUrl, tc.http_req.body)
     );
-    console.log("-> http_resp: ", http_resp);
     const resp = this.getResp(tc.id);
     delete this.responses[tc.id];
     if (
@@ -234,7 +220,7 @@ export default class Keploy {
     ) {
       const header = getRequestHeader(http_resp.headers);
       // eslint-disable-next-line prettier/prettier
-        resp.body = http_resp.rawBody.toString();
+      resp.body = http_resp.rawBody.toString();
       resp.header = header;
       resp.status_code = http_resp.statusCode;
     }
@@ -243,17 +229,11 @@ export default class Keploy {
 
   private async check(runId: string, testcase: TestCase) {
     const resp = await this.simulate(testcase);
-    // const header = getRequestHeader(resp.headers);
     const testreq = {
       id: testcase.id,
       appId: this.appConfig.name,
       runId: runId,
       resp,
-      // resp: {
-      //   status_code: resp.statusCode,
-      //   header: header,
-      //   body: resp.rawBody.toString(),
-      // },
     };
     const requestUrl = "regression/test";
     const request = new Request();
@@ -262,7 +242,6 @@ export default class Keploy {
     const resp2 = await this.client.makeHttpRequest<{ pass: boolean }>(
       request.post(requestUrl, JSON.stringify(transformToSnakeCase(testreq)))
     );
-    //const a = request.post(requestUrl,JSON.stringify(testreq));
     return resp2.pass;
   }
 
@@ -296,16 +275,10 @@ export default class Keploy {
       uri: tcs.uri,
       http_req: tcs.httpReq,
     });
-    // const header = getRequestHeader(resp.headers);
     const testRequest = {
       id,
       appId: this.appConfig.name,
       resp,
-      // resp: {
-      //   status_code: resp.statusCode,
-      //   header: header,
-      //   body: resp.rawBody.toString(),
-      // },
     };
 
     const requestUrl = "regression/denoise";

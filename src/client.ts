@@ -1,4 +1,3 @@
-import got from "got";
 import http, { Headers, OptionsOfJSONResponseBody, Response } from "got";
 
 export class Request {
@@ -79,28 +78,7 @@ export default class HttpClient {
 
   async makeHttpRequestRaw<T>(request: Request): Promise<Response<T>> {
     const options = { ...request.raw(), prefixUrl: this.baseUrl };
-    console.log("-> options :");
-    const x: Promise<Response<T>> = http(options);
-    console.log("-> after: ");
-    return x;
-  }
-
-  async gotHandler(request: Request, header: { [key: string]: string[] }) {
-    const options = { ...request.raw(), prefixUrl: this.baseUrl };
-    // options.headers.foo;
-    // for (const key in header) {
-    //   if (header[key].length == 1) {
-    //     options.headers[key] = header[key][0];
-    //   } else {
-    //     options.headers[key] = header[key];
-    //   }
-    // }
-    if (options.headers != null) {
-      options.headers = header;
-      console.log(" request headers -> ", options.headers);
-    }
-    console.log(" --->", options);
-    const x = await got(options);
-    console.log("got call -> ", x);
+    const resp: Response<T> = await http(options);
+    return resp;
   }
 }
