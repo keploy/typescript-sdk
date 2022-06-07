@@ -90,11 +90,18 @@ export default function middleware(
     if (id != undefined && id != "") {
       const ctx = new Context("test", id, []);
       Context.set(req, ctx);
+      const reqHeader: { [key: string]: string[] } = getRequestHeader(
+        req.headers
+      );
+      console.log(" request headers: ", reqHeader);
       const response = captureResp(res, next);
+      const respHeader: { [key: string]: string[] } = getResponseHeader(
+        res.getHeaders()
+      );
       const resp = {
-        statusCode: response.code,
-        headers: res.getHeaders(),
-        body: response.body,
+        status_code: response.code,
+        header: respHeader,
+        body: String(response.body),
       };
       keploy.putResp(id, resp);
       return;

@@ -25,9 +25,9 @@ type ServerConfig = {
 type ID = string;
 
 type HttpResponse = {
-  statusCode: number;
-  headers: OutgoingHttpHeaders;
-  body: object[];
+  status_code: number;
+  header: { [key: string]: string[] };
+  body: string;
 };
 
 type TestCase = {
@@ -47,7 +47,7 @@ type TestCaseRequest = {
 export default class Keploy {
   appConfig: AppConfig;
   serverConfig: ServerConfig;
-  responses: Record<ID, object>;
+  responses: Record<ID, HttpResponse>;
   dependencies: Record<ID, unknown>;
   client: HttpClient;
 
@@ -118,7 +118,7 @@ export default class Keploy {
   }
 
   getResp(id: ID) {
-    this.responses[id];
+    return this.responses[id];
   }
 
   putResp(id: ID, resp: HttpResponse) {
@@ -197,32 +197,63 @@ export default class Keploy {
     );
   }
 
-  private simulate(tc: TestCase) {
+  private async simulate(tc: TestCase) {
     const client = new HttpClient(
       `http://${this.appConfig.host}:${this.appConfig.port}`
     );
     //@ts-ignore
     const requestUrl = `${tc.http_req.url.substr(1)}`;
-    return client.makeHttpRequestRaw<object>(
+    // const x = tc.http_req.header;
+    // console.log(tc);
+    // client.gotHandler(
+    //   new Request()
+    //     // .setHttpHeader("KEPLOY_TEST_ID", tc.id)
+    //     //@ts-ignore
+    //     .setHttpHeaders(tc.http_req.header)
+    //     //@ts-ignore
+    //     .create(tc.http_req.method, requestUrl, tc.http_req.body),
+    //   //@ts-ignore
+    //   tc.http_req.header
+    // );
+    // let http_resp: Response<object>;
+
+    const http_resp = await client.makeHttpRequestRaw<object>(
       new Request()
         .setHttpHeader("KEPLOY_TEST_ID", tc.id)
         //@ts-ignore
+        .setHttpHeaders(tc.http_req.header)
+        //@ts-ignore
         .create(tc.http_req.method, requestUrl, tc.http_req.body)
     );
+    console.log("-> http_resp: ", http_resp);
+    const resp = this.getResp(tc.id);
+    delete this.responses[tc.id];
+    if (
+      (resp.status_code < 300 || resp.status_code >= 400) &&
+      resp.body != http_resp.rawBody.toString()
+    ) {
+      const header = getRequestHeader(http_resp.headers);
+      // eslint-disable-next-line prettier/prettier
+        resp.body = http_resp.rawBody.toString();
+      resp.header = header;
+      resp.status_code = http_resp.statusCode;
+    }
+    return resp;
   }
 
   private async check(runId: string, testcase: TestCase) {
     const resp = await this.simulate(testcase);
-    const header = getRequestHeader(resp.headers);
+    // const header = getRequestHeader(resp.headers);
     const testreq = {
       id: testcase.id,
       appId: this.appConfig.name,
       runId: runId,
-      resp: {
-        status_code: resp.statusCode,
-        header: header,
-        body: resp.rawBody.toString(),
-      },
+      resp,
+      // resp: {
+      //   status_code: resp.statusCode,
+      //   header: header,
+      //   body: resp.rawBody.toString(),
+      // },
     };
     const requestUrl = "regression/test";
     const request = new Request();
@@ -265,15 +296,16 @@ export default class Keploy {
       uri: tcs.uri,
       http_req: tcs.httpReq,
     });
-    const header = getRequestHeader(resp.headers);
+    // const header = getRequestHeader(resp.headers);
     const testRequest = {
       id,
       appId: this.appConfig.name,
-      resp: {
-        status_code: resp.statusCode,
-        header: header,
-        body: resp.rawBody.toString(),
-      },
+      resp,
+      // resp: {
+      //   status_code: resp.statusCode,
+      //   header: header,
+      //   body: resp.rawBody.toString(),
+      // },
     };
 
     const requestUrl = "regression/denoise";
