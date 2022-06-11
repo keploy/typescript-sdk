@@ -15,9 +15,9 @@ Hook(["express"], function (exports) {
     keployApp.use(bodyParser.json());
     keployApp.use(expressMiddleware(keploy));
     keployApp.appliedMiddleware = true;
-    keployApp.on("listening", function () {
-      keploy.create();
-    });
+    // keployApp.on("listening", function () {
+    keploy.create();
+    // });
 
     return keployApp;
   }

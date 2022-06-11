@@ -108,7 +108,11 @@ export default class Keploy {
 
   async create() {
     if (process.env.KEPLOY_MODE == "test") {
-      await this.test();
+      console.log("test starting in " + this.appConfig.delay + "s");
+      setTimeout(async () => {
+        await this.test();
+      }, this.appConfig.delay * 1000);
+      // await this.test();
     }
     return this;
   }
