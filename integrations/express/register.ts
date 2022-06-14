@@ -15,13 +15,16 @@ Hook(["express"], function (exports) {
     keployApp.use(bodyParser.json());
     keployApp.use(expressMiddleware(keploy));
     keployApp.appliedMiddleware = true;
-    // keployApp.on("listening", function () {
     keploy.create();
-    // });
-
     return keployApp;
   }
-
+  // copy the properties and methods of exported Function object into wrapped Funtion(keployWrappedExpress).
+  // In order to prevent "express._Method_ or express._Field_ is not declared" error.
+  // @ts-ignore
+  for (const key in expressApp) {
+    // @ts-ignore
+    keployWrappedExpress[key] = expressApp[key];
+  }
   exports = keployWrappedExpress;
   return exports;
 });
