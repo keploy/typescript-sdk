@@ -1,7 +1,11 @@
 // @ts-ignore
 import Hook from "require-in-the-middle";
-import expressMiddleware from "./middleware";
-import Keploy from "../../src/keploy";
+import "zone.js";
+import expressMiddleware from "./express/middleware";
+import mongoosePlugin from "./mongoose/plugin";
+import Keploy from "../src/keploy";
+
+const keploy = new Keploy();
 
 // @ts-ignore
 Hook(["express"], function (exports) {
@@ -9,8 +13,6 @@ Hook(["express"], function (exports) {
 
   function keployWrappedExpress() {
     const keployApp = expressApp();
-
-    const keploy = new Keploy();
 
     keployApp.use(expressMiddleware(keploy));
     keployApp.appliedMiddleware = true;
@@ -22,5 +24,11 @@ Hook(["express"], function (exports) {
   }
 
   exports = keployWrappedExpress;
+  return exports;
+});
+
+// @ts-ignore
+Hook(["mongoose"], function (exports) {
+  exports.plugin(mongoosePlugin(keploy));
   return exports;
 });

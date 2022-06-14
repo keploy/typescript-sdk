@@ -42,13 +42,23 @@ type TestCaseRequest = {
   uri: string;
   httpReq: object;
   httpResp: object;
+  deps?: Dependency;
+};
+
+type DependencyType = "NO_SQL_DB" | "SQL_DB" | "GRPC" | "HTTP_CLIENT";
+
+type Dependency = {
+  name: string;
+  type: DependencyType;
+  meta: Record<string, string>;
+  data: object;
 };
 
 export default class Keploy {
   appConfig: AppConfig;
   serverConfig: ServerConfig;
   responses: Record<ID, object>;
-  dependencies: Record<ID, unknown>;
+  dependencies: Record<ID, Dependency>;
   client: HttpClient;
 
   constructor(
@@ -114,7 +124,7 @@ export default class Keploy {
   }
 
   getDependencies(id: ID) {
-    this.dependencies[id];
+    return this.dependencies[id] || null;
   }
 
   getResp(id: ID) {

@@ -1,6 +1,7 @@
 import express from "express";
 import Keploy from "../../src/keploy";
 import { Request, Response, NextFunction } from "express";
+import zone from "../zone";
 
 type Dependency = {
   name: string;
@@ -100,6 +101,9 @@ export default function middleware(
       respHeader[key] = val;
     }
 
+    //@ts-ignore
+    const { dependencies } = zone;
+
     keploy.capture({
       captured: Date.now(),
       appId: keploy.appConfig.name,
@@ -116,6 +120,7 @@ export default function middleware(
         header: respHeader,
         body: String(data),
       },
+      deps: dependencies,
     });
   };
 }
