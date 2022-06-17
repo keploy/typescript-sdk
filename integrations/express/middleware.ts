@@ -18,8 +18,10 @@ type KeployContext = {
 
 class Context {
   static _bindings = new WeakMap<Request, Context>();
+  static _response = new WeakMap<Request, Context>();
 
   public keployContext: KeployContext;
+  public responseBody: object[];
 
   constructor(mode?: string, testId?: string, deps?: Dependency[]) {
     this.keployContext = {
@@ -27,6 +29,7 @@ class Context {
       testId,
       deps,
     };
+    this.responseBody = [];
   }
   // bind sets an empty Context for req as a key in _bindings.
   static bind(req: Request): void {
@@ -40,6 +43,21 @@ class Context {
   // set is used to make a key-value pair for the  req and ctx
   static set(req: Request, ctx: Context): void {
     Context._bindings.set(req, ctx);
+    Context._response.set(req, ctx);
+  }
+
+  static pushResponse(req: Request, chunks: object): void {
+    const ctx = Context._response.get(req);
+    const oldResponse = ctx?.responseBody;
+    if (oldResponse === undefined || ctx == undefined) {
+      return;
+    }
+    oldResponse.push(chunks);
+    Context._response.set(req, ctx);
+  }
+  static getResponse(req: Request): object[] | undefined {
+    const ctx = Context._response.get(req);
+    return ctx?.responseBody;
   }
 }
 
@@ -84,6 +102,9 @@ export default function middleware(
   keploy: Keploy
 ): (req: Request, res: Response, next: NextFunction) => void {
   return (req: Request, res: Response, next: NextFunction) => {
+    res.on("finish", () => {
+      afterMiddleware(keploy, req, res);
+    });
     if (
       (process.env.KEPLOY_MODE != undefined &&
         process.env.KEPLOY_MODE == "off") ||
@@ -98,71 +119,82 @@ export default function middleware(
     if (id != undefined && id != "") {
       const ctx = new Context("test", id, []);
       Context.set(req, ctx);
-      const response = captureResp(res, next);
-      const respHeader: { [key: string]: string[] } = getResponseHeader(
-        res.getHeaders()
-      );
-      const resp = {
-        status_code: response.code,
-        header: respHeader,
-        body: String(response.body),
-      };
-      keploy.putResp(id, resp);
+      captureResp(req, res, next);
       return;
     }
 
     // record mode
     const ctx = new Context("record");
     Context.set(req, ctx);
-    const response = captureResp(res, next);
-
-    // req.headers
-    const reqHeader: { [key: string]: string[] } = getRequestHeader(
-      req.headers
-    );
-
-    // response headers
-    const respHeader: { [key: string]: string[] } = getResponseHeader(
-      res.getHeaders()
-    );
-
-    keploy.capture({
-      captured: Date.now(),
-      appId: keploy.appConfig.name,
-      uri: req.url,
-      httpReq: {
-        method: req.method,
-        url: req.url,
-        url_params: req.params,
-        header: reqHeader,
-        body: JSON.stringify(req.body),
-      },
-      httpResp: {
-        status_code: response.code,
-        header: respHeader,
-        body: String(response.body),
-      },
-    });
+    captureResp(req, res, next);
   };
 }
 
-function captureResp(res: express.Response, next: express.NextFunction) {
+function captureResp(
+  req: Request,
+  res: express.Response,
+  next: express.NextFunction
+) {
   const oldSend = res.send;
 
-  const chunks = [] as object[];
-
   res.send = (chunk: object) => {
-    chunks.push(chunk);
+    Context.pushResponse(req, chunk);
     return oldSend.apply(res, [chunk]);
   };
 
-  const status = res.status;
-  let status_code: number = res.statusCode;
-  res.status = (code) => {
-    status_code = code;
-    return status.apply(res, [code]);
-  };
-
   next();
-  return { code: status_code, body: chunks };
+  return;
+}
+
+export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
+  if (
+    (process.env.KEPLOY_MODE != undefined &&
+      process.env.KEPLOY_MODE == "off") ||
+    keploy == undefined
+  ) {
+    return;
+  }
+
+  const id = req.get("KEPLOY_TEST_ID");
+  if (id !== undefined && id !== "") {
+    const respHeader: { [key: string]: string[] } = getResponseHeader(
+      res.getHeaders()
+    );
+    const resp = {
+      status_code: res.statusCode,
+      header: respHeader,
+      // @ts-ignore
+      body: String(Context.getResponse(req)),
+    };
+    keploy.putResp(id, resp);
+    return;
+  }
+
+  // req.headers
+  const reqHeader: { [key: string]: string[] } = getRequestHeader(req.headers);
+
+  // response headers
+  const respHeader: { [key: string]: string[] } = getResponseHeader(
+    res.getHeaders()
+  );
+
+  keploy.capture({
+    captured: Date.now(),
+    appId: keploy.appConfig.name,
+    // change url to uri ex: /url-shortner/:param
+    uri: req.originalUrl,
+    httpReq: {
+      method: req.method,
+      url: req.originalUrl,
+      url_params: req.params,
+      header: reqHeader,
+      body: JSON.stringify(req.body),
+    },
+    httpResp: {
+      status_code: res.statusCode,
+      header: respHeader,
+      // @ts-ignore
+      body: String(Context.getResponse(req)),
+    },
+  });
 }

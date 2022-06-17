@@ -232,7 +232,7 @@ export default class Keploy {
   }
 
   private async check(runId: string, testcase: TestCase) {
-    const resp = await this.simulate(testcase);
+    const resp = await this.simulate(testcase).catch((err) => console.log(err));
     const testreq = {
       id: testcase.id,
       appId: this.appConfig.name,
@@ -278,7 +278,7 @@ export default class Keploy {
       id: id,
       uri: tcs.uri,
       http_req: tcs.httpReq,
-    });
+    }).catch((err) => console.log(err));
     const testRequest = {
       id,
       appId: this.appConfig.name,

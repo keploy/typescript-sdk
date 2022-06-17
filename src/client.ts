@@ -39,21 +39,86 @@ export class Request {
     return this;
   }
 
-  post(requestUrl: string, body: string) {
+  post(
+    requestUrl: string,
+    body: string,
+    searchParams?: Record<string, string | number | boolean | undefined>
+  ) {
     this.options = {
       body,
       url: requestUrl,
       method: "POST",
       headers: this.headers,
       responseType: "json",
+      searchParams,
     };
 
     return this;
   }
 
-  create(requestMethod: "get" | "post", requestUrl: string, body: string) {
+  delete(
+    requestUrl: string,
+    body?: string,
+    searchParams?: Record<string, string | number | boolean | undefined>
+  ) {
+    this.options = {
+      body,
+      url: requestUrl,
+      method: "DELETE",
+      headers: this.headers,
+      searchParams,
+    };
+
+    return this;
+  }
+
+  put(
+    requestUrl: string,
+    body?: string,
+    searchParams?: Record<string, string | number | boolean | undefined>
+  ) {
+    this.options = {
+      body,
+      url: requestUrl,
+      method: "PUT",
+      headers: this.headers,
+      responseType: "json",
+      searchParams,
+    };
+
+    return this;
+  }
+
+  patch(
+    requestUrl: string,
+    body?: string,
+    searchParams?: Record<string, string | number | boolean | undefined>
+  ) {
+    this.options = {
+      body,
+      url: requestUrl,
+      method: "PATCH",
+      headers: this.headers,
+      responseType: "json",
+      searchParams,
+    };
+
+    return this;
+  }
+
+  create(
+    requestMethod: "get" | "post" | "delete" | "patch" | "put",
+    requestUrl: string,
+    body: string
+  ) {
     if (requestMethod.toLowerCase() === "get") {
       return this.get(requestUrl);
+    } else if (requestMethod.toLowerCase() === "delete") {
+      return this.delete(requestUrl, body);
+    } else if (requestMethod.toLowerCase() === "put") {
+      return this.put(requestUrl, body);
+    } else if (requestMethod.toLowerCase() === "patch") {
+      return this.patch(requestUrl, body);
     } else {
       return this.post(requestUrl, body);
     }
