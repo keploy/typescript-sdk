@@ -4,10 +4,10 @@
  * @returns A new object, with camelCase keys replaced with snake_case keys.
  */
 const transformToSnakeCase = (obj: any): object => {
-  var snakeCaseObj: any = {};
+  const snakeCaseObj: any = {};
 
   for (const key of Object.keys(obj)) {
-    var snakeCaseKey = key.replace(
+    const snakeCaseKey = key.replace(
       /[A-Z]/g,
       (char) => `_${char.toLowerCase()}`
     );

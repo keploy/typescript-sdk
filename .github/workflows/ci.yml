@@ -22,12 +22,12 @@ jobs:
           node-version: 14
 
       - name: Install Dependencies
-        uses: borales/actions-yarn@v2.3.0
+        uses: borales/actions-yarn@v2.1.0
         with:
           cmd: install
 
       - name: Build Project
-        uses: borales/actions-yarn@v2.3.0
+        uses: borales/actions-yarn@v2.1.0
         with:
           cmd: build
 
