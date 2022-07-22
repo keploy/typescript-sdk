@@ -19,7 +19,7 @@ npm i -g yarn
 yarn install
 ```
 
-- Furthermore, to commit your changes use `yarn commit` instead of `git commit` for better commit experiance.
+- Furthermore, to commit your changes use `yarn commit` instead of `git commit` for better commit experience.
 
 - For VSCode setup, make sure these extensions are installed:
   - [EditorConfig](https://marketplace.visualstudio.com/items?itemName=EditorConfig.EditorConfig)
