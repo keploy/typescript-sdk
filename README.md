@@ -115,6 +115,8 @@ describe("test function", ()=>{
     })
 })
 ```
+Note:- To see code coverage please use nyc mocha and see how many lines are covered!!
+
 
 - Furthermore, to commit your changes use `yarn commit` instead of `git commit` for better commit experiance.
 
