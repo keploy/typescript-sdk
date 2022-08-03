@@ -3,6 +3,7 @@ import { transformToSnakeCase } from "./util";
 import { OutgoingHttpHeaders } from "http";
 import { getRequestHeader } from "../integrations/express/middleware";
 import { name as packageName } from "../package.json";
+import assert = require("assert");
 
 type AppConfigFilter = {
   urlRegex?: string;
@@ -133,6 +134,10 @@ export default class Keploy {
     return this.put(req);
   }
 
+  setTestMode() {
+    process.env.KEPLOY_MODE = "test";
+  }
+
   async test() {
     const testCases = await this.fetch();
     const totalTests = testCases.length;
@@ -177,6 +182,10 @@ export default class Keploy {
     return pass;
   }
 
+  async assertTests() {
+    const res = await this.test();
+    assert.equal(res, true);
+  }
   async get(id: ID) {
     const requestUrl = `regression/testcase/${id}`;
     const request = new Request();
