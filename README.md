@@ -86,6 +86,36 @@ npm i -g yarn
 yarn install
 ```
 
+### Integration with Mocha testing framework
+You just need to do some imports and call function of code in your unit test file and that's it!!🔥🔥🔥
+```js
+const {test2} = require('../server') //your server wrapper 
+const {keploy}  = require('typescript-sdk/dist/integrations/express/register')
+const {describe,test,before,after}=  require('mocha')
+const assert = require('assert')
+describe("test function", ()=>{
+    before( (done)=>{
+       try{
+           keploy.setTestMode();
+            test2()
+            console.log("test starting")
+            done()
+       }
+        catch (err){
+           done(err)
+        }
+    })
+    test("should be running", async ()=> {
+      await keploy.assertTests();
+    });
+    after(()=>{
+        if(process.env.KEPLOY_MODE="test"){
+           process.exit(1); //exits the node server
+        }
+    })
+})
+```
+
 - Furthermore, to commit your changes use `yarn commit` instead of `git commit` for better commit experiance.
 
 - For VSCode setup, make sure these extensions are installed:
