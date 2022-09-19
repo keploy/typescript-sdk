@@ -30,6 +30,7 @@ npm i https://github.com/keploy/typescript-sdk
 require("typescript-sdk/dist/integrations/express/register");
 ```
 ## Configure
+Keploy can be configured by environment varibales. Below is an example .env file
 ```
 export KEPLOY_MODE="test"
 export KEPLOY_APP_NAME="my-app"
