@@ -1,6 +1,7 @@
 import HttpClient, { Request } from "./client";
 import { transformToSnakeCase } from "./util";
 import { OutgoingHttpHeaders } from "http";
+import { getRequestHeader } from "../integrations/express/middleware";
 import { name as packageName } from "../package.json";
 
 type AppConfigFilter = {
@@ -24,16 +25,15 @@ type ServerConfig = {
 type ID = string;
 
 type HttpResponse = {
-  statusCode: number;
-  headers: OutgoingHttpHeaders;
-  body: object[];
+  status_code: number;
+  header: { [key: string]: string[] };
+  body: string;
 };
 
 type TestCase = {
   id: ID;
-  method: "get" | "post";
-  url: string;
-  body: string;
+  uri: string;
+  http_req: object;
 };
 
 type TestCaseRequest = {
@@ -47,7 +47,7 @@ type TestCaseRequest = {
 export default class Keploy {
   appConfig: AppConfig;
   serverConfig: ServerConfig;
-  responses: Record<ID, object>;
+  responses: Record<ID, HttpResponse>;
   dependencies: Record<ID, unknown>;
   client: HttpClient;
 
@@ -108,7 +108,11 @@ export default class Keploy {
 
   async create() {
     if (process.env.KEPLOY_MODE == "test") {
-      await this.test();
+      console.log("test starting in " + this.appConfig.delay + "s");
+      setTimeout(async () => {
+        await this.test();
+      }, this.appConfig.delay * 1000);
+      // await this.test();
     }
     return this;
   }
@@ -118,7 +122,7 @@ export default class Keploy {
   }
 
   getResp(id: ID) {
-    this.responses[id];
+    return this.responses[id];
   }
 
   putResp(id: ID, resp: HttpResponse) {
@@ -133,12 +137,44 @@ export default class Keploy {
     const testCases = await this.fetch();
     const totalTests = testCases.length;
     const testId = await this.start(totalTests);
-    let passed = true;
-    testCases.forEach((testCase) => {
-      passed = this.check(testId, testCase);
-    });
-    this.end(testId, passed);
-    return passed;
+    console.log(
+      "starting test execution. { id: ",
+      testId,
+      " }, { total tests: ",
+      totalTests,
+      " }"
+    );
+    let pass = true;
+    for (const [i, testCase] of testCases.entries()) {
+      console.log(
+        "testing ",
+        i + 1,
+        " of ",
+        totalTests,
+        " { testcase id: ",
+        testCase.id,
+        " }"
+      );
+      const passed = await this.check(testId, testCase);
+      if (!passed) {
+        pass = false;
+      }
+      console.log(
+        "result { testcase id: ",
+        testCase.id,
+        " }, { passed: ",
+        passed,
+        " }"
+      );
+    }
+    this.end(testId, pass);
+    console.log(
+      "test run completed { run id: ",
+      testId,
+      " }, passed overall: ",
+      pass
+    );
+    return pass;
   }
 
   async get(id: ID) {
@@ -149,32 +185,68 @@ export default class Keploy {
     return this.client.makeHttpRequest(request.get(requestUrl));
   }
 
-  private start(total: number): Promise<ID> {
+  private async start(total: number) {
     const app = this.appConfig.name;
     const requestUrl = "regression/start";
-    return this.client.makeHttpRequest(
+    const resp: { [key: string]: string } = await this.client.makeHttpRequest(
       new Request().get(requestUrl, { app, total })
     );
+    return resp.id;
   }
 
-  private end(id: ID, status: boolean) {
+  private end(id: string, status: boolean) {
     const requestUrl = "regression/end";
     return this.client.makeHttpRequest(
       new Request().get(requestUrl, { status, id })
     );
   }
 
-  private simulate(tc: TestCase) {
-    const requestUrl = `http://${this.appConfig.host}:${this.appConfig.port}${tc.url}`;
-    return this.client.makeHttpRequest<object>(
+  private async simulate(tc: TestCase) {
+    const client = new HttpClient(
+      `http://${this.appConfig.host}:${this.appConfig.port}`
+    );
+    //@ts-ignore
+    const requestUrl = `${tc.http_req.url.substr(1)}`;
+
+    const http_resp = await client.makeHttpRequestRaw<object>(
       new Request()
         .setHttpHeader("KEPLOY_TEST_ID", tc.id)
-        .create(tc.method, requestUrl, tc.body)
+        //@ts-ignore
+        .setHttpHeaders(tc.http_req.header)
+        //@ts-ignore
+        .create(tc.http_req.method, requestUrl, tc.http_req.body)
     );
+    const resp = this.getResp(tc.id);
+    delete this.responses[tc.id];
+    if (
+      (resp.status_code < 300 || resp.status_code >= 400) &&
+      resp.body != http_resp.rawBody.toString()
+    ) {
+      const header = getRequestHeader(http_resp.headers);
+      // eslint-disable-next-line prettier/prettier
+      resp.body = http_resp.rawBody.toString();
+      resp.header = header;
+      resp.status_code = http_resp.statusCode;
+    }
+    return resp;
   }
 
-  private check(runId: ID, testcase: TestCase): boolean {
-    throw new Error("Not implemented");
+  private async check(runId: string, testcase: TestCase) {
+    const resp = await this.simulate(testcase).catch((err) => console.log(err));
+    const testreq = {
+      id: testcase.id,
+      appId: this.appConfig.name,
+      runId: runId,
+      resp,
+    };
+    const requestUrl = "regression/test";
+    const request = new Request();
+    this.setKey(request);
+    request.setHttpHeader("Content-Type", "application/json");
+    const resp2 = await this.client.makeHttpRequest<{ pass: boolean }>(
+      request.post(requestUrl, JSON.stringify(transformToSnakeCase(testreq)))
+    );
+    return resp2.pass;
   }
 
   private async put(tcs: TestCaseRequest) {
@@ -189,26 +261,28 @@ export default class Keploy {
     this.setKey(request);
     request.setHttpHeader("Content-Type", "application/json");
 
-    return this.client.makeHttpRequest(
+    const resp = await this.client.makeHttpRequest<{ id: string }>(
       request.post(
         "regression/testcase",
         JSON.stringify(transformToSnakeCase(tcs))
       )
     );
+    if (resp.id === "") {
+      return;
+    }
+    this.denoise(resp.id, tcs);
   }
 
   private async denoise(id: string, tcs: TestCaseRequest) {
-    const test = await this.simulate({
+    const resp = await this.simulate({
       id: id,
-      method: "get",
-      url: tcs.uri,
-      body: JSON.stringify(tcs.httpReq),
-    });
-
+      uri: tcs.uri,
+      http_req: tcs.httpReq,
+    }).catch((err) => console.log(err));
     const testRequest = {
       id,
       appId: this.appConfig.name,
-      httpRes: test,
+      resp,
     };
 
     const requestUrl = "regression/denoise";
@@ -216,12 +290,15 @@ export default class Keploy {
     this.setKey(request);
     request.setHttpHeader("Content-Type", "application/json");
     return this.client.makeHttpRequest(
-      request.post(requestUrl, JSON.stringify(testRequest))
+      request.post(
+        requestUrl,
+        JSON.stringify(transformToSnakeCase(testRequest))
+      )
     );
   }
 
   async fetch(): Promise<TestCase[]> {
-    const offset = 0;
+    let offset = 0;
     const limit = 25;
     const app = this.appConfig.name;
     const testCases = [];
@@ -233,12 +310,15 @@ export default class Keploy {
       const response = await this.client.makeHttpRequest<TestCase[]>(
         request.get(requestUrl, { app, offset, limit })
       );
-
+      if (response === null) {
+        break;
+      }
       testCases.push(...response);
 
       if (response.length == 0) {
         break;
       }
+      offset += 25;
     }
 
     return testCases;
