@@ -186,6 +186,7 @@ export default class Keploy {
     const res = await this.test();
     assert.equal(res, true);
   }
+
   async get(id: ID) {
     const requestUrl = `regression/testcase/${id}`;
     const request = new Request();
