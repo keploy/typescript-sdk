@@ -87,7 +87,7 @@ yarn install
 ```
 
 ### Integration with Mocha testing framework
-You just need to do some imports and call function of code in your unit test file and that's it!!🔥🔥🔥
+You just need to do some imports and call a built-in assert function in your code in your unit test file and that's it!!🔥🔥🔥
 ```js
 const {runServer} = require('../server') //your server wrapper
 const {keploy}  = require('typescript-sdk/dist/integrations/express/register')
