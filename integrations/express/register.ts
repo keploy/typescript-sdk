@@ -5,15 +5,14 @@ import Keploy from "../../src/keploy";
 import bodyParser from "body-parser";
 import cors from "cors";
 import mixin from "merge-descriptors";
+const keploy = new Keploy();
 
 // @ts-ignore
 Hook(["express"], function (exports) {
   const expressApp = exports;
-
   function keployWrappedExpress() {
     const keployApp = expressApp();
 
-    const keploy = new Keploy();
     keployApp.use(bodyParser.json());
     keployApp.use(cors());
     keployApp.use(expressMiddleware(keploy));
@@ -28,3 +27,4 @@ Hook(["express"], function (exports) {
   exports = keployWrappedExpress;
   return exports;
 });
+export { keploy };
