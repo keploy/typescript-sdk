@@ -6,8 +6,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc",
-    "prepare": "tsc",
+    "build": "tsc && cp ./proto/services.proto ./dist/proto/",
+    "prepare": "npm run build",
     "commit": "cz"
   },
   "repository": "git@github.com:keploy/typescript-sdk.git",
@@ -39,6 +39,7 @@
     }
   },
   "dependencies": {
+    "@grpc/grpc-js": "^1.7.1",
     "cors": "^2.8.5",
     "express": "^4.17.3",
     "got": "^11.5.2",
