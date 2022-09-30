@@ -2,6 +2,8 @@ import express from "express";
 import Keploy from "../../src/keploy";
 import { Request, Response, NextFunction } from "express";
 import http = require("http");
+import { createExecutionContext, getExecutionContext } from "../../src/context";
+import { StrArr } from "../../proto/services/StrArr";
 
 type Dependency = {
   name: string;
@@ -13,7 +15,7 @@ type Dependency = {
 type KeployContext = {
   mode: string | undefined;
   testId: string | undefined;
-  deps: Dependency[] | undefined;
+  deps: object[] | undefined;
 };
 
 class Context {
@@ -23,7 +25,7 @@ class Context {
   public keployContext: KeployContext;
   public responseBody: object[];
 
-  constructor(mode?: string, testId?: string, deps?: Dependency[]) {
+  constructor(mode?: string, testId?: string, deps?: object[]) {
     this.keployContext = {
       mode,
       testId,
@@ -64,27 +66,21 @@ class Context {
 // got package identifies header fields to identify request and response therefore, request headers
 // should not contain header fields (like: content-length, connection)
 export function getRequestHeader(headers: http.IncomingHttpHeaders) {
-  const result: { [key: string]: string[] } = {};
+  const result: { [key: string]: StrArr } = {};
   for (const key in headers) {
     let val = new Array<string>();
-    if (
-      key.toLowerCase() === "content-length" ||
-      key.toLowerCase() === "connection"
-    ) {
-      continue;
-    }
     if (typeof headers[key] === typeof "s") {
       val.push(headers[key] as string);
     } else if (typeof headers[key] === typeof ["s"]) {
       val = headers[key] as string[];
     }
-    result[key] = val;
+    result[key] = { Value: val };
   }
   return result;
 }
 
 export function getResponseHeader(header: http.OutgoingHttpHeaders) {
-  const result: { [key: string]: string[] } = {};
+  const result: { [key: string]: StrArr } = {};
   for (const key in header) {
     let val = new Array<string>();
     if (typeof header[key] === typeof "s" || typeof header[key] === typeof 1) {
@@ -92,7 +88,7 @@ export function getResponseHeader(header: http.OutgoingHttpHeaders) {
     } else if (typeof header[key] === typeof ["s"]) {
       val = header[key] as string[];
     }
-    result[key] = val;
+    result[key] = { Value: val };
   }
   return result;
 }
@@ -117,15 +113,17 @@ export default function middleware(
     const id = req.get("KEPLOY_TEST_ID");
     // test mode
     if (id != undefined && id != "") {
-      const ctx = new Context("test", id, []);
+      const ctx = new Context("test", id, keploy.getDependencies(id));
       Context.set(req, ctx);
+      createExecutionContext(ctx);
       captureResp(req, res, next);
       return;
     }
 
     // record mode
-    const ctx = new Context("record");
+    const ctx = new Context("record", undefined, []);
     Context.set(req, ctx);
+    createExecutionContext(ctx);
     captureResp(req, res, next);
   };
 }
@@ -157,7 +155,7 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
 
   const id = req.get("KEPLOY_TEST_ID");
   if (id !== undefined && id !== "") {
-    const respHeader: { [key: string]: string[] } = getResponseHeader(
+    const respHeader: { [key: string]: StrArr } = getResponseHeader(
       res.getHeaders()
     );
     const resp = {
@@ -171,30 +169,33 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
   }
 
   // req.headers
-  const reqHeader: { [key: string]: string[] } = getRequestHeader(req.headers);
+  const reqHeader: { [key: string]: StrArr } = getRequestHeader(req.headers);
 
   // response headers
-  const respHeader: { [key: string]: string[] } = getResponseHeader(
+  const respHeader: { [key: string]: StrArr } = getResponseHeader(
     res.getHeaders()
   );
 
   keploy.capture({
-    captured: Date.now(),
-    appId: keploy.appConfig.name,
+    Captured: Date.now(),
+    AppID: keploy.appConfig.name,
     // change url to uri ex: /url-shortner/:param
-    uri: req.originalUrl,
-    httpReq: {
-      method: req.method,
-      url: req.originalUrl,
-      url_params: req.params,
-      header: reqHeader,
-      body: JSON.stringify(req.body),
+    URI: req.originalUrl,
+    HttpReq: {
+      Method: req.method,
+      URL: req.originalUrl,
+      URLParams: req.params,
+      Header: reqHeader,
+      Body: JSON.stringify(req.body),
     },
-    httpResp: {
-      status_code: res.statusCode,
-      header: respHeader,
+    HttpResp: {
+      StatusCode: res.statusCode,
+      Header: respHeader,
       // @ts-ignore
-      body: String(Context.getResponse(req)),
+      Body: String(Context.getResponse(req)),
     },
+    Dependency: getExecutionContext().context.keployContext.deps,
+    TestCasePath: keploy.appConfig.testCasePath,
+    MockPath: keploy.appConfig.mockPath,
   });
 }
