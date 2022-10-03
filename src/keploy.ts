@@ -305,10 +305,8 @@ export default class Keploy {
       return;
     }
     this.dependencies[tc.id] = tc.Deps;
-    console.log(" --- ---- -- ", this.dependencies[tc.id], " deps: ", tc.Deps);
     delete this.dependencies[tc.id];
-    console.log(" --- ---- -- ", this.dependencies[tc.id]);
-    this.mocks[tc.id] = tc.mocks;
+    this.mocks[tc.id] = tc.Mocks;
     delete this.mocks[tc.id];
 
     const client = new HttpClient(

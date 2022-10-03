@@ -21,7 +21,7 @@ export interface TestCase {
   'allKeys'?: ({[key: string]: _services_StrArr});
   'anchors'?: ({[key: string]: _services_StrArr});
   'noise'?: (string)[];
-  'mocks'?: (_services_Mock)[];
+  'Mocks'?: (_services_Mock)[];
 }
 
 export interface TestCase__Output {
@@ -38,5 +38,5 @@ export interface TestCase__Output {
   'allKeys'?: ({[key: string]: _services_StrArr__Output});
   'anchors'?: ({[key: string]: _services_StrArr__Output});
   'noise'?: (string)[];
-  'mocks'?: (_services_Mock__Output)[];
+  'Mocks'?: (_services_Mock__Output)[];
 }
