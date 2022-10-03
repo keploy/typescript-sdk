@@ -1,90 +1,51 @@
 import express from "express";
 import Keploy from "../../src/keploy";
 import { Request, Response, NextFunction } from "express";
-import http = require("http");
+import { createExecutionContext, getExecutionContext } from "../../src/context";
+import { StrArr } from "../../proto/services/StrArr";
 
-type Dependency = {
-  name: string;
-  type: string;
-  meta: object;
-  data: object[];
-};
+class ResponseBody {
+  static responseMap = new WeakMap<Request, ResponseBody>();
 
-type KeployContext = {
-  mode: string | undefined;
-  testId: string | undefined;
-  deps: Dependency[] | undefined;
-};
+  public body: object[];
 
-class Context {
-  static _bindings = new WeakMap<Request, Context>();
-  static _response = new WeakMap<Request, Context>();
-
-  public keployContext: KeployContext;
-  public responseBody: object[];
-
-  constructor(mode?: string, testId?: string, deps?: Dependency[]) {
-    this.keployContext = {
-      mode,
-      testId,
-      deps,
-    };
-    this.responseBody = [];
-  }
-  // bind sets an empty Context for req as a key in _bindings.
-  static bind(req: Request): void {
-    const ctx = new Context();
-    Context._bindings.set(req, ctx);
-  }
-  // get returns the value of Context stored for the req key. It returns null if req key is not present
-  static get(req: Request): Context | null {
-    return Context._bindings.get(req) || null;
-  }
-  // set is used to make a key-value pair for the  req and ctx
-  static set(req: Request, ctx: Context): void {
-    Context._bindings.set(req, ctx);
-    Context._response.set(req, ctx);
+  constructor() {
+    this.body = [];
   }
 
-  static pushResponse(req: Request, chunks: object): void {
-    const ctx = Context._response.get(req);
-    const oldResponse = ctx?.responseBody;
-    if (oldResponse === undefined || ctx == undefined) {
+  static push(req: Request, chunks: object): void {
+    const ctx = ResponseBody.responseMap.get(req);
+    const oldResponse = ctx?.body;
+    if (oldResponse === undefined || ctx === undefined) {
       return;
     }
     oldResponse.push(chunks);
-    Context._response.set(req, ctx);
+    ResponseBody.responseMap.set(req, ctx);
   }
-  static getResponse(req: Request): object[] | undefined {
-    const ctx = Context._response.get(req);
-    return ctx?.responseBody;
+  static get(req: Request): object[] | undefined {
+    const ctx = ResponseBody.responseMap.get(req);
+    return ctx?.body;
   }
 }
 
 // got package identifies header fields to identify request and response therefore, request headers
 // should not contain header fields (like: content-length, connection)
-export function getRequestHeader(headers: http.IncomingHttpHeaders) {
-  const result: { [key: string]: string[] } = {};
+export function getRequestHeader(headers: any) {
+  const result: { [key: string]: StrArr } = {};
   for (const key in headers) {
     let val = new Array<string>();
-    if (
-      key.toLowerCase() === "content-length" ||
-      key.toLowerCase() === "connection"
-    ) {
-      continue;
-    }
     if (typeof headers[key] === typeof "s") {
       val.push(headers[key] as string);
     } else if (typeof headers[key] === typeof ["s"]) {
       val = headers[key] as string[];
     }
-    result[key] = val;
+    result[key] = { Value: val };
   }
   return result;
 }
 
-export function getResponseHeader(header: http.OutgoingHttpHeaders) {
-  const result: { [key: string]: string[] } = {};
+export function getResponseHeader(header: any) {
+  const result: { [key: string]: StrArr } = {};
   for (const key in header) {
     let val = new Array<string>();
     if (typeof header[key] === typeof "s" || typeof header[key] === typeof 1) {
@@ -92,7 +53,7 @@ export function getResponseHeader(header: http.OutgoingHttpHeaders) {
     } else if (typeof header[key] === typeof ["s"]) {
       val = header[key] as string[];
     }
-    result[key] = val;
+    result[key] = { Value: val };
   }
   return result;
 }
@@ -117,15 +78,17 @@ export default function middleware(
     const id = req.get("KEPLOY_TEST_ID");
     // test mode
     if (id != undefined && id != "") {
-      const ctx = new Context("test", id, []);
-      Context.set(req, ctx);
+      createExecutionContext({
+        mode: "test",
+        testId: id,
+        deps: keploy.getDependencies(id),
+      });
       captureResp(req, res, next);
       return;
     }
 
     // record mode
-    const ctx = new Context("record");
-    Context.set(req, ctx);
+    createExecutionContext({ mode: "record", deps: [] });
     captureResp(req, res, next);
   };
 }
@@ -138,7 +101,7 @@ function captureResp(
   const oldSend = res.send;
 
   res.send = (chunk: object) => {
-    Context.pushResponse(req, chunk);
+    ResponseBody.push(req, chunk);
     return oldSend.apply(res, [chunk]);
   };
 
@@ -157,44 +120,47 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
 
   const id = req.get("KEPLOY_TEST_ID");
   if (id !== undefined && id !== "") {
-    const respHeader: { [key: string]: string[] } = getResponseHeader(
+    const respHeader: { [key: string]: StrArr } = getResponseHeader(
       res.getHeaders()
     );
     const resp = {
       status_code: res.statusCode,
       header: respHeader,
       // @ts-ignore
-      body: String(Context.getResponse(req)),
+      body: String(ResponseBody.get(req)),
     };
     keploy.putResp(id, resp);
     return;
   }
 
   // req.headers
-  const reqHeader: { [key: string]: string[] } = getRequestHeader(req.headers);
+  const reqHeader: { [key: string]: StrArr } = getRequestHeader(req.headers);
 
   // response headers
-  const respHeader: { [key: string]: string[] } = getResponseHeader(
+  const respHeader: { [key: string]: StrArr } = getResponseHeader(
     res.getHeaders()
   );
 
   keploy.capture({
-    captured: Date.now(),
-    appId: keploy.appConfig.name,
+    Captured: Date.now(),
+    AppID: keploy.appConfig.name,
     // change url to uri ex: /url-shortner/:param
-    uri: req.originalUrl,
-    httpReq: {
-      method: req.method,
-      url: req.originalUrl,
-      url_params: req.params,
-      header: reqHeader,
-      body: JSON.stringify(req.body),
+    URI: req.originalUrl,
+    HttpReq: {
+      Method: req.method,
+      URL: req.originalUrl,
+      URLParams: req.params,
+      Header: reqHeader,
+      Body: JSON.stringify(req.body),
     },
-    httpResp: {
-      status_code: res.statusCode,
-      header: respHeader,
+    HttpResp: {
+      StatusCode: res.statusCode,
+      Header: respHeader,
       // @ts-ignore
-      body: String(Context.getResponse(req)),
+      Body: String(ResponseBody.get(req)),
     },
+    Dependency: getExecutionContext().context.keployContext.deps,
+    TestCasePath: keploy.appConfig.testCasePath,
+    MockPath: keploy.appConfig.mockPath,
   });
 }

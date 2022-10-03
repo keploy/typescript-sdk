@@ -1,8 +1,27 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import HttpClient, { Request } from "./client";
-import { transformToSnakeCase } from "./util";
-import { OutgoingHttpHeaders } from "http";
+import { toHttpHeaders, transformToSnakeCase } from "./util";
 import { getRequestHeader } from "../integrations/express/middleware";
 import { name as packageName } from "../package.json";
+import * as grpc from "@grpc/grpc-js";
+import * as protoLoader from "@grpc/proto-loader";
+import { ProtoGrpcType } from "../proto/services";
+import path from "path";
+import { RegressionServiceClient } from "../proto/services/RegressionService";
+import { TestCaseReq } from "../proto/services/TestCaseReq";
+import { TestCase } from "../proto/services/TestCase";
+import { StrArr } from "../proto/services/StrArr";
+
+const PORT = 8081;
+const PROTO_PATH = "../proto/services.proto";
+const packageDef = protoLoader.loadSync(path.resolve(__dirname, PROTO_PATH));
+const grpcObj = grpc.loadPackageDefinition(
+  packageDef
+) as unknown as ProtoGrpcType;
+
+export const V1_BETA1 = "api.keploy.io/v1beta1",
+  HTTP_EXPORT = "Http",
+  GENERIC_EXPORT = "Generic";
 
 type AppConfigFilter = {
   urlRegex?: string;
@@ -15,6 +34,8 @@ type AppConfig = {
   delay: number;
   timeout: number;
   filter: AppConfigFilter;
+  testCasePath: string;
+  mockPath: string;
 };
 
 type ServerConfig = {
@@ -26,22 +47,8 @@ type ID = string;
 
 type HttpResponse = {
   status_code: number;
-  header: { [key: string]: string[] };
+  header: { [key: string]: StrArr };
   body: string;
-};
-
-type TestCase = {
-  id: ID;
-  uri: string;
-  http_req: object;
-};
-
-type TestCaseRequest = {
-  captured: number;
-  appId: string;
-  uri: string;
-  httpReq: object;
-  httpResp: object;
 };
 
 export default class Keploy {
@@ -49,16 +56,23 @@ export default class Keploy {
   serverConfig: ServerConfig;
   responses: Record<ID, HttpResponse>;
   dependencies: Record<ID, unknown>;
+  mocks: Record<ID, unknown>;
   client: HttpClient;
+  grpcClient: RegressionServiceClient;
 
   constructor(
     app: Partial<AppConfig> = {},
     server: Partial<ServerConfig> = {}
   ) {
+    this.grpcClient = new grpcObj.services.RegressionService(
+      `0.0.0.0:${PORT}`,
+      grpc.credentials.createInsecure()
+    );
     this.appConfig = this.validateAppConfig(app);
     this.serverConfig = this.validateServerConfig(server);
     this.responses = {};
     this.dependencies = {};
+    this.mocks = {};
     this.client = new HttpClient(this.serverConfig.url);
   }
 
@@ -76,6 +90,8 @@ export default class Keploy {
     delay = process.env.KEPLOY_APP_DELAY || 5,
     timeout = process.env.KEPLOY_APP_TIMEOUT || 60,
     filter = process.env.KEPLOY_APP_FILTER || {},
+    testCasePath = path.resolve("./" + "keploy-tests"),
+    mockPath = path.resolve("./" + "keploy-tests/mock"),
   }) {
     const errorFactory = (key: string) =>
       new Error(`Invalid App config key: ${key}`);
@@ -103,7 +119,7 @@ export default class Keploy {
       }
     }
 
-    return { name, host, port, delay, timeout, filter };
+    return { name, host, port, delay, timeout, filter, testCasePath, mockPath };
   }
 
   async create() {
@@ -118,7 +134,11 @@ export default class Keploy {
   }
 
   getDependencies(id: ID) {
-    this.dependencies[id];
+    return this.dependencies[id] as object[] | undefined;
+  }
+
+  getMock(id: ID) {
+    return this.mocks[id] as object[] | undefined;
   }
 
   getResp(id: ID) {
@@ -129,52 +149,135 @@ export default class Keploy {
     this.responses[id] = resp;
   }
 
-  capture(req: TestCaseRequest) {
+  capture(req: TestCaseReq) {
     return this.put(req);
   }
 
-  async test() {
-    const testCases = await this.fetch();
-    const totalTests = testCases.length;
-    const testId = await this.start(totalTests);
-    console.log(
-      "starting test execution. { id: ",
-      testId,
-      " }, { total tests: ",
-      totalTests,
-      " }"
-    );
-    let pass = true;
-    for (const [i, testCase] of testCases.entries()) {
-      console.log(
-        "testing ",
-        i + 1,
-        " of ",
-        totalTests,
-        " { testcase id: ",
-        testCase.id,
-        " }"
-      );
-      const passed = await this.check(testId, testCase);
-      if (!passed) {
-        pass = false;
+  async fetch(testcases: TestCase[], offset: number) {
+    const limit = 25;
+    const app = this.appConfig.name;
+    let end = false;
+    await this.grpcClient.getTcs(
+      {
+        app: app,
+        offset: offset.toString(),
+        limit: limit.toString(),
+        TestCasePath: this.appConfig.testCasePath,
+        MockPath: this.appConfig.mockPath,
+      },
+      (err, response) => {
+        if (err !== undefined) {
+          console.error("failed to call getTcs method of keploy. error: ", err);
+        }
+        console.log(response);
+        if (
+          response == null ||
+          response.tcs == undefined ||
+          response.tcs.length == 0
+        ) {
+          end = true;
+          this.afterFetch(testcases);
+          return;
+        }
+        testcases.push(...response.tcs);
+        if (response.eof == true) {
+          end = true;
+          this.afterFetch(testcases);
+          return testcases;
+        }
+        this.fetch(testcases, offset + 25);
       }
-      console.log(
-        "result { testcase id: ",
-        testCase.id,
-        " }, { passed: ",
-        passed,
-        " }"
-      );
-    }
-    this.end(testId, pass);
-    console.log(
-      "test run completed { run id: ",
-      testId,
-      " }, passed overall: ",
-      pass
     );
-    return pass;
+    return testcases;
+  }
+
+  async test() {
+    const testCases = await this.fetch([], 0);
+    if (testCases == undefined) {
+      console.log("testcases is undefinded");
+      return;
+    }
+  }
+
+  async afterFetch(testCases: TestCase[]) {
+    const totalTests = testCases.length;
+    this.grpcClient.Start(
+      {
+        app: this.appConfig.name,
+        total: totalTests.toString(),
+        MockPath: this.appConfig.mockPath,
+        TestCasePath: this.appConfig.testCasePath,
+      },
+      async (err, resp) => {
+        if (err !== null) {
+          console.error("failed to call test method of keploy. error: ", err);
+        }
+        const testId = resp?.id;
+
+        console.log(
+          "starting test execution. { id: ",
+          testId,
+          " }, { total tests: ",
+          totalTests,
+          " }"
+        );
+        let pass = true;
+        for (const [i, testCase] of testCases.entries()) {
+          console.log(
+            "testing ",
+            i + 1,
+            " of ",
+            totalTests,
+            " { testcase id: ",
+            testCase.id,
+            " }"
+          );
+          const resp = await this.simulate(testCase).catch((err) =>
+            console.log(err)
+          );
+          this.grpcClient.Test(
+            {
+              AppID: this.appConfig.name,
+              ID: testCase.id,
+              RunID: testId,
+              Resp: {
+                Body: resp?.body,
+                StatusCode: resp?.status_code,
+                Header: resp?.header,
+              },
+            },
+            (err, response) => {
+              if (err !== null) {
+                console.error(
+                  "failed to call test method of keploy. error: ",
+                  err
+                );
+              }
+              if (response?.pass?.pass === false) {
+                pass = false;
+              }
+              console.log(
+                "result { testcase id: ",
+                testCase.id,
+                " }, { passed: ",
+                response?.pass?.pass,
+                " }"
+              );
+              console.log("\n tcs index:", i, "\n");
+              if (i === testCases.length - 1) {
+                this.end(testId, pass);
+                console.log(
+                  "test run completed { run id: ",
+                  testId,
+                  " }, passed overall: ",
+                  pass
+                );
+              }
+            }
+          );
+        }
+      }
+    );
   }
 
   async get(id: ID) {
@@ -185,148 +288,102 @@ export default class Keploy {
     return this.client.makeHttpRequest(request.get(requestUrl));
   }
 
-  private async start(total: number) {
-    const app = this.appConfig.name;
-    const requestUrl = "regression/start";
-    const resp: { [key: string]: string } = await this.client.makeHttpRequest(
-      new Request().get(requestUrl, { app, total })
+  private end(id: string | undefined, status: boolean) {
+    this.grpcClient.End(
+      { id: id, status: status.toString() },
+      (err, response) => {
+        if (err !== null) {
+          console.error("failed to call end method of keploy. error: ", err);
+        }
+      }
     );
-    return resp.id;
-  }
-
-  private end(id: string, status: boolean) {
-    const requestUrl = "regression/end";
-    return this.client.makeHttpRequest(
-      new Request().get(requestUrl, { status, id })
-    );
+    // return resp.id;
   }
 
   private async simulate(tc: TestCase) {
+    if (tc.id == undefined) {
+      return;
+    }
+    this.dependencies[tc.id] = tc.Deps;
+    console.log(" --- ---- -- ", this.dependencies[tc.id], " deps: ", tc.Deps);
+    delete this.dependencies[tc.id];
+    console.log(" --- ---- -- ", this.dependencies[tc.id]);
+    this.mocks[tc.id] = tc.mocks;
+    delete this.mocks[tc.id];
+
     const client = new HttpClient(
       `http://${this.appConfig.host}:${this.appConfig.port}`
     );
     //@ts-ignore
-    const requestUrl = `${tc.http_req.url.substr(1)}`;
+    const requestUrl = `${tc.HttpReq?.URL.substr(1)}`;
 
-    const http_resp = await client.makeHttpRequestRaw<object>(
+    await client.makeHttpRequestRaw<object>(
       new Request()
         .setHttpHeader("KEPLOY_TEST_ID", tc.id)
         //@ts-ignore
-        .setHttpHeaders(tc.http_req.header)
+        .setHttpHeaders(toHttpHeaders(tc.HttpReq?.Header))
         //@ts-ignore
-        .create(tc.http_req.method, requestUrl, tc.http_req.body)
+        .create(tc.HttpReq?.Method, requestUrl, tc.HttpReq?.Body)
     );
     const resp = this.getResp(tc.id);
     delete this.responses[tc.id];
-    if (
-      (resp.status_code < 300 || resp.status_code >= 400) &&
-      resp.body != http_resp.rawBody.toString()
-    ) {
-      const header = getRequestHeader(http_resp.headers);
-      // eslint-disable-next-line prettier/prettier
-      resp.body = http_resp.rawBody.toString();
-      resp.header = header;
-      resp.status_code = http_resp.statusCode;
-    }
     return resp;
   }
 
-  private async check(runId: string, testcase: TestCase) {
-    const resp = await this.simulate(testcase).catch((err) => console.log(err));
-    const testreq = {
-      id: testcase.id,
-      appId: this.appConfig.name,
-      runId: runId,
-      resp,
-    };
-    const requestUrl = "regression/test";
-    const request = new Request();
-    this.setKey(request);
-    request.setHttpHeader("Content-Type", "application/json");
-    const resp2 = await this.client.makeHttpRequest<{ pass: boolean }>(
-      request.post(requestUrl, JSON.stringify(transformToSnakeCase(testreq)))
-    );
-    return resp2.pass;
-  }
-
-  private async put(tcs: TestCaseRequest) {
+  private async put(tcs: TestCaseReq) {
     if (
       this.appConfig.filter.urlRegex &&
-      tcs.uri.match(this.appConfig.filter.urlRegex)
+      tcs?.URI?.match(this.appConfig.filter.urlRegex)
     ) {
       return;
     }
 
-    const request = new Request();
-    this.setKey(request);
-    request.setHttpHeader("Content-Type", "application/json");
+    this.grpcClient.PostTC(tcs, (err, response) => {
+      if (err != null) {
+        console.error("failed to post testcase to keploy server. error: ", err);
+      }
+      if (
+        response === undefined ||
+        response.tcsId === undefined ||
+        response.tcsId.id === ""
+      ) {
+        return;
+      }
+      this.denoise(response.tcsId.id, tcs);
+    });
+  }
 
-    const resp = await this.client.makeHttpRequest<{ id: string }>(
-      request.post(
-        "regression/testcase",
-        JSON.stringify(transformToSnakeCase(tcs))
-      )
-    );
-    if (resp.id === "") {
+  private async denoise(id: string, tcs: TestCaseReq) {
+    if (tcs.URI === undefined) {
       return;
     }
-    this.denoise(resp.id, tcs);
-  }
-
-  private async denoise(id: string, tcs: TestCaseRequest) {
     const resp = await this.simulate({
       id: id,
-      uri: tcs.uri,
-      http_req: tcs.httpReq,
+      URI: tcs.URI,
+      HttpReq: tcs.HttpReq,
+      Deps: tcs.Dependency,
     }).catch((err) => console.log(err));
-    const testRequest = {
-      id,
-      appId: this.appConfig.name,
-      resp,
-    };
-
-    const requestUrl = "regression/denoise";
-    const request = new Request();
-    this.setKey(request);
-    request.setHttpHeader("Content-Type", "application/json");
-    return this.client.makeHttpRequest(
-      request.post(
-        requestUrl,
-        JSON.stringify(transformToSnakeCase(testRequest))
-      )
+    this.grpcClient.DeNoise(
+      {
+        AppID: this.appConfig.name,
+        ID: id,
+        Resp: {
+          Body: resp?.body,
+          Header: resp?.header,
+          StatusCode: resp?.status_code,
+        },
+        TestCasePath: this.appConfig.testCasePath,
+        MockPath: this.appConfig.mockPath,
+      },
+      (err, response) => {
+        if (err != undefined) {
+          console.error(
+            "failed to call denoise method of keploy. error: ",
+            err
+          );
+        }
+        return response;
+      }
     );
-  }
-
-  async fetch(): Promise<TestCase[]> {
-    let offset = 0;
-    const limit = 25;
-    const app = this.appConfig.name;
-    const testCases = [];
-
-    while (true) {
-      const requestUrl = "regression/testcase";
-      const request = new Request();
-      this.setKey(request);
-      const response = await this.client.makeHttpRequest<TestCase[]>(
-        request.get(requestUrl, { app, offset, limit })
-      );
-      if (response === null) {
-        break;
-      }
-      testCases.push(...response);
-
-      if (response.length == 0) {
-        break;
-      }
-      offset += 25;
-    }
-
-    return testCases;
-  }
-
-  private setKey(request: Request) {
-    if (this.serverConfig.licenseKey) {
-      request.setHttpHeader("key", this.serverConfig.licenseKey);
-    }
   }
 }
