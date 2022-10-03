@@ -82,6 +82,7 @@ export default class Keploy {
   }) {
     return { url, licenseKey };
   }
+  
 
   validateAppConfig({
     name = process.env.KEPLOY_APP_NAME || packageName,
@@ -90,8 +91,8 @@ export default class Keploy {
     delay = process.env.KEPLOY_APP_DELAY || 5,
     timeout = process.env.KEPLOY_APP_TIMEOUT || 60,
     filter = process.env.KEPLOY_APP_FILTER || {},
-    testCasePath = path.resolve("./" + "keploy-tests"),
-    mockPath = path.resolve("./" + "keploy-tests/mock"),
+    testCasePath = path.resolve(process.env.KEPLOY_TEST_CASE_PATH || "./" + "keploy-tests"),
+    mockPath = path.resolve(process.env.KEPLOY_MOCK_PATH || "./" + "keploy-tests/mock"),
   }) {
     const errorFactory = (key: string) =>
       new Error(`Invalid App config key: ${key}`);
