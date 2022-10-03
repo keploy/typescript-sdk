@@ -76,7 +76,6 @@ export default class Keploy {
     return { url, licenseKey };
   }
   
-
   validateAppConfig({
     name = process.env.KEPLOY_APP_NAME || packageName,
     host = process.env.KEPLOY_APP_HOST || "localhost",
@@ -84,8 +83,10 @@ export default class Keploy {
     delay = process.env.KEPLOY_APP_DELAY || 5,
     timeout = process.env.KEPLOY_APP_TIMEOUT || 60,
     filter = process.env.KEPLOY_APP_FILTER || {},
-    testCasePath = path.resolve(process.env.KEPLOY_TEST_CASE_PATH || "./" + "keploy-tests"),
-    mockPath = path.resolve(process.env.KEPLOY_MOCK_PATH || "./" + "keploy-tests/mock"),
+    // testCasePath and mockPath can be defined in the .env file. If not defined then a folder named
+    // keploy-tests will be created which will contain mock folder.
+    testCasePath = path.resolve(process.env.KEPLOY_TEST_CASE_PATH || "./keploy-tests"),
+    mockPath = path.resolve(process.env.KEPLOY_MOCK_PATH || "./keploy-tests/mock"),
   }) {
     const errorFactory = (key: string) =>
       new Error(`Invalid App config key: ${key}`);
@@ -165,16 +166,21 @@ export default class Keploy {
           response.tcs == undefined ||
           response.tcs.length == 0
         ) {
+          // Base case of the recursive function.
+          // If the response is null then all the testcases cases will go to the afterfetch function.
           end = true;
           this.afterFetch(testcases);
           return;
         }
         testcases.push(...response.tcs);
         if (response.eof == true) {
+          // Base case of the recursive function.
+          // If the eof is true then all the testcases cases will go to the afterfetch function.
           end = true;
           this.afterFetch(testcases);
           return testcases;
         }
+        // Recursive call to the function fetch.
         this.fetch(testcases, offset + 25);
       }
     );
@@ -189,6 +195,8 @@ export default class Keploy {
     }
   }
 
+  // afterFetch fuction contains Start, Test and End grpc calls to the function.
+  // The nesting is done in the grpc calls because they return their responses in the callback function.
   async afterFetch(testCases: TestCase[]) {
     const totalTests = testCases.length;
     this.grpcClient.Start(
