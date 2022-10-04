@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import { DataBytes } from "../proto/services/DataBytes";
 import { StrArr } from "../proto/services/StrArr";
 import { getExecutionContext } from "./context";
 
@@ -26,24 +27,23 @@ export { transformToSnakeCase };
 export function ProcessDep(meta: { [key: string]: string }, outputs: any[]) {
   if (
     getExecutionContext() == undefined ||
-    getExecutionContext().context == undefined ||
-    getExecutionContext().context.keployContext == undefined
+    getExecutionContext().context == undefined
   ) {
     console.error("keploy context is not present to mock dependencies");
     return;
   }
-  const kctx = getExecutionContext().context.keployContext;
+  const kctx = getExecutionContext().context;
   switch (kctx.mode) {
     case "record":
-      const res: number[][] = [];
+      const res: DataBytes[] = [];
       for (let i = 0; i < outputs.length; i++) {
-        res.push(stringToBinary(JSON.stringify(outputs[i])));
+        res.push({ Bin: stringToBinary(JSON.stringify(outputs[i])) });
       }
       kctx.deps.push({
-        name: meta.name,
-        type: meta.type,
-        meta: meta,
-        data: res,
+        Name: meta.name,
+        Type: meta.type,
+        Meta: meta,
+        Data: res,
       });
       break;
     case "test":
@@ -54,7 +54,7 @@ export function ProcessDep(meta: { [key: string]: string }, outputs: any[]) {
         );
         return;
       }
-      if (outputs.length !== kctx.deps[0].data.length) {
+      if (outputs.length !== kctx.deps[0].Data.length) {
         console.error(
           "dependency failed: incorrect number of dependencies in keploy context. test id: %s",
           kctx.testID
@@ -63,7 +63,7 @@ export function ProcessDep(meta: { [key: string]: string }, outputs: any[]) {
       }
 
       for (let i = 0; i < outputs.length; i++) {
-        outputs[i] = JSON.parse(binaryToString(kctx.deps[0].data[i]));
+        outputs[i] = JSON.parse(binaryToString(kctx.deps[0].Data[i].Bin));
       }
       kctx.deps = kctx.deps.slice(1);
       break;
@@ -73,23 +73,24 @@ export function ProcessDep(meta: { [key: string]: string }, outputs: any[]) {
   }
 }
 
-function stringToBinary(input: string) {
+export function stringToBinary(input: string) {
   const characters = input.split("");
-  const res: number[] = [];
+  const res = new Uint8Array(characters.length);
 
   characters.map(function (char, i) {
-    const binary = char.charCodeAt(0);
-    res[i] = binary;
+    const bit = char.charCodeAt(0);
+    res[i] = bit;
   });
   return res;
 }
 
-function binaryToString(bin: number[]) {
-  let str = "";
-  bin.map(function (el) {
-    str += String.fromCharCode(el);
-  });
-  return str;
+function binaryToString(buf: Buffer) {
+  // let str = "";
+  // bin.map(function (el) {
+  //   str += String.fromCharCode(el);
+  // });
+  // return str;
+  return buf.toString();
 }
 
 export function toHttpHeaders(headers: { [key: string]: StrArr }) {

@@ -1,3 +1,5 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable @typescript-eslint/no-unused-vars */
 import HttpClient, { Request } from "./client";
 import { toHttpHeaders, transformToSnakeCase } from "./util";
 import { getRequestHeader } from "../integrations/express/middleware";
@@ -10,13 +12,19 @@ import { RegressionServiceClient } from "../proto/services/RegressionService";
 import { TestCaseReq } from "../proto/services/TestCaseReq";
 import { TestCase } from "../proto/services/TestCase";
 import { StrArr } from "../proto/services/StrArr";
+import assert = require("assert");
+import { createExecutionContext, getExecutionContext } from "./context";
 
-const PORT = 8081;
+const PORT = 6789;
 const PROTO_PATH = "../proto/services.proto";
 const packageDef = protoLoader.loadSync(path.resolve(__dirname, PROTO_PATH));
 const grpcObj = grpc.loadPackageDefinition(
   packageDef
 ) as unknown as ProtoGrpcType;
+
+export const V1_BETA1 = "api.keploy.io/v1beta1",
+  HTTP_EXPORT = "Http",
+  GENERIC_EXPORT = "Generic";
 
 type AppConfigFilter = {
   urlRegex?: string;
@@ -51,6 +59,7 @@ export default class Keploy {
   serverConfig: ServerConfig;
   responses: Record<ID, HttpResponse>;
   dependencies: Record<ID, unknown>;
+  mocks: Record<ID, unknown>;
   client: HttpClient;
   grpcClient: RegressionServiceClient;
 
@@ -66,6 +75,7 @@ export default class Keploy {
     this.serverConfig = this.validateServerConfig(server);
     this.responses = {};
     this.dependencies = {};
+    this.mocks = {};
     this.client = new HttpClient(this.serverConfig.url);
   }
 
@@ -75,7 +85,7 @@ export default class Keploy {
   }) {
     return { url, licenseKey };
   }
-  
+
   validateAppConfig({
     name = process.env.KEPLOY_APP_NAME || packageName,
     host = process.env.KEPLOY_APP_HOST || "localhost",
@@ -85,8 +95,12 @@ export default class Keploy {
     filter = process.env.KEPLOY_APP_FILTER || {},
     // testCasePath and mockPath can be defined in the .env file. If not defined then a folder named
     // keploy-tests will be created which will contain mock folder.
-    testCasePath = path.resolve(process.env.KEPLOY_TEST_CASE_PATH || "./keploy-tests"),
-    mockPath = path.resolve(process.env.KEPLOY_MOCK_PATH || "./keploy-tests/mock"),
+    testCasePath = path.resolve(
+      process.env.KEPLOY_TEST_CASE_PATH || "./keploy-tests"
+    ),
+    mockPath = path.resolve(
+      process.env.KEPLOY_MOCK_PATH || "./keploy-tests/mock"
+    ),
   }) {
     const errorFactory = (key: string) =>
       new Error(`Invalid App config key: ${key}`);
@@ -117,7 +131,7 @@ export default class Keploy {
     return { name, host, port, delay, timeout, filter, testCasePath, mockPath };
   }
 
-  async create() {
+  async runTests() {
     if (process.env.KEPLOY_MODE == "test") {
       console.log("test starting in " + this.appConfig.delay + "s");
       setTimeout(async () => {
@@ -130,6 +144,10 @@ export default class Keploy {
 
   getDependencies(id: ID) {
     return this.dependencies[id] as object[] | undefined;
+  }
+
+  getMocks(id: ID) {
+    return this.mocks[id] as object[] | undefined;
   }
 
   getResp(id: ID) {
@@ -157,10 +175,9 @@ export default class Keploy {
         MockPath: this.appConfig.mockPath,
       },
       (err, response) => {
-        if (err !== undefined) {
-          console.error("failed to call getTcs method of keploy. error: ", err);
+        if (err !== null) {
+          console.error("failed to fetch test cases from keploy. error: ", err);
         }
-        console.log(response);
         if (
           response == null ||
           response.tcs == undefined ||
@@ -188,13 +205,16 @@ export default class Keploy {
   }
 
   async test() {
-    const testCases = await this.fetch([], 0);
-    if (testCases == undefined) {
-      console.log("testcases is undefinded");
-      return;
-    }
+    await this.fetch([], 0);
   }
 
+  // returns promise to capture the code coverage of recorded testc cases
+  async assertTests() {
+    return new Promise(async (resolve) => {
+      createExecutionContext({ resolve: resolve });
+      await this.test();
+    });
+  }
   // afterFetch fuction contains Start, Test and End grpc calls to the function.
   // The nesting is done in the grpc calls because they return their responses in the callback function.
   async afterFetch(testCases: TestCase[]) {
@@ -208,17 +228,32 @@ export default class Keploy {
       },
       async (err, resp) => {
         if (err !== null) {
-          console.error("failed to call test method of keploy. error: ", err);
+          console.error("failed to call start method of keploy. error: ", err);
         }
         const testId = resp?.id;
 
-        console.log("starting test execution. { id: ",testId," }, { total tests: ",totalTests," }");
+        console.log(
+          "starting test execution. { id: ",
+          testId,
+          " }, { total tests: ",
+          totalTests,
+          " }"
+        );
         let pass = true;
         for (const [i, testCase] of testCases.entries()) {
-          console.log("testing ",i + 1," of ",totalTests," { testcase id: ",testCase.id," }");
+          console.log(
+            "testing ",
+            i + 1,
+            " of ",
+            totalTests,
+            " { testcase id: ",
+            testCase.id,
+            " }"
+          );
           const resp = await this.simulate(testCase).catch((err) =>
             console.log(err)
           );
+
           this.grpcClient.Test(
             {
               AppID: this.appConfig.name,
@@ -232,16 +267,38 @@ export default class Keploy {
             },
             (err, response) => {
               if (err !== null) {
-                console.error("failed to call test method of keploy. error: ",err);
+                console.error(
+                  "failed to call test method of keploy. error: ",
+                  err
+                );
               }
+
               if (response?.pass?.pass === false) {
                 pass = false;
               }
-              console.log("result { testcase id: ",testCase.id," }, { passed: ",response?.pass?.pass," }");
-              console.log("\n tcs index:", i, "\n");
+              console.log(
+                "result { testcase id: ",
+                testCase.id,
+                " }, { passed: ",
+                response?.pass?.pass,
+                " }"
+              );
+
               if (i === testCases.length - 1) {
                 this.end(testId, pass);
-                console.log("test run completed { run id: ",testId," }, passed overall: ",pass);
+                console.log(
+                  "test run completed { run id: ",
+                  testId,
+                  " }, passed overall: ",
+                  pass
+                );
+                // fetches resolve function of the Promise which was returned to unit test for code-coverage
+                const resolve = getExecutionContext()?.context?.resolve;
+                if (resolve !== undefined) {
+                  // asserts for testrun result
+                  assert.equal(pass, true);
+                  resolve(1);
+                }
               }
             }
           );
@@ -267,6 +324,7 @@ export default class Keploy {
         }
       }
     );
+    // return resp.id;
   }
 
   private async simulate(tc: TestCase) {
@@ -274,6 +332,7 @@ export default class Keploy {
       return;
     }
     this.dependencies[tc.id] = tc.Deps;
+    this.mocks[tc.id] = tc.Mocks;
 
     const client = new HttpClient(
       `http://${this.appConfig.host}:${this.appConfig.port}`
@@ -281,7 +340,7 @@ export default class Keploy {
     //@ts-ignore
     const requestUrl = `${tc.HttpReq?.URL.substr(1)}`;
 
-    const http_resp = await client.makeHttpRequestRaw<object>(
+    await client.makeHttpRequestRaw<object>(
       new Request()
         .setHttpHeader("KEPLOY_TEST_ID", tc.id)
         //@ts-ignore
@@ -290,6 +349,8 @@ export default class Keploy {
         .create(tc.HttpReq?.Method, requestUrl, tc.HttpReq?.Body)
     );
     const resp = this.getResp(tc.id);
+    delete this.dependencies[tc.id];
+    delete this.mocks[tc.id];
     delete this.responses[tc.id];
     return resp;
   }
@@ -326,6 +387,7 @@ export default class Keploy {
       URI: tcs.URI,
       HttpReq: tcs.HttpReq,
       Deps: tcs.Dependency,
+      Mocks: tcs.Mocks,
     }).catch((err) => console.log(err));
     this.grpcClient.DeNoise(
       {
@@ -341,7 +403,10 @@ export default class Keploy {
       },
       (err, response) => {
         if (err != undefined) {
-          console.error("failed to call denoise method of keploy. error: ",err);
+          console.error(
+            "failed to call denoise method of keploy. error: ",
+            err
+          );
         }
         return response;
       }
