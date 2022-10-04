@@ -75,11 +75,13 @@ export KEPLOY_MOCK_PATH="./exampleMockPath"
 
 **Note:** To enable `Test Export`, add `export ENABLE_TEST_EXPORT=true` in your .env file of [keploy-server](https://github.com/keploy/keploy) repository. If enabled, yaml files  containing test cases will be generated in the directory provided by the user. Similarly, mocks will be generated in the yaml files.
 
-## Supported Frameworks
+## Supported Routers
 ### 1. Express
 ```js
 require("typescript-sdk/dist/integrations/express/register");
 ```
+The require statement should be at the top of your main file (server.js).
+
 #### Example
 ```js
 require("typescript-sdk/dist/integrations/express/register");
@@ -97,6 +99,20 @@ app.listen(port, () => {
     console.log(`Server is running on port: ${port}`);
 })
 ```
+Note:- Import statements can't be used. Use require instead of import.
+
+## Supported Dependencies
+
+### 1. Octokit
+
+```js
+require("typescript-sdk/dist/integrations/octokit/require")
+var {NewContext} = require ("typescript-sdk/dist/mock/mock")
+NewContext({Mode: "test", Name: "demo-app"}) // Here, you can set the name and keploy mode for your app
+```
+These statements should be at the top of your main file (server.js).
+
+Note:- Import statements can't be used. Only CommonJs support is currently provided.
 ## Development Setup
 
 - This project uses [Yarn](https://yarnpkg.com/) for package management. To install yarn, please make sure [Node](https://nodejs.org/en/) is installed and then:
