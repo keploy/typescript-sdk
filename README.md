@@ -108,7 +108,7 @@ Note:- Import statements can't be used. Use require instead of import.
 ```js
 require("typescript-sdk/dist/integrations/octokit/require")
 ```
-These statements should be at the top of your main file (server.js).
+This statement should be at the top of your main file (server.js).
 
 Note:- Import statements can't be used. Only CommonJs support is currently provided.
 ## Development Setup
@@ -141,9 +141,6 @@ describe('routes', function () {
     var server, octokit;
     beforeEach(function () {
         NewContext({Mode: "record", Name: "your demo app name"})  // Set your keploy mode and name here.
-        // Clears the cache so a new server instance is used for each test.
-        // delete require.cache[require.resolve('../app')];
-
         octokit = new Octokit({ auth: "your authentication token"});
 
     });
