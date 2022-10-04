@@ -5,6 +5,7 @@ import path, { resolve } from "path";
 import { ProtoGrpcType } from "../proto/services";
 import Mode, { MODE_TEST } from "../src/mode";
 import { createExecutionContext, getExecutionContext } from "../src/context";
+import { startRecordingMocks } from "./utils";
 
 const PORT = 8081;
 const PROTO_FILE = "../proto/services.proto";
@@ -18,6 +19,7 @@ export const grpcClient = new grpcObj.services.RegressionService(
 );
 
 export let mockPath = "";
+export const MockIds: Record<string, unknown> = {};
 
 export interface Config {
   Name: string;
@@ -104,4 +106,5 @@ export function NewContext(conf: Config) {
     name,
     ".\n If you dont see any logs about your dependencies below, your dependency/s are NOT wrapped.\n"
   );
+  startRecordingMocks(path + "/" + conf.Name + ".yaml", mode, name, conf.Name);
 }

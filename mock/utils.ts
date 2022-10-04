@@ -1,6 +1,6 @@
 import { response } from "express";
 import { Mock } from "../proto/services/Mock";
-import { grpcClient, mockPath } from "./mock";
+import { grpcClient, MockIds, mockPath } from "./mock";
 
 export function putMocks(mock: Mock) {
   grpcClient.PutMock({ Path: mockPath, Mock: mock }, (err, response) => {
@@ -14,4 +14,34 @@ export function putMocks(mock: Mock) {
       );
     }
   });
+}
+
+export function startRecordingMocks(
+  path: string,
+  mode: string,
+  name: string,
+  mockId: string
+) {
+  grpcClient.StartMocking(
+    {
+      Mode: mode,
+      Path: path,
+    },
+    function (err, response) {
+      if (err !== null) {
+        console.error("failed to start mocking due to error: ", err);
+        return;
+      }
+      if (response?.Exists) {
+        console.log(
+          "🚨 Keploy failed to record dependencies because yaml file already exists",
+          name,
+          " in directory: ",
+          path,
+          ".\n"
+        );
+        MockIds[mockId] = true;
+      }
+    }
+  );
 }

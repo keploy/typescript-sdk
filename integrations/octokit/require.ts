@@ -11,6 +11,7 @@ import { HTTP_EXPORT, V1_BETA1 } from "../../src/keploy";
 import { getRequestHeader, getResponseHeader } from "../express/middleware";
 import { getReasonPhrase } from "http-status-codes";
 import { DataBytes } from "../../proto/services/DataBytes";
+import { MockIds } from "../../mock/mock";
 
 // @ts-ignore
 Hook(["octokit"], function (exported) {
@@ -108,7 +109,7 @@ export function wrappedNodeFetch() {
           };
           // record mocks for unit-test-mock-library
           if (ctx.fileExport === true) {
-            putMocks(httpMock);
+            MockIds[ctx.testId] !== true ? putMocks(httpMock) : "";
           } else {
             ctx.mocks.push(httpMock);
             // ProcessDep(meta, [respData, rinit]);
