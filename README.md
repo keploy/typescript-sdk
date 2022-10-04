@@ -29,6 +29,22 @@ npm i https://github.com/keploy/typescript-sdk
 ```js
 require("typescript-sdk/dist/integrations/express/register");
 ```
+The require statement should be at the top of your main file (server.js). 
+
+Example :
+```js
+require("typescript-sdk/dist/integrations/express/register");
+var express = require('express');
+var app = express();
+app.get('/', function (req, res) {
+    res.send('Hello World!\n');
+});
+// Export server for testing.
+var server = app.listen(3000,() =>
+console.log(`Example app listening on port 3000!`));
+module.exports = server;
+```
+
 ## Configure
 ```
 export KEPLOY_MODE="test"
@@ -36,9 +52,7 @@ export KEPLOY_APP_NAME="my-app"
 export KEPLOY_APP_HOST="localhost"
 export KEPLOY_APP_PORT=5050 # port on which server is running
 export KEPLOY_APP_DELAY=5 # time delay before starting testruns(in seconds)
-export KEPLOY_APP_TIMEOUT=100 # should be number
-export KEPLOY_TEST_CASE_PATH="./example"    # If KEPLOY_TEST_CASE_PATH is not provided then a folder named keploy-tests will be made containing mocks folder. If KEPLOY_MOCK_PATH is provided then the mocks will be generated there. 
-export KEPLOY_MOCK_PATH="./exampleMockPath" 
+export KEPLOY_APP_TIMEOUT=100 # should be number 
 # export KEPLOY_APP_FILTER={"urlRegex":"*"}  # should be json not to capture for certain url's
 
 export KEPLOY_SERVER_URL="http://localhost:8081/api" # self hosted keploy running server
@@ -51,6 +65,14 @@ There are 3 modes:
  - **Off**: Turns off all the functionality provided by the API
 
 **Note:** `KEPLOY_MODE` value is case sensitive.
+
+## Generate E2E tests (with mocks)
+
+```
+export KEPLOY_TEST_CASE_PATH="./example"    # If KEPLOY_TEST_CASE_PATH is not provided then a folder named keploy-tests will be made containing mocks folder. If KEPLOY_MOCK_PATH is provided then the mocks will be generated there. 
+export KEPLOY_MOCK_PATH="./exampleMockPath"
+```
+
 **Note:** To enable `Test Export`, add `export ENABLE_TEST_EXPORT=true` in your .env file of [keploy-server](https://github.com/keploy/keploy) repository. If enabled, yaml files  containing test cases will be generated in the directory provided by the user. Similarly, mocks will be generated in the yaml files.
 
 ## Supported Frameworks
@@ -110,6 +132,8 @@ describe("test function", ()=>{
 })
 ```
 Note:- To see code coverage please use nyc mocha and see how many lines are covered!!
+
+Note:- Jest is not supported currently!!
 
 
 - Furthermore, to commit your changes use `yarn commit` instead of `git commit` for better commit experience.
