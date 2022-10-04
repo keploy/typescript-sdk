@@ -29,6 +29,22 @@ npm i https://github.com/keploy/typescript-sdk
 ```js
 require("typescript-sdk/dist/integrations/express/register");
 ```
+The require statement should be at the top of your main file (server.js). 
+
+Example :
+```js
+require("typescript-sdk/dist/integrations/express/register");
+var express = require('express');
+var app = express();
+app.get('/', function (req, res) {
+    res.send('Hello World!\n');
+});
+
+var server = app.listen(3000,() =>
+console.log(`Example app listening on port 3000!`));
+module.exports = server;
+```
+
 ## Configure
 ```
 export KEPLOY_MODE="test"
@@ -36,9 +52,7 @@ export KEPLOY_APP_NAME="my-app"
 export KEPLOY_APP_HOST="localhost"
 export KEPLOY_APP_PORT=5050 # port on which server is running
 export KEPLOY_APP_DELAY=5 # time delay before starting testruns(in seconds)
-export KEPLOY_APP_TIMEOUT=100 # should be number
-export KEPLOY_TEST_CASE_PATH="./example"    # If KEPLOY_TEST_CASE_PATH is not provided then a folder named keploy-tests will be made containing mocks folder. If KEPLOY_MOCK_PATH is provided then the mocks will be generated there. 
-export KEPLOY_MOCK_PATH="./exampleMockPath" 
+export KEPLOY_APP_TIMEOUT=100 # should be number 
 # export KEPLOY_APP_FILTER={"urlRegex":"*"}  # should be json not to capture for certain url's
 
 export KEPLOY_SERVER_URL="http://localhost:8081/api" # self hosted keploy running server
@@ -51,13 +65,23 @@ There are 3 modes:
  - **Off**: Turns off all the functionality provided by the API
 
 **Note:** `KEPLOY_MODE` value is case sensitive.
+
+## Generate E2E tests (with mocks)
+
+```
+export KEPLOY_TEST_CASE_PATH="./example"    # If KEPLOY_TEST_CASE_PATH is not provided then a folder named keploy-tests will be made containing mocks folder. If KEPLOY_MOCK_PATH is provided then the mocks will be generated there. 
+export KEPLOY_MOCK_PATH="./exampleMockPath"
+```
+
 **Note:** To enable `Test Export`, add `export ENABLE_TEST_EXPORT=true` in your .env file of [keploy-server](https://github.com/keploy/keploy) repository. If enabled, yaml files  containing test cases will be generated in the directory provided by the user. Similarly, mocks will be generated in the yaml files.
 
-## Supported Frameworks
+## Supported Routers
 ### 1. Express
 ```js
 require("typescript-sdk/dist/integrations/express/register");
 ```
+The require statement should be at the top of your main file (server.js).
+
 #### Example
 ```js
 require("typescript-sdk/dist/integrations/express/register");
@@ -75,6 +99,18 @@ app.listen(port, () => {
     console.log(`Server is running on port: ${port}`);
 })
 ```
+Note:- Import statements can't be used. Use require instead of import.
+
+## Supported Dependencies
+
+### 1. Octokit
+
+```js
+require("typescript-sdk/dist/integrations/octokit/require")
+```
+These statements should be at the top of your main file (server.js).
+
+Note:- Import statements can't be used. Only CommonJs support is currently provided.
 ## Development Setup
 
 - This project uses [Yarn](https://yarnpkg.com/) for package management. To install yarn, please make sure [Node](https://nodejs.org/en/) is installed and then:
@@ -87,6 +123,40 @@ npm i -g yarn
 
 ```sh
 yarn install
+```
+
+### How to use mock library
+
+The external calls from unit tests will be recorded and replayed as mocks from yaml files under a directory named mocks.
+
+Following is an example of unit test with octokit :
+
+#### Example
+```js
+require("typescript-sdk/dist/integrations/octokit/require")
+var {NewContext} = require ("typescript-sdk/dist/mock/mock")
+var assert = require('assert');
+const { Octokit, App } = require("octokit");
+describe('routes', function () {
+    var server, octokit;
+    beforeEach(function () {
+        NewContext({Mode: "record", Name: "your demo app name"})  // Set your keploy mode and name here.
+        // Clears the cache so a new server instance is used for each test.
+        // delete require.cache[require.resolve('../app')];
+
+        octokit = new Octokit({ auth: "your authentication token"});
+
+    });
+    // Test to make sure URLs respond correctly.
+    it("url/", async function () {
+        return new Promise(function(resolve){
+            octokit.rest.users.getAuthenticated({}).then((result) => {
+                assert.equal(result.data.login, "your github username")
+                resolve()    
+            });
+        })
+    });
+});
 ```
 
 ### Integration with Mocha testing framework
@@ -102,7 +172,7 @@ describe("test function", ()=>{
             done()
           })
     test("should be running", async ()=> {
-      await keploy.assertTests();
+      return keploy.assertTests();
     });
     after(()=>{
          process.exit(1); //exits the node server
@@ -110,6 +180,8 @@ describe("test function", ()=>{
 })
 ```
 Note:- To see code coverage please use nyc mocha and see how many lines are covered!!
+
+Note:- Jest is not supported currently!!
 
 
 - Furthermore, to commit your changes use `yarn commit` instead of `git commit` for better commit experience.
