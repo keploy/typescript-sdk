@@ -3,15 +3,15 @@
 [![License](.github/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 # Keploy Typescript-SDK
-[Keploy](https://keploy.io) is a no-code testing platform that generates tests from API calls. This is the Typescript client SDK for recording and replaying the API Calls. There are 2 modes: 
+[Keploy](https://keploy.io) is a no-code testing platform that generates tests from API calls. This is the Typescript client SDK for recording and replaying the API Calls. There are 2 modes:
 1. **Record mode**
     1. Record requests, response and sends to Keploy server.
     2. After keploy server removes duplicates, it then runs the request on the API again to identify noisy fields.
-    3. Sends the noisy fields to the keploy server to be saved along with the testcase. 
+    3. Sends the noisy fields to the keploy server to be saved along with the testcase.
 2. **Test mode**
-    1. Fetches testcases for the app from keploy server. 
-    2. Calls the API with same request payload in testcase. 
-    3. Validates the respones and uploads results to the keploy server. 
+    1. Fetches testcases for the app from keploy server.
+    2. Calls the API with same request payload in testcase.
+    3. Validates the respones and uploads results to the keploy server.
 
 ## Contents
 1. [Installation](#installation)
@@ -45,10 +45,10 @@ export KEPLOY_SERVER_URL="http://localhost:8081/api" # self hosted keploy runnin
 ### KEPLOY_MODE
 There are 3 modes:
  - **Record**: Sets to record mode.
- - **Test**: Sets to test mode. 
+ - **Test**: Sets to test mode.
  - **Off**: Turns off all the functionality provided by the API
 
-**Note:** `KEPLOY_MODE` value is case sensitive. 
+**Note:** `KEPLOY_MODE` value is case sensitive.
 
 ## Supported Frameworks
 ### 1. Express
@@ -86,7 +86,30 @@ npm i -g yarn
 yarn install
 ```
 
-- Furthermore, to commit your changes use `yarn commit` instead of `git commit` for better commit experiance.
+### Integration with Mocha testing framework
+You just need to do some imports and call a built-in assert function in your code in your unit test file and that's it!!🔥🔥🔥
+```js
+const {runServer} = require('../server') //your server wrapper
+const {keploy}  = require('typescript-sdk/dist/integrations/express/register')
+const {describe,test,before,after}=  require('mocha')
+describe("test function", ()=>{
+    before( (done)=>{
+            keploy.setTestMode();
+            runServer()
+            done()
+          })
+    test("should be running", async ()=> {
+      await keploy.assertTests();
+    });
+    after(()=>{
+         process.exit(1); //exits the node server
+       })
+})
+```
+Note:- To see code coverage please use nyc mocha and see how many lines are covered!!
+
+
+- Furthermore, to commit your changes use `yarn commit` instead of `git commit` for better commit experience.
 
 - For VSCode setup, make sure these extensions are installed:
   - [EditorConfig](https://marketplace.visualstudio.com/items?itemName=EditorConfig.EditorConfig)
