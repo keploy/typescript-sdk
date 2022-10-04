@@ -13,6 +13,7 @@ import { TestCaseReq } from "../proto/services/TestCaseReq";
 import { TestCase } from "../proto/services/TestCase";
 import { StrArr } from "../proto/services/StrArr";
 import assert = require("assert");
+import { createExecutionContext, getExecutionContext } from "./context";
 
 const PORT = 8081;
 const PROTO_PATH = "../proto/services.proto";
@@ -174,10 +175,9 @@ export default class Keploy {
         MockPath: this.appConfig.mockPath,
       },
       (err, response) => {
-        if (err !== undefined) {
-          console.error("failed to call getTcs method of keploy. error: ", err);
+        if (err !== null) {
+          console.error("failed to fetch test cases from keploy. error: ", err);
         }
-        console.log(response);
         if (
           response == null ||
           response.tcs == undefined ||
@@ -205,16 +205,16 @@ export default class Keploy {
   }
 
   async test() {
-    const testCases = await this.fetch([], 0);
-    console.log("testrunresult");
+    await this.fetch([], 0);
   }
 
+  // returns promise to capture the code coverage of recorded testc cases
   async assertTests() {
-    const res = await this.test();
-    console.log("lkkk");
-    // assert.equal(res, true);
+    return new Promise(async (resolve) => {
+      createExecutionContext({ resolve: resolve });
+      await this.test();
+    });
   }
-
   // afterFetch fuction contains Start, Test and End grpc calls to the function.
   // The nesting is done in the grpc calls because they return their responses in the callback function.
   async afterFetch(testCases: TestCase[]) {
@@ -228,7 +228,7 @@ export default class Keploy {
       },
       async (err, resp) => {
         if (err !== null) {
-          console.error("failed to call test method of keploy. error: ", err);
+          console.error("failed to call start method of keploy. error: ", err);
         }
         const testId = resp?.id;
 
@@ -253,6 +253,7 @@ export default class Keploy {
           const resp = await this.simulate(testCase).catch((err) =>
             console.log(err)
           );
+
           this.grpcClient.Test(
             {
               AppID: this.appConfig.name,
@@ -271,6 +272,7 @@ export default class Keploy {
                   err
                 );
               }
+
               if (response?.pass?.pass === false) {
                 pass = false;
               }
@@ -281,16 +283,22 @@ export default class Keploy {
                 response?.pass?.pass,
                 " }"
               );
+
               if (i === testCases.length - 1) {
                 this.end(testId, pass);
-                // call end event for representing coverage
-                assert.equal(pass, true);
                 console.log(
                   "test run completed { run id: ",
                   testId,
                   " }, passed overall: ",
                   pass
                 );
+                // fetches resolve function of the Promise which was returned to unit test for code-coverage
+                const resolve = getExecutionContext()?.context?.resolve;
+                if (resolve !== undefined) {
+                  // asserts for testrun result
+                  assert.equal(pass, true);
+                  resolve(1);
+                }
               }
             }
           );
