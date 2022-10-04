@@ -17,7 +17,7 @@ Hook(["express"], function (exports) {
     keployApp.use(cors());
     keployApp.use(expressMiddleware(keploy));
     keployApp.appliedMiddleware = true;
-    keploy.create();
+    keploy.runTests();
     return keployApp;
   }
 

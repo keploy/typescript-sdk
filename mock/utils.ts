@@ -5,7 +5,7 @@ import { grpcClient, mockPath } from "./mock";
 export function putMocks(mock: Mock) {
   grpcClient.PutMock({ Path: mockPath, Mock: mock }, (err, response) => {
     if (err !== null) {
-      console.error();
+      console.error(err);
     }
     if (response?.Inserted !== undefined && response?.Inserted.greaterThan(0)) {
       console.log(

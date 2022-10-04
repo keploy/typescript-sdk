@@ -5,11 +5,12 @@ import mixin from "merge-descriptors";
 import fetch, { Headers, Response, ResponseInit } from "node-fetch";
 import { getExecutionContext } from "../../src/context";
 import { Readable } from "stream";
-import { ProcessDep } from "../../src/util";
+import { ProcessDep, stringToBinary } from "../../src/util";
 import { putMocks } from "../../mock/utils";
 import { HTTP_EXPORT, V1_BETA1 } from "../../src/keploy";
 import { getRequestHeader, getResponseHeader } from "../express/middleware";
 import { getReasonPhrase } from "http-status-codes";
+import { DataBytes } from "../../proto/services/DataBytes";
 
 // @ts-ignore
 Hook(["octokit"], function (exported) {
@@ -71,7 +72,6 @@ export function wrappedNodeFetch() {
       options: options,
       type: "HTTP_CLIENT",
     };
-    console.log("mode in dep calls", ctx.mode);
     switch (ctx.mode) {
       case "record":
         resp = await fetchFunc.apply(this, [url, options]);
@@ -86,30 +86,43 @@ export function wrappedNodeFetch() {
           respData.push(chunk);
         });
         clonedResp?.body?.on("end", async function () {
+          const httpMock = {
+            Version: V1_BETA1,
+            Name: ctx.testId,
+            Kind: HTTP_EXPORT,
+            Spec: {
+              Metadata: meta,
+              Req: {
+                URL: url,
+                Body: JSON.stringify(options?.body),
+                Header: getRequestHeader(options.headers),
+                Method: options.method,
+                // URLParams:
+              },
+              Res: {
+                StatusCode: rinit.status,
+                Header: getResponseHeader(rinit.headers),
+                Body: respData.toString(),
+              },
+            },
+          };
           // record mocks for unit-test-mock-library
           if (ctx.fileExport === true) {
-            putMocks({
-              Version: V1_BETA1,
-              Name: ctx.testId,
-              Kind: HTTP_EXPORT,
-              Spec: {
-                Metadata: meta,
-                Req: {
-                  URL: url,
-                  Body: JSON.stringify(options?.body),
-                  Header: getRequestHeader(options.headers),
-                  Method: options.method,
-                  // URLParams:
-                },
-                Res: {
-                  StatusCode: rinit.status,
-                  Header: getResponseHeader(rinit.headers),
-                  Body: respData.toString(),
-                },
-              },
-            });
+            putMocks(httpMock);
           } else {
-            ProcessDep(meta, [respData, rinit]);
+            ctx.mocks.push(httpMock);
+            // ProcessDep(meta, [respData, rinit]);
+            const res: DataBytes[] = [];
+            // for (let i = 0; i < outputs.length; i++) {
+            res.push({ Bin: stringToBinary(JSON.stringify(respData)) });
+            res.push({ Bin: stringToBinary(JSON.stringify(rinit)) });
+            // }
+            ctx.deps.push({
+              Name: meta.name,
+              Type: meta.type,
+              Meta: meta,
+              Data: res,
+            });
           }
         });
         break;
@@ -129,17 +142,19 @@ export function wrappedNodeFetch() {
             status: ctx.mocks[0].Spec.Res.StatusCode,
             statusText: getReasonPhrase(ctx.mocks[0].Spec.Res.StatusCode),
           };
-          outputs[0] = ctx.mocks[0].Spec.Res.Body;
+          outputs[0] = [ctx.mocks[0].Spec.Res.Body];
           ctx.mocks.shift();
         } else {
           ProcessDep({}, outputs);
         }
-        console.log("mocks in dep calls", ctx.mocks);
         rinit.headers = new Headers(outputs[1].headers);
         rinit.status = outputs[1].status;
         rinit.statusText = outputs[1].statusText;
-
-        resp = new Response(Readable.from(Buffer.from(outputs[0])), rinit);
+        const buf: Buffer[] = [];
+        outputs[0].map((el: any) => {
+          buf.push(Buffer.from(el));
+        });
+        resp = new Response(Readable.from(buf), rinit);
         break;
       case "off":
         return fetchFunc.apply(this, [url, options]);

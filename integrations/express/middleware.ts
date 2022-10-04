@@ -14,13 +14,16 @@ class ResponseBody {
   }
 
   static push(req: Request, chunks: object): void {
-    const ctx = ResponseBody.responseMap.get(req);
-    const oldResponse = ctx?.body;
-    if (oldResponse === undefined || ctx === undefined) {
+    const resp = ResponseBody.responseMap.get(req);
+    if (resp === undefined || resp.body === undefined) {
+      const resp = new ResponseBody();
+      resp.body = [chunks];
+      ResponseBody.responseMap.set(req, resp);
+
       return;
     }
-    oldResponse.push(chunks);
-    ResponseBody.responseMap.set(req, ctx);
+    resp.body.push(chunks);
+    ResponseBody.responseMap.set(req, resp);
   }
   static get(req: Request): object[] | undefined {
     const ctx = ResponseBody.responseMap.get(req);
@@ -71,6 +74,7 @@ export default function middleware(
         process.env.KEPLOY_MODE == "off") ||
       keploy == undefined
     ) {
+      createExecutionContext({ mode: "off" });
       next();
       return;
     }
@@ -82,13 +86,14 @@ export default function middleware(
         mode: "test",
         testId: id,
         deps: keploy.getDependencies(id),
+        mocks: keploy.getMocks(id),
       });
       captureResp(req, res, next);
       return;
     }
 
     // record mode
-    createExecutionContext({ mode: "record", deps: [] });
+    createExecutionContext({ mode: "record", deps: [], mocks: [] });
     captureResp(req, res, next);
   };
 }
@@ -159,8 +164,9 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
       // @ts-ignore
       Body: String(ResponseBody.get(req)),
     },
-    Dependency: getExecutionContext().context.keployContext.deps,
+    Dependency: getExecutionContext().context.deps,
     TestCasePath: keploy.appConfig.testCasePath,
     MockPath: keploy.appConfig.mockPath,
+    Mocks: getExecutionContext().context.mocks,
   });
 }

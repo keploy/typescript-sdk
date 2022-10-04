@@ -76,7 +76,6 @@ export function NewContext(conf: Config) {
           console.error(err);
           return;
         }
-        console.log("fetched mocks: ", response?.Mocks, "on mode: ", mode);
         ctx.mocks = response?.Mocks;
         return response;
       });
