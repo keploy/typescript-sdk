@@ -144,6 +144,12 @@ export function wrappedNodeFetch() {
             statusText: getReasonPhrase(ctx.mocks[0].Spec.Res.StatusCode),
           };
           outputs[0] = [ctx.mocks[0].Spec.Res.Body];
+          if (ctx?.fileExport) {
+            console.log(
+              "🤡 Returned the mocked outputs for Http dependency call with meta: ",
+              meta
+            );
+          }
           ctx.mocks.shift();
         } else {
           ProcessDep({}, outputs);

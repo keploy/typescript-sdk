@@ -15,7 +15,7 @@ import { StrArr } from "../proto/services/StrArr";
 import assert = require("assert");
 import { createExecutionContext, getExecutionContext } from "./context";
 
-const PORT = 8081;
+const PORT = 6789;
 const PROTO_PATH = "../proto/services.proto";
 const packageDef = protoLoader.loadSync(path.resolve(__dirname, PROTO_PATH));
 const grpcObj = grpc.loadPackageDefinition(

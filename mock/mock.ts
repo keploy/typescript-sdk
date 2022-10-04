@@ -7,7 +7,7 @@ import Mode, { MODE_TEST } from "../src/mode";
 import { createExecutionContext, getExecutionContext } from "../src/context";
 import { startRecordingMocks } from "./utils";
 
-const PORT = 8081;
+const PORT = 6789;
 const PROTO_FILE = "../proto/services.proto";
 const packageDef = protoLoader.loadSync(path.resolve(__dirname, PROTO_FILE));
 const grpcObj = grpc.loadPackageDefinition(
