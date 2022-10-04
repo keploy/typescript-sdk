@@ -107,8 +107,6 @@ Note:- Import statements can't be used. Use require instead of import.
 
 ```js
 require("typescript-sdk/dist/integrations/octokit/require")
-var {NewContext} = require ("typescript-sdk/dist/mock/mock")
-NewContext({Mode: "test", Name: "demo-app"}) // Here, you can set the name and keploy mode for your app
 ```
 These statements should be at the top of your main file (server.js).
 
@@ -127,6 +125,40 @@ npm i -g yarn
 yarn install
 ```
 
+### How to use mock library
+
+The external calls from unit tests will be recorded and replayed as mocks from yaml files under a directory named mocks.
+
+Following is an example of unit test with octokit :
+
+#### Example
+```js
+require("typescript-sdk/dist/integrations/octokit/require")
+var {NewContext} = require ("typescript-sdk/dist/mock/mock")
+var assert = require('assert');
+const { Octokit, App } = require("octokit");
+describe('routes', function () {
+    var server, octokit;
+    beforeEach(function () {
+        NewContext({Mode: "record", Name: "your demo app name"})  // Set your keploy mode and name here.
+        // Clears the cache so a new server instance is used for each test.
+        // delete require.cache[require.resolve('../app')];
+
+        octokit = new Octokit({ auth: "your authentication token"});
+
+    });
+    // Test to make sure URLs respond correctly.
+    it("url/", async function () {
+        return new Promise(function(resolve){
+            octokit.rest.users.getAuthenticated({}).then((result) => {
+                assert.equal(result.data.login, "your github username")
+                resolve()    
+            });
+        })
+    });
+});
+```
+
 ### Integration with Mocha testing framework
 You just need to do some imports and call a built-in assert function in your code in your unit test file and that's it!!🔥🔥🔥
 ```js
@@ -140,7 +172,7 @@ describe("test function", ()=>{
             done()
           })
     test("should be running", async ()=> {
-      await keploy.assertTests();
+      return keploy.assertTests();
     });
     after(()=>{
          process.exit(1); //exits the node server
