@@ -80,7 +80,7 @@ export default class Keploy {
   }
 
   validateServerConfig({
-    url = process.env.KEPLOY_SERVER_URL || "http://localhost:8081/api",
+    url = process.env.KEPLOY_SERVER_URL || "http://localhost:6789/api",
     licenseKey = process.env.KEPLOY_LICENSE_KEY || "",
   }) {
     return { url, licenseKey };
