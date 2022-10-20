@@ -140,20 +140,41 @@ const { Octokit, App } = require("octokit");
 describe('routes', function () {
     var server, octokit;
     beforeEach(function () {
-        NewContext({Mode: "record", Name: "your demo app name"})  // Set your keploy mode and name here.
-        octokit = new Octokit({ auth: "your authentication token"});
+        NewContext({Mode: "<record_OR_test_OR_off>", Name: "your demo app name"})  // Set your keploy mode and name here.
+        octokit = new Octokit({ auth: "<your_authentication_token>"});
 
     });
     // Test to make sure URLs respond correctly.
     it("url/", async function () {
         return new Promise(function(resolve){
-            octokit.rest.users.getAuthenticated({}).then((result) => {
-                assert.equal(result.data.login, "your github username")
-                resolve()    
+            const app = new App({
+                appId: "<APP_ID>",
+                privateKey: `<PEM_FILE>`, 
+            })
+            const { data: slug } = app.octokit.rest.apps.getAuthenticated().then((result) => {
+
+                app.getInstallationOctokit(<InstallationId>).then((octokit) => {
+                    octokit.rest.issues.create({
+                    owner: "LOREM",
+                    repo: "IPSUM",
+                    title: "Hello " + "World",
+                    }).then((res) => {
+                        assert.equal(true, true)
+                        resolve()
+                    });
+                });
             });
         })
     });
 });
+```
+Above example test is written in commonjs module. 
+
+**Note**: Since, this package uses require-in-the-middle for adding hook. Therefore, it is supported for commonjs module currently. Also, you can use require statements in esmodule by:
+```js
+// Define "require"
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
 ```
 
 ### Integration with Mocha testing framework
