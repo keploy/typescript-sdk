@@ -17,23 +17,58 @@ import { MockIds } from "../../mock/mock";
 Hook(["octokit"], function (exported) {
   const octokitDefault = exported;
 
-  class WrappedOctokit {
-    constructor(props: any) {
-      const wrappedFetch = wrappedNodeFetch();
+  octokitDefault.Octokit = octokitDefault.Octokit.defaults({
+    request: {
+      fetch: wrappedNodeFetch(fetch),
+    },
+  });
 
-      if (props.request != undefined) {
-        props.request.fetch = wrappedFetch;
-      } else {
-        props.request = {
-          fetch: wrappedFetch,
-        };
+  class WrappedOctokit extends octokitDefault.Octokit {
+    constructor(props: any) {
+      if (
+        props.request !== undefined &&
+        props.request.fetch !== undefined &&
+        typeof props.request.fetch === typeof wrappedNodeFetch
+      ) {
+        super(props);
+        return;
       }
-      const octo = new octokitDefault.Octokit(props);
-      mixin(this, octo, false);
+      const request = {
+        fetch: wrappedNodeFetch(
+          props.request === undefined || props.request.fetch === undefined
+            ? fetch
+            : props.request.fetch
+        ),
+      };
+      if (props.request !== undefined) {
+        mixin(request, props.request, false);
+      }
+      props.request = request;
+      super(props);
+    }
+  }
+
+  class WrappedApp extends octokitDefault.App {
+    constructor(props: any) {
+      if (props.Octokit !== undefined) {
+        props.Octokit = props.Octokit.defaults({
+          request: {
+            fetch: wrappedNodeFetch(fetch),
+          },
+        });
+      } else {
+        props.Octokit = octokitDefault.Octokit.defaults({
+          request: {
+            fetch: wrappedNodeFetch(fetch),
+          },
+        });
+      }
+      super(props);
     }
   }
   const wrappedExports = {
     Octokit: WrappedOctokit,
+    App: WrappedApp,
   };
 
   exported = mixin(wrappedExports, octokitDefault, false);
@@ -50,8 +85,9 @@ function getHeadersInit(headers: { [k: string]: string[] }): {
   return result;
 }
 
-export function wrappedNodeFetch() {
-  const fetchFunc = fetch;
+// eslint-disable-next-line @typescript-eslint/ban-types
+export function wrappedNodeFetch(fetchFunc: Function) {
+  // const fetchFunc = fetch;
   async function wrappedFetch(
     this: { fetch: (url: any, options: any) => any },
     url: any,
