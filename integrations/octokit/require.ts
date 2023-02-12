@@ -7,7 +7,7 @@ import { getExecutionContext } from "../../src/context";
 import { Readable } from "stream";
 import { ProcessDep, stringToBinary } from "../../src/util";
 import { putMocks } from "../../mock/utils";
-import { HTTP_EXPORT, V1_BETA1 } from "../../src/keploy";
+import { HTTP, V1_BETA2 } from "../../src/keploy";
 import { getRequestHeader, getResponseHeader } from "../express/middleware";
 import { getReasonPhrase } from "http-status-codes";
 import { DataBytes } from "../../proto/services/DataBytes";
@@ -124,9 +124,9 @@ export function wrappedNodeFetch(fetchFunc: Function) {
         });
         clonedResp?.body?.on("end", async function () {
           const httpMock = {
-            Version: V1_BETA1,
+            Version: V1_BETA2,
             Name: ctx.testId,
-            Kind: HTTP_EXPORT,
+            Kind: HTTP,
             Spec: {
               Metadata: meta,
               Req: {
@@ -168,7 +168,7 @@ export function wrappedNodeFetch(fetchFunc: Function) {
         if (
           ctx.mocks != undefined &&
           ctx.mocks.length > 0 &&
-          ctx.mocks[0].Kind == HTTP_EXPORT
+          ctx.mocks[0].Kind == HTTP
         ) {
           const header: { [key: string]: string[] } = {};
           for (const k in ctx.mocks[0].Spec?.Res?.Header) {

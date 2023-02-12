@@ -3,6 +3,9 @@
 import type { StrArr as _services_StrArr, StrArr__Output as _services_StrArr__Output } from '../services/StrArr';
 import type { HttpReq as _services_HttpReq, HttpReq__Output as _services_HttpReq__Output } from '../services/HttpReq';
 import type { HttpResp as _services_HttpResp, HttpResp__Output as _services_HttpResp__Output } from '../services/HttpResp';
+import type { Table as _services_Table, Table__Output as _services_Table__Output } from '../services/Table';
+import type { GrpcReq as _services_GrpcReq, GrpcReq__Output as _services_GrpcReq__Output } from '../services/GrpcReq';
+import type { GrpcResp as _services_GrpcResp, GrpcResp__Output as _services_GrpcResp__Output } from '../services/GrpcResp';
 import type { Long } from '@grpc/proto-loader';
 
 export interface _services_Mock_Object {
@@ -41,6 +44,13 @@ export interface _services_Mock_SpecSchema {
   'Mocks'?: (string)[];
   'Assertions'?: ({[key: string]: _services_StrArr});
   'Created'?: (number | string | Long);
+  'Type'?: (string);
+  'Table'?: (_services_Table | null);
+  'Int'?: (number | string | Long);
+  'Err'?: (string)[];
+  'GrpcRequest'?: (_services_GrpcReq | null);
+  'GrpcResp'?: (_services_GrpcResp | null);
+  '_Table'?: "Table";
 }
 
 export interface _services_Mock_SpecSchema__Output {
@@ -51,6 +61,12 @@ export interface _services_Mock_SpecSchema__Output {
   'Mocks'?: (string)[];
   'Assertions'?: ({[key: string]: _services_StrArr__Output});
   'Created'?: (Long);
+  'Type'?: (string);
+  'Table'?: (_services_Table__Output);
+  'Int'?: (Long);
+  'Err'?: (string)[];
+  'GrpcRequest'?: (_services_GrpcReq__Output);
+  'GrpcResp'?: (_services_GrpcResp__Output);
 }
 
 export interface Mock {

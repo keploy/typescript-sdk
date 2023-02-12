@@ -15,16 +15,17 @@ import { StrArr } from "../proto/services/StrArr";
 import assert = require("assert");
 import { createExecutionContext, getExecutionContext } from "./context";
 
-const PORT = 6789;
 const PROTO_PATH = "../proto/services.proto";
 const packageDef = protoLoader.loadSync(path.resolve(__dirname, PROTO_PATH));
 const grpcObj = grpc.loadPackageDefinition(
   packageDef
 ) as unknown as ProtoGrpcType;
 
-export const V1_BETA1 = "api.keploy.io/v1beta1",
-  HTTP_EXPORT = "Http",
-  GENERIC_EXPORT = "Generic";
+// export const Http = "Http";
+export const V1_BETA2 = "api.keploy.io/v1beta2",
+  V1_BETA1 = "api.keploy.io/v1beta1",
+  HTTP = "Http",
+  GENERIC = "Generic";
 
 type AppConfigFilter = {
   urlRegex?: string;
@@ -60,27 +61,25 @@ export default class Keploy {
   responses: Record<ID, HttpResponse>;
   dependencies: Record<ID, unknown>;
   mocks: Record<ID, unknown>;
-  client: HttpClient;
   grpcClient: RegressionServiceClient;
 
   constructor(
     app: Partial<AppConfig> = {},
     server: Partial<ServerConfig> = {}
   ) {
-    this.grpcClient = new grpcObj.services.RegressionService(
-      `0.0.0.0:${PORT}`,
-      grpc.credentials.createInsecure()
-    );
     this.appConfig = this.validateAppConfig(app);
     this.serverConfig = this.validateServerConfig(server);
+    this.grpcClient = new grpcObj.services.RegressionService(
+      this.serverConfig.url,
+      grpc.credentials.createInsecure()
+    );
     this.responses = {};
     this.dependencies = {};
     this.mocks = {};
-    this.client = new HttpClient(this.serverConfig.url);
   }
 
   validateServerConfig({
-    url = process.env.KEPLOY_SERVER_URL || "http://localhost:6789/api",
+    url = process.env.KEPLOY_SERVER_URL || "localhost:6789",
     licenseKey = process.env.KEPLOY_LICENSE_KEY || "",
   }) {
     return { url, licenseKey };
@@ -264,6 +263,9 @@ export default class Keploy {
                 StatusCode: resp?.status_code,
                 Header: resp?.header,
               },
+              TestCasePath: this.appConfig.testCasePath,
+              MockPath: this.appConfig.mockPath,
+              Type: HTTP,
             },
             (err, response) => {
               if (err !== null) {
@@ -308,11 +310,11 @@ export default class Keploy {
   }
 
   async get(id: ID) {
-    const requestUrl = `regression/testcase/${id}`;
-    const request = new Request();
-    request.setHttpHeader("key", this.serverConfig.licenseKey);
-
-    return this.client.makeHttpRequest(request.get(requestUrl));
+    this.grpcClient.GetTC({ id: id }, (err, resp) => {
+      if (err !== null) {
+        console.error("failed to get testcase with id: ", id, ", error: ", err);
+      }
+    });
   }
 
   private end(id: string | undefined, status: boolean) {
@@ -334,6 +336,12 @@ export default class Keploy {
     this.dependencies[tc.id] = tc.Deps;
     this.mocks[tc.id] = tc.Mocks;
 
+    const headers: { [key: string]: string | string[] } = {
+      KEPLOY_TEST_ID: tc.id,
+    };
+    if (tc.HttpReq?.Header !== undefined) {
+      Object.assign(headers, toHttpHeaders(tc.HttpReq?.Header));
+    }
     const client = new HttpClient(
       `http://${this.appConfig.host}:${this.appConfig.port}`
     );
@@ -344,7 +352,7 @@ export default class Keploy {
       new Request()
         .setHttpHeader("KEPLOY_TEST_ID", tc.id)
         //@ts-ignore
-        .setHttpHeaders(toHttpHeaders(tc.HttpReq?.Header))
+        .setHttpHeaders(headers)
         //@ts-ignore
         .create(tc.HttpReq?.Method, requestUrl, tc.HttpReq?.Body)
     );
@@ -400,6 +408,7 @@ export default class Keploy {
         },
         TestCasePath: this.appConfig.testCasePath,
         MockPath: this.appConfig.mockPath,
+        Type: HTTP,
       },
       (err, response) => {
         if (err != undefined) {
