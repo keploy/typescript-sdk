@@ -50,14 +50,14 @@ export function ProcessDep(meta: { [key: string]: string }, outputs: any[]) {
       if (kctx.deps == undefined || kctx.deps.length == 0) {
         console.error(
           "dependency failed: incorrect number of dependencies in keploy context. test id: %s",
-          kctx.testID
+          kctx.testId
         );
         return;
       }
       if (outputs.length !== kctx.deps[0].Data.length) {
         console.error(
           "dependency failed: incorrect number of dependencies in keploy context. test id: %s",
-          kctx.testID
+          kctx.testId
         );
         return;
       }

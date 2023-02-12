@@ -1,5 +1,6 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import express from "express";
-import Keploy from "../../src/keploy";
+import Keploy, { HTTP } from "../../src/keploy";
 import { Request, Response, NextFunction } from "express";
 import { createExecutionContext, getExecutionContext } from "../../src/context";
 import { StrArr } from "../../proto/services/StrArr";
@@ -139,12 +140,25 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
   }
 
   // req.headers
+  // Since, JSON.stingify trims spaces. Therefore, content-length of request header should be updated
+  req.headers["content-length"] = JSON.stringify(
+    JSON.stringify(req.body).length
+  );
   const reqHeader: { [key: string]: StrArr } = getRequestHeader(req.headers);
 
   // response headers
   const respHeader: { [key: string]: StrArr } = getResponseHeader(
     res.getHeaders()
   );
+
+  // eslint-disable-next-line prefer-const
+  let kctx = getExecutionContext(),
+    deps = undefined,
+    mocks = undefined;
+  if (kctx !== undefined && kctx.context !== undefined) {
+    deps = kctx.context.deps;
+    mocks = kctx.context.mocks;
+  }
 
   keploy.capture({
     Captured: Date.now(),
@@ -164,9 +178,10 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
       // @ts-ignore
       Body: String(ResponseBody.get(req)),
     },
-    Dependency: getExecutionContext().context.deps,
+    Dependency: deps,
     TestCasePath: keploy.appConfig.testCasePath,
     MockPath: keploy.appConfig.mockPath,
-    Mocks: getExecutionContext().context.mocks,
+    Mocks: mocks,
+    Type: HTTP,
   });
 }

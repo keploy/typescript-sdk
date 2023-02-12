@@ -10,6 +10,8 @@ export interface HttpResp {
   'StatusMessage'?: (string);
   'ProtoMajor'?: (number | string | Long);
   'ProtoMinor'?: (number | string | Long);
+  'Binary'?: (string);
+  'BodyData'?: (Buffer | Uint8Array | string);
 }
 
 export interface HttpResp__Output {
@@ -19,4 +21,6 @@ export interface HttpResp__Output {
   'StatusMessage'?: (string);
   'ProtoMajor'?: (Long);
   'ProtoMinor'?: (Long);
+  'Binary'?: (string);
+  'BodyData'?: (Buffer);
 }
