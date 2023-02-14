@@ -1,8 +1,8 @@
-import http, { Headers, OptionsOfJSONResponseBody, Response } from "got";
+import http, { Headers, Options } from "got";
 
 export class Request {
   headers: Headers;
-  options: OptionsOfJSONResponseBody;
+  options: Options;
 
   constructor() {
     this.headers = { "User-Agent": "keploy-typescript-sdk" };
@@ -32,7 +32,7 @@ export class Request {
       url: requestUrl,
       method: "GET",
       headers: this.headers,
-      responseType: "json",
+      responseType: "buffer",
       searchParams,
     };
 
@@ -49,7 +49,7 @@ export class Request {
       url: requestUrl,
       method: "POST",
       headers: this.headers,
-      responseType: "json",
+      responseType: "buffer",
       searchParams,
     };
 
@@ -82,7 +82,7 @@ export class Request {
       url: requestUrl,
       method: "PUT",
       headers: this.headers,
-      responseType: "json",
+      responseType: "buffer",
       searchParams,
     };
 
@@ -99,7 +99,7 @@ export class Request {
       url: requestUrl,
       method: "PATCH",
       headers: this.headers,
-      responseType: "json",
+      responseType: "buffer",
       searchParams,
     };
 
@@ -136,14 +136,12 @@ export default class HttpClient {
     this.baseUrl = baseUrl;
   }
 
-  async makeHttpRequest<T>(request: Request): Promise<T> {
+  async makeHttpRequestRaw(request: Request) {
     const options = { ...request.raw(), prefixUrl: this.baseUrl };
-    return http(options).json();
-  }
-
-  async makeHttpRequestRaw<T>(request: Request): Promise<Response<T>> {
-    const options = { ...request.raw(), prefixUrl: this.baseUrl };
-    const resp: Response<T> = await http(options);
-    return resp;
+    try {
+      await http(options);
+    } catch (error) {
+      console.log(error);
+    }
   }
 }

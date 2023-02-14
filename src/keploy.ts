@@ -153,8 +153,13 @@ export default class Keploy {
     return this.responses[id];
   }
 
+  // stores http response for unique test-ids to capture them at middleware layer
   putResp(id: ID, resp: HttpResponse) {
-    this.responses[id] = resp;
+    // put http response in map only once for unique test-ids. Since, finish event
+    // can trigger multiple time for redirect.
+    if (this.responses[id] === null || this.responses[id] === undefined) {
+      this.responses[id] = resp;
+    }
   }
 
   capture(req: TestCaseReq) {
@@ -348,7 +353,7 @@ export default class Keploy {
     //@ts-ignore
     const requestUrl = `${tc.HttpReq?.URL.substr(1)}`;
 
-    await client.makeHttpRequestRaw<object>(
+    await client.makeHttpRequestRaw(
       new Request()
         .setHttpHeader("KEPLOY_TEST_ID", tc.id)
         //@ts-ignore
