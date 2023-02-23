@@ -139,6 +139,9 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
     return;
   }
 
+  if (process.env.KEPLOY_MODE=="test") {
+    return res
+  }
   // req.headers
   // Since, JSON.stingify trims spaces. Therefore, content-length of request header should be updated
   req.headers["content-length"] = JSON.stringify(
