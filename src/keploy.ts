@@ -132,7 +132,7 @@ export default class Keploy {
 
   async runTests() {
     if (process.env.KEPLOY_MODE == "test") {
-      console.log("test starting in " + this.appConfig.delay + "s");
+      console.log("test starting in " + this.appConfig.delay + "s" + " KEPLOY_MODE: " + process.env.KEPLOY_MODE );
       setTimeout(async () => {
         await this.test();
       }, this.appConfig.delay * 1000);
@@ -241,6 +241,8 @@ export default class Keploy {
           testId,
           " }, { total tests: ",
           totalTests,
+          " },{ Keploy mode:",
+          process.env.KEPLOY_MODE,
           " }"
         );
         let pass = true;
@@ -276,8 +278,10 @@ export default class Keploy {
               if (err !== null) {
                 console.error(
                   "failed to call test method of keploy. error: ",
-                  err
-                );
+                  err,
+                  "Keploy mode:",
+                  process.env.KEPLOY_MODE,
+                  );
               }
 
               if (response?.pass?.pass === false) {
