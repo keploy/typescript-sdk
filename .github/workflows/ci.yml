@@ -32,4 +32,4 @@ jobs:
           cmd: build
 
       - name: Check commits messages
-        uses: wagoid/commitlint-github-action@v3
+        uses: wagoid/commitlint-github-action@v5
