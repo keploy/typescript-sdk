@@ -142,7 +142,6 @@ export default class HttpClient {
       await http(options);
     } catch (error) {
       console.log(error);
-      console.log("Keploy mode:",process.env.KEPLOY_MODE);
     }
   }
 }

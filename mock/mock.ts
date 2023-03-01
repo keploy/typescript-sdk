@@ -27,6 +27,7 @@ export interface Config {
   Mode: string;
 }
 export function NewContext(conf: Config) {
+  console.log("Keploy running in: ",process.env.KEPLOY_MODE," mode");
   let mode = MODE_TEST,
     path = conf !== undefined && conf.Path !== undefined ? conf.Path : "";
 
@@ -36,7 +37,6 @@ export function NewContext(conf: Config) {
     } catch (err) {
       console.log("Failed to get the path of current directory");
       console.log(err);
-      console.log("Keploy mode:",process.env.KEPLOY_MODE)
     }
   } else if (path[0] !== "/") {
     try {
@@ -44,7 +44,6 @@ export function NewContext(conf: Config) {
     } catch (err) {
       console.log("Failed to get the absolute path from relative conf.path");
       console.log(err);
-      console.log("Keploy mode:",process.env.KEPLOY_MODE)
     }
   }
   path += "/mocks";
