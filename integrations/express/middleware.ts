@@ -4,7 +4,7 @@ import Keploy, { HTTP } from "../../src/keploy";
 import { Request, Response, NextFunction } from "express";
 import { createExecutionContext, getExecutionContext } from "../../src/context";
 import { StrArr } from "../../proto/services/StrArr";
-
+import { MODE_TEST } from "../../src/mode";
 class ResponseBody {
   static responseMap = new WeakMap<Request, ResponseBody>();
 
@@ -139,7 +139,7 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
     return;
   }
 
-  if (process.env.KEPLOY_MODE=="test") {
+  if (process.env.KEPLOY_MODE===MODE_TEST) {
     return res
   }
   // req.headers
