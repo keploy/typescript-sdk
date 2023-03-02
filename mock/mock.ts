@@ -27,7 +27,6 @@ export interface Config {
   Mode: string;
 }
 export function NewContext(conf: Config) {
-  console.log("Keploy running in: ",process.env.KEPLOY_MODE," mode");
   let mode = MODE_TEST,
     path = conf !== undefined && conf.Path !== undefined ? conf.Path : "";
 
@@ -60,6 +59,7 @@ export function NewContext(conf: Config) {
   if (Mode.Valid(conf.Mode)) {
     mode = conf.Mode;
   }
+  console.log("Keploy running in: ",mode," mode");
   switch (mode) {
     case "test":
       if (conf.Name === "") {
