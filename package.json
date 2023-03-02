@@ -4,7 +4,7 @@
   "main": "dist/src/index.js",
   "files": [
     "dist",
-    "grpc.proto"
+    "proto/services.proto"
   ],
   "scripts": {
     "build": "tsc",
