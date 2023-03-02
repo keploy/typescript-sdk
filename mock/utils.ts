@@ -1,9 +1,11 @@
 import { response } from "express";
 import { Mock } from "../proto/services/Mock";
+import { getExecutionContext } from "../src/context";
 import { grpcClient, MockIds, mockPath } from "./mock";
 
 export function putMocks(mock: Mock) {
-  grpcClient.PutMock({ Path: mockPath, Mock: mock }, (err, response) => {
+  const ctx = getExecutionContext().context
+  grpcClient.PutMock({ Path: mockPath, Mock: mock, Remove:ctx.Remove, Replace:ctx.Replace }, (err, response) => {
     if (err !== null) {
       console.error(err);
     }
