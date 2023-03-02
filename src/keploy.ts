@@ -76,6 +76,7 @@ export default class Keploy {
     this.responses = {};
     this.dependencies = {};
     this.mocks = {};
+    console.log("Keploy running in: ",process.env.KEPLOY_MODE," mode");
   }
 
   validateServerConfig({
@@ -277,7 +278,7 @@ export default class Keploy {
                 console.error(
                   "failed to call test method of keploy. error: ",
                   err
-                );
+                  );
               }
 
               if (response?.pass?.pass === false) {
