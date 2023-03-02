@@ -14,6 +14,7 @@ import { TestCase } from "../proto/services/TestCase";
 import { StrArr } from "../proto/services/StrArr";
 import assert = require("assert");
 import { createExecutionContext, getExecutionContext } from "./context";
+import Mode from "./mode";
 
 const PROTO_PATH = "../proto/services.proto";
 const packageDef = protoLoader.loadSync(path.resolve(__dirname, PROTO_PATH));
@@ -25,6 +26,7 @@ const grpcObj = grpc.loadPackageDefinition(
 export const V1_BETA2 = "api.keploy.io/v1beta2",
   V1_BETA1 = "api.keploy.io/v1beta1",
   HTTP = "Http",
+  NO_SQL = "NO_SQL",
   GENERIC = "Generic";
 
 type AppConfigFilter = {
@@ -61,12 +63,16 @@ export default class Keploy {
   responses: Record<ID, HttpResponse>;
   dependencies: Record<ID, unknown>;
   mocks: Record<ID, unknown>;
+  mode: Mode;
   grpcClient: RegressionServiceClient;
 
   constructor(
     app: Partial<AppConfig> = {},
     server: Partial<ServerConfig> = {}
   ) {
+    // extract config from environment variables
+    this.mode = new Mode();
+    this.mode.SetMode(process.env.KEPLOY_MODE);
     this.appConfig = this.validateAppConfig(app);
     this.serverConfig = this.validateServerConfig(server);
     this.grpcClient = new grpcObj.services.RegressionService(

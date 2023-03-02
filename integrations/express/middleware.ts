@@ -2,8 +2,13 @@
 import express from "express";
 import Keploy, { HTTP } from "../../src/keploy";
 import { Request, Response, NextFunction } from "express";
-import { createExecutionContext, getExecutionContext } from "../../src/context";
+import {
+  createExecutionContext,
+  deleteExecutionContext,
+  getExecutionContext,
+} from "../../src/context";
 import { StrArr } from "../../proto/services/StrArr";
+import { MODE_OFF, MODE_RECORD, MODE_TEST } from "../../src/mode";
 
 class ResponseBody {
   static responseMap = new WeakMap<Request, ResponseBody>();
@@ -70,12 +75,8 @@ export default function middleware(
     res.on("finish", () => {
       afterMiddleware(keploy, req, res);
     });
-    if (
-      (process.env.KEPLOY_MODE != undefined &&
-        process.env.KEPLOY_MODE == "off") ||
-      keploy == undefined
-    ) {
-      createExecutionContext({ mode: "off" });
+    if (keploy.mode.GetMode() == MODE_OFF) {
+      createExecutionContext({ mode: MODE_OFF });
       next();
       return;
     }
@@ -84,7 +85,7 @@ export default function middleware(
     // test mode
     if (id != undefined && id != "") {
       createExecutionContext({
-        mode: "test",
+        mode: MODE_TEST,
         testId: id,
         deps: keploy.getDependencies(id),
         mocks: keploy.getMocks(id),
@@ -94,7 +95,7 @@ export default function middleware(
     }
 
     // record mode
-    createExecutionContext({ mode: "record", deps: [], mocks: [] });
+    createExecutionContext({ mode: MODE_RECORD, deps: [], mocks: [] });
     captureResp(req, res, next);
   };
 }
@@ -136,6 +137,7 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
       body: String(ResponseBody.get(req)),
     };
     keploy.putResp(id, resp);
+    deleteExecutionContext();
     return;
   }
 
@@ -159,6 +161,7 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
     deps = kctx.context.deps;
     mocks = kctx.context.mocks;
   }
+  deleteExecutionContext();
 
   keploy.capture({
     Captured: Date.now(),

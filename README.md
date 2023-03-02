@@ -102,15 +102,35 @@ app.listen(port, () => {
 Note:- Import statements can't be used. Use require instead of import.
 
 ## Supported Dependencies
-
 ### 1. Octokit
-
+To integrate just add this line before require statement of Octokit in your application.
 ```js
 require("typescript-sdk/dist/integrations/octokit/require")
 ```
-This statement should be at the top of your main file (server.js).
 
-Note:- Import statements can't be used. Only CommonJs support is currently provided.
+### 2. Mongoose
+To integrate just add this line before require statement of mongoose in your application.
+```js
+require("typescript-sdk/dist/integrations/mongoose/require")
+```
+Currently, keploy mocks/stubs outputs for:
+1. find()
+2. findOne()
+3. save()
+4. create()
+5. insertMany()
+6. updateOne()
+7. updateMany()
+8. deleteOne()
+9. deleteMany()
+
+### **Note**: 
+Since, this package uses require-in-the-middle for adding hook. Therefore, it is supported for commonjs module currently. Also, you can use require statements in esmodule by:
+```js
+// Define "require"
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+```
 ## Development Setup
 
 - This project uses [Yarn](https://yarnpkg.com/) for package management. To install yarn, please make sure [Node](https://nodejs.org/en/) is installed and then:
