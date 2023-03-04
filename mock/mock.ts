@@ -73,8 +73,6 @@ export function NewContext(conf: Config) {
         testId: conf.Name,
         mocks: [],
         fileExport: true,
-        Remove: conf.Remove,
-        Replace: conf.Replace,
       });
       const ctx = getExecutionContext().context;
       grpcClient.GetMocks({ Path: path, Name: conf.Name }, (err, response) => {
@@ -92,6 +90,8 @@ export function NewContext(conf: Config) {
         testId: conf.Name,
         mocks: [],
         fileExport: true,
+        Remove: conf.Remove,
+        Replace: conf.Replace,
       });
       break;
     default:
