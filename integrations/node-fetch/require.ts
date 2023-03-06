@@ -3,7 +3,7 @@
 import Hook from "require-in-the-middle";
 import { Headers, ResponseInit } from "node-fetch";
 import mixin from "merge-descriptors";
-import { getExecutionContext } from "../../src/context";
+import { createExecutionContext,getExecutionContext } from "../../src/context";
 import { Readable } from "stream";
 import { ProcessDep, stringToBinary } from "../../src/util";
 import { putMocks } from "../../mock/utils";
@@ -12,6 +12,7 @@ import { getRequestHeader, getResponseHeader } from "../express/middleware";
 import { getReasonPhrase } from "http-status-codes";
 import { DataBytes } from "../../proto/services/DataBytes";
 import { MockIds } from "../../mock/mock";
+import { MODE_OFF } from "../../src/mode";
 
 // @ts-ignore
 Hook(["node-fetch"], function (exported) {
@@ -37,6 +38,9 @@ export function wrappedNodeFetch(fetch: any) {
     url: any,
     options: any
   ) {
+    if (process.env.KEPLOY_MODE == MODE_OFF) {
+      createExecutionContext({ mode: MODE_OFF });
+    }
     if (
       getExecutionContext() == undefined ||
       getExecutionContext().context == undefined
