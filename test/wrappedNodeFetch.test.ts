@@ -19,8 +19,6 @@ describe('wrappedNodeFetch', () => {
       method: 'GET',
     };
     const response = await wrappedFetch(url, options);
-    console.log(response,"RESPONSE")
-
     expect(mockFetch).toHaveBeenCalledWith(url, options);
     expect(response).toBeInstanceOf(Response);
   });
@@ -69,7 +67,6 @@ describe('wrappedNodeFetch', () => {
       method: 'GET',
     };
     const response = await wrappedFetch(url, options);
-    console.log(response,"RESPONSE")
     expect(response).toEqual(mockResponse);
   });
 
@@ -104,7 +101,6 @@ describe('wrappedNodeFetch', () => {
       method: 'GET',
     };
     const response = await wrappedFetch(url, options);
-    console.log(response,"RESPONSE")
 
     expect(mockFetch).toHaveBeenCalledWith(url, options);
     expect(response).toBeInstanceOf(Response);
