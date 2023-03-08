@@ -33,3 +33,6 @@ jobs:
 
       - name: Check commits messages
         uses: wagoid/commitlint-github-action@v3
+
+      - name: Run the tests
+        run: npm test -- --coverage
