@@ -3,7 +3,7 @@
 import Hook from "require-in-the-middle";
 import { Headers, ResponseInit } from "node-fetch";
 import mixin from "merge-descriptors";
-import { createExecutionContext,getExecutionContext } from "../../src/context";
+import { getExecutionContext } from "../../src/context";
 import { Readable } from "stream";
 import { ProcessDep, stringToBinary } from "../../src/util";
 import { putMocks } from "../../mock/utils";
@@ -39,7 +39,7 @@ export function wrappedNodeFetch(fetch: any) {
     options: any
   ) {
     if (process.env.KEPLOY_MODE == MODE_OFF) {
-      createExecutionContext({ mode: MODE_OFF });
+      return fetchFunc.apply(this, [url, options]);
     }
     if (
       getExecutionContext() == undefined ||
@@ -147,8 +147,6 @@ export function wrappedNodeFetch(fetch: any) {
         });
         resp = new fetch.Response(Readable.from(buf), rinit);
         break;
-      case "off":
-        return fetchFunc.apply(this, [url, options]);
       default:
         console.debug(
           "mode is not valid. Please set valid keploy mode using env variables"
