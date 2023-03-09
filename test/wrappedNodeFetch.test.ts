@@ -21,10 +21,14 @@ describe('wrappedNodeFetch', () => {
     const updatedctx= getExecutionContext().context;
     const mocks=updatedctx.mocks.length;
     const deps=updatedctx.deps.length;
+    const responseBody = await response.text();
+    const recordedOutput = updatedctx.mocks[0].Spec.Res.Body;
     expect(mockFetch).toHaveBeenCalledWith(url, options);
     expect(response).toBeInstanceOf(Response);
     expect(mocks).toBeGreaterThan(0);
     expect(deps).toBeGreaterThan(0);
+    expect(response).toHaveProperty('body');
+    expect(responseBody).toEqual(recordedOutput);
   });
 
   it('should return mocked response in test mode', async () => {
@@ -41,12 +45,12 @@ describe('wrappedNodeFetch', () => {
           Spec: {
             Metadata: {
               name: 'node-fetch',
-              url: 'http://localhost:8080',
+              url: 'http://example.com',
               options: { method: 'GET' },
               type: 'HTTP_CLIENT',
             },
             Req: {
-              URL: 'http://localhost:8080',
+              URL: 'http://example.com',
               Body: '',
               Header: {},
               Method: 'GET',
