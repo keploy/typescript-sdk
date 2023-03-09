@@ -1,16 +1,14 @@
 import { wrappedNodeFetch } from '../integrations/octokit/require';
 import { Response } from 'node-fetch';
-import { createExecutionContext } from '../src/context';
+import { createExecutionContext, getExecutionContext} from '../src/context';
 describe('wrappedNodeFetch', () => {
   it('should call fetch function with correct arguments in record mode', async () => {
     const mockFetch = jest.fn().mockResolvedValueOnce(new Response());
     const ctx = {
-      context:{
       mode: 'record',
       testId: 'testId',
       mocks: [],
-      deps: [],
-      }
+      deps: [],     
     };
     createExecutionContext(ctx)
     const wrappedFetch = (wrappedNodeFetch(mockFetch) as any).bind({ fetch: mockFetch });
@@ -18,16 +16,21 @@ describe('wrappedNodeFetch', () => {
     const options = {
       method: 'GET',
     };
+    
     const response = await wrappedFetch(url, options);
+    const updatedctx= getExecutionContext().context;
+    const mocks=updatedctx.mocks.length;
+    const deps=updatedctx.deps.length;
     expect(mockFetch).toHaveBeenCalledWith(url, options);
     expect(response).toBeInstanceOf(Response);
+    expect(mocks).toBeGreaterThan(0);
+    expect(deps).toBeGreaterThan(0);
   });
 
   it('should return mocked response in test mode', async () => {
     const mockResponse = new Response('mocked response');
     const mockFetch = jest.fn().mockResolvedValue(mockResponse);
     const ctx = {
-      context:{
       mode: 'test',
       testId: 'testId',
       mocks: [
@@ -38,12 +41,12 @@ describe('wrappedNodeFetch', () => {
           Spec: {
             Metadata: {
               name: 'node-fetch',
-              url: 'http://example.com',
+              url: 'http://localhost:8080',
               options: { method: 'GET' },
               type: 'HTTP_CLIENT',
             },
             Req: {
-              URL: 'http://example.com',
+              URL: 'http://localhost:8080',
               Body: '',
               Header: {},
               Method: 'GET',
@@ -57,7 +60,7 @@ describe('wrappedNodeFetch', () => {
         },
       ],
       deps: [],
-    }
+    
     };
     createExecutionContext(ctx)
 
@@ -67,7 +70,10 @@ describe('wrappedNodeFetch', () => {
       method: 'GET',
     };
     const response = await wrappedFetch(url, options);
+    const updatedctx= getExecutionContext().context;
     expect(response).toEqual(mockResponse);
+    const mocks=updatedctx.mocks.length();
+    expect(mocks).toBe(0);
   });
 
   it('should return undefined if execution context is not present in record mode', async () => {
@@ -86,12 +92,10 @@ describe('wrappedNodeFetch', () => {
   it('should call fetch function with correct arguments in off mode', async () => {
     const mockFetch = jest.fn().mockResolvedValueOnce(new Response());
     const ctx = {
-      context:{
       context: 'off',
       testId: 'testId',
       mocks: [],
       deps: [],
-      }
     };
     createExecutionContext(ctx)
 
