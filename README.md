@@ -5,82 +5,54 @@
 # Keploy Typescript-SDK
 [Keploy](https://keploy.io) is a no-code testing platform that generates tests from API calls. This is the Typescript client SDK for recording and replaying the API Calls. There are 2 modes:
 1. **Record mode**
-    1. Record requests, response and sends to Keploy server.
-    2. After keploy server removes duplicates, it then runs the request on the API again to identify noisy fields.
-    3. Sends the noisy fields to the keploy server to be saved along with the testcase.
+    1. Records the requests/response of API call and generates the corresponding testcase.
+    2. Simulates the same request payload to the API for identifying the noisy fields in response.
 2. **Test mode**
-    1. Fetches testcases for the app from keploy server.
+    1. Fetches the recorded testcases of the application from Keploy.
     2. Calls the API with same request payload in testcase.
-    3. Validates the respones and uploads results to the keploy server.
+    3. Validates the respones and uploads results to the Keploy server.
+3. **Off mode**
+    - Turns off the functionality of keploy testing framework. It is the default mode
 
 ## Contents
 1. [Installation](#installation)
-2. [Usage](#usage)
-3. [Configure](#configure)
-4. [Supported Frameworks](#supported-frameworks)
+2. [Configure](#configure)
+3. [Usage](#usage)
+4. [Supported Routers](#supported-routers)
+5. [Supported Dependencies](#supported-dependencies)
+6. [Mocking/Stubbing for unit tests](#mockingstubbing-for-unit-tests)
+7. [Test with code coverage](#test-with-code-coverage)
+8. [Development Setup](#development-setup)
+9. [Community support](#community-support)
 
 ## Installation
 ```bash
 npm i https://github.com/keploy/typescript-sdk
 ```
 
-## Usage
-
-```js
-require("typescript-sdk/dist/integrations/express/register");
-```
-The require statement should be at the top of your main file (server.js). 
-
-Example :
-```js
-require("typescript-sdk/dist/integrations/express/register");
-var express = require('express');
-var app = express();
-app.get('/', function (req, res) {
-    res.send('Hello World!\n');
-});
-
-var server = app.listen(3000,() =>
-console.log(`Example app listening on port 3000!`));
-module.exports = server;
-```
-
 ## Configure
-```
-export KEPLOY_MODE="test"
-export KEPLOY_APP_NAME="my-app"
-export KEPLOY_APP_HOST="localhost"
-export KEPLOY_APP_PORT=5050 # port on which server is running
-export KEPLOY_APP_DELAY=5 # time delay before starting testruns(in seconds)
-export KEPLOY_APP_TIMEOUT=100 # should be number 
-# export KEPLOY_APP_FILTER={"urlRegex":"*"}  # should be json not to capture for certain url's
+SDK uses environment variables for configuration. If not provided, then SDK uses default values. 
 
-export KEPLOY_SERVER_URL="localhost:6789" # url to self hosted keploy grpc server
+**Note**: "KEPLOY_APP_PORT" is required else, it will throw error on "record"/"test" mode.
+``` bash
+export KEPLOY_MODE="off"           # Values: "record" / "test" / "off"(default) 
+export KEPLOY_APP_NAME="my-app"    # [app_ids] for different API applications. Default: "sample-app"
+export KEPLOY_APP_HOST="localhost" # Host of API application. Default: "localhost"
+export KEPLOY_APP_PORT=XXXX        # port on which API is running. Required
+export KEPLOY_APP_DELAY=5          # approx time taken by API server to start. Default: 5sec
+export KEPLOY_APP_TIMEOUT=100      # request timeout for keploy server. Default: 60sec
+# export KEPLOY_APP_FILTER={"urlRegex":"*"}  # filters for capturing tcs. It should be a valid JSON
+
+export KEPLOY_SERVER_URL="localhost:6789" # url to running keploy server. Default: "localhost:6789"
 # export KEPLOY_SERVER_LICENSE="XXX-XXX-XXX" # hosted keploy server api key
 ```
-### KEPLOY_MODE
-There are 3 modes:
- - **Record**: Sets to record mode.
- - **Test**: Sets to test mode.
- - **Off**: Turns off all the functionality provided by the API
-
-**Note:** `KEPLOY_MODE` value is case sensitive.
-
-## Generate E2E tests (with mocks)
-
-```
-export KEPLOY_TEST_CASE_PATH="./example"    # If KEPLOY_TEST_CASE_PATH is not provided then a folder named keploy-tests will be made containing mocks folder. If KEPLOY_MOCK_PATH is provided then the mocks will be generated there. 
-export KEPLOY_MOCK_PATH="./exampleMockPath"
-```
-
-**Note:** To enable `Test Export`, add `export ENABLE_TEST_EXPORT=true` in your .env file of [keploy-server](https://github.com/keploy/keploy) repository. If enabled, yaml files  containing test cases will be generated in the directory provided by the user. Similarly, mocks will be generated in the yaml files.
 
 ## Supported Routers
 ### 1. Express
+Add the following require statement before the require statement of express.
 ```js
 require("typescript-sdk/dist/integrations/express/register");
 ```
-The require statement should be at the top of your main file (server.js).
 
 #### Example
 ```js
@@ -99,7 +71,12 @@ app.listen(port, () => {
     console.log(`Server is running on port: ${port}`);
 })
 ```
-Note:- Import statements can't be used. Use require instead of import.
+Note:- Currently not supported for ES module. You can use require statements in esmodule by:
+```js
+// Define "require"
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+```
 
 ## Supported Dependencies
 ### 1. Octokit
@@ -131,23 +108,23 @@ Since, this package uses require-in-the-middle for adding hook. Therefore, it is
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 ```
-## Development Setup
 
-- This project uses [Yarn](https://yarnpkg.com/) for package management. To install yarn, please make sure [Node](https://nodejs.org/en/) is installed and then:
+## Mocking/Stubbing for unit tests
+These mocks/stubs are realistic and frees you up from writing them manually. Keploy creates `readable/editable` mocks/stubs yaml files which can be referenced in any of your unit-tests tests. Steps to mock/stub external calls:
 
-```sh
-npm i -g yarn
-```
-
-- To install local dependencies, assuming you are at root of the project:
-
-```sh
-yarn install
-```
-
-### How to use mock library
-
-The external calls from unit tests will be recorded and replayed as mocks from yaml files under a directory named mocks.
+1. **Wrap the dependencies**: 
+   1. Call mock.NewContext with tcsName and mode in test setup for each testcase. 
+   2. Integrate the supported dependecies in your unit-tests.
+2. **Record**: 
+   1. Set the mode in NewContext to "record" 
+   2. Run the unit test. 
+   
+   Now, a mocks directory containing yaml files for each testcase in unit test. The yaml files have docs for recorded outputs of integrated deps call.
+3. **Test**: 
+   1. Set the mode in NewContext to "test" 
+   2. Turn off the dependency server or DB.
+   3. Run the unit test. 
+   And the unit test will run perfectly using the recorded outputs from yaml files in generated mocks directory.
 
 Following is an example of unit test with octokit :
 
@@ -188,7 +165,6 @@ describe('routes', function () {
     });
 });
 ```
-Above example test is written in commonjs module. 
 
 **Note**: Since, this package uses require-in-the-middle for adding hook. Therefore, it is supported for commonjs module currently. Also, you can use require statements in esmodule by:
 ```js
@@ -197,7 +173,8 @@ import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 ```
 
-### Integration with Mocha testing framework
+## Test with code coverage
+### Integration with Mocha testing framework 
 You just need to do some imports and call a built-in assert function in your code in your unit test file and that's it!!🔥🔥🔥
 ```js
 const {runServer} = require('../server') //your server wrapper
@@ -227,6 +204,25 @@ Note:- Jest is not supported currently!!
 - For VSCode setup, make sure these extensions are installed:
   - [EditorConfig](https://marketplace.visualstudio.com/items?itemName=EditorConfig.EditorConfig)
   - [Eslint](https://marketplace.visualstudio.com/items?itemName=dbaeumer.vscode-eslint)
+
+## Development Setup
+
+- This project uses [Yarn](https://yarnpkg.com/) for package management. To install yarn, please make sure [Node](https://nodejs.org/en/) is installed and then:
+
+```sh
+npm i -g yarn
+```
+
+- To install local dependencies, assuming you are at root of the project:
+
+```sh
+yarn install
+```
+
+- To generate the js grpc files from services.proto: 
+```sh
+yarn proto-loader-gen-types --grpcLib=@grpc/grpc-js --outDir=proto/ proto/*.proto
+```
 
 ## Community support
 We'd love to collaborate with you to make Keploy great. To get started:

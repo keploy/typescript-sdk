@@ -117,11 +117,7 @@ function captureResp(
 }
 
 export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
-  if (
-    (process.env.KEPLOY_MODE != undefined &&
-      process.env.KEPLOY_MODE == "off") ||
-    keploy == undefined
-  ) {
+  if (keploy.mode.GetMode() == MODE_OFF) {
     return;
   }
 

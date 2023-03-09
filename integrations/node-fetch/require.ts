@@ -148,7 +148,7 @@ export function wrappedNodeFetch(fetch: any) {
         return fetchFunc.apply(this, [url, options]);
       default:
         console.debug(
-          "mode is not valid. Please set valid keploy mode using env variables"
+          `keploy mode '${ctx.mode}' is invalid. Modes: 'record' / 'test' / 'off'(default)`
         );
         return fetchFunc.apply(this, [url, options]);
     }

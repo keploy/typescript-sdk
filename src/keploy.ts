@@ -2,8 +2,6 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import HttpClient, { Request } from "./client";
 import { toHttpHeaders, transformToSnakeCase } from "./util";
-import { getRequestHeader } from "../integrations/express/middleware";
-import { name as packageName } from "../package.json";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import { ProtoGrpcType } from "../proto/services";
@@ -14,7 +12,7 @@ import { TestCase } from "../proto/services/TestCase";
 import { StrArr } from "../proto/services/StrArr";
 import assert = require("assert");
 import { createExecutionContext, getExecutionContext } from "./context";
-import Mode from "./mode";
+import Mode, { MODE_OFF } from "./mode";
 
 const PROTO_PATH = "../proto/services.proto";
 const packageDef = protoLoader.loadSync(path.resolve(__dirname, PROTO_PATH));
@@ -72,7 +70,12 @@ export default class Keploy {
   ) {
     // extract config from environment variables
     this.mode = new Mode();
-    this.mode.SetMode(process.env.KEPLOY_MODE);
+    if (
+      process.env.KEPLOY_MODE !== undefined &&
+      Mode.Valid(process.env.KEPLOY_MODE)
+    ) {
+      this.mode.SetMode(process.env.KEPLOY_MODE);
+    }
     this.appConfig = this.validateAppConfig(app);
     this.serverConfig = this.validateServerConfig(server);
     this.grpcClient = new grpcObj.services.RegressionService(
@@ -92,48 +95,58 @@ export default class Keploy {
   }
 
   validateAppConfig({
-    name = process.env.KEPLOY_APP_NAME || packageName,
+    name = process.env.KEPLOY_APP_NAME || "sample-app",
     host = process.env.KEPLOY_APP_HOST || "localhost",
-    port = process.env.KEPLOY_APP_PORT || 8080,
+    port = process.env.KEPLOY_APP_PORT || 0,
     delay = process.env.KEPLOY_APP_DELAY || 5,
     timeout = process.env.KEPLOY_APP_TIMEOUT || 60,
     filter = process.env.KEPLOY_APP_FILTER || {},
     // testCasePath and mockPath can be defined in the .env file. If not defined then a folder named
-    // keploy-tests will be created which will contain mock folder.
+    // keploy/tests will be created which will contain mock folder.
     testCasePath = path.resolve(
-      process.env.KEPLOY_TEST_CASE_PATH || "./keploy-tests"
+      process.env.KEPLOY_TEST_CASE_PATH || "./keploy/tests"
     ),
-    mockPath = path.resolve(
-      process.env.KEPLOY_MOCK_PATH || "./keploy-tests/mock"
-    ),
+    mockPath = path.resolve(process.env.KEPLOY_MOCK_PATH || "./keploy/mocks"),
   }) {
-    const errorFactory = (key: string) =>
-      new Error(`Invalid App config key: ${key}`);
+    if (this.mode.GetMode() !== MODE_OFF) {
+      // throws error instead of prompt so, that user can run the application in non-interactive terminal
+      const errorFactory = (key: string) =>
+        new Error(`invalid App config key: ${key}.`);
 
-    port = Number(port);
-    if (Number.isNaN(port)) {
-      throw errorFactory("port");
-    }
+      port = Number(port);
+      if (Number.isNaN(port) || port === 0) {
+        throw errorFactory("port");
+      }
 
-    delay = Number(delay);
-    if (Number.isNaN(delay)) {
-      throw errorFactory("delay");
-    }
+      delay = Number(delay);
+      if (Number.isNaN(delay)) {
+        throw errorFactory("delay");
+      }
 
-    timeout = Number(timeout);
-    if (Number.isNaN(timeout)) {
-      throw errorFactory("timeout");
-    }
+      timeout = Number(timeout);
+      if (Number.isNaN(timeout)) {
+        throw errorFactory("timeout");
+      }
 
-    if (typeof filter === "string") {
-      try {
-        filter = JSON.parse(filter);
-      } catch {
-        throw errorFactory("filter");
+      if (typeof filter === "string") {
+        try {
+          filter = JSON.parse(filter);
+        } catch {
+          throw errorFactory("filter");
+        }
       }
     }
 
-    return { name, host, port, delay, timeout, filter, testCasePath, mockPath };
+    return {
+      name,
+      host,
+      port: Number(port),
+      delay: Number(delay),
+      timeout: Number(timeout),
+      filter,
+      testCasePath,
+      mockPath,
+    };
   }
 
   async runTests() {
