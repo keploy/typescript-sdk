@@ -4,6 +4,7 @@ import Keploy, { HTTP } from "../../src/keploy";
 import { Request, Response, NextFunction } from "express";
 import { createExecutionContext, getExecutionContext } from "../../src/context";
 import { StrArr } from "../../proto/services/StrArr";
+import { exec, spawn } from "child_process";
 
 class ResponseBody {
   static responseMap = new WeakMap<Request, ResponseBody>();
@@ -66,6 +67,19 @@ export function getResponseHeader(header: any) {
 export default function middleware(
   keploy: Keploy
 ): (req: Request, res: Response, next: NextFunction) => void {
+  if (
+    process.env.KEPLOY_MODE == "record" ||
+    process.env.KEPLOY_MODE === "test"
+  ) {
+    exec("lsof -i:6789", (err, stdout) => {
+      if (stdout == "") {
+        const child = spawn("keploy");
+        child.stdout.on("data", (data) => {
+          console.log(`${data}`);
+        });
+      }
+    });
+  }
   return (req: Request, res: Response, next: NextFunction) => {
     res.on("finish", () => {
       afterMiddleware(keploy, req, res);
