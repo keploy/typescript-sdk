@@ -160,28 +160,30 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
     mocks = kctx.context.mocks;
   }
 
-  keploy.capture({
-    Captured: Date.now(),
-    AppID: keploy.appConfig.name,
-    // change url to uri ex: /url-shortner/:param
-    URI: req.originalUrl,
-    HttpReq: {
-      Method: req.method,
-      URL: req.originalUrl,
-      URLParams: req.params,
-      Header: reqHeader,
-      Body: JSON.stringify(req.body),
-    },
-    HttpResp: {
-      StatusCode: res.statusCode,
-      Header: respHeader,
-      // @ts-ignore
-      Body: String(ResponseBody.get(req)),
-    },
-    Dependency: deps,
-    TestCasePath: keploy.appConfig.testCasePath,
-    MockPath: keploy.appConfig.mockPath,
-    Mocks: mocks,
-    Type: HTTP,
-  });
+  if (kctx.context.mode == "test") {
+    keploy.capture({
+      Captured: Date.now(),
+      AppID: keploy.appConfig.name,
+      // change url to uri ex: /url-shortner/:param
+      URI: req.originalUrl,
+      HttpReq: {
+        Method: req.method,
+        URL: req.originalUrl,
+        URLParams: req.params,
+        Header: reqHeader,
+        Body: JSON.stringify(req.body),
+      },
+      HttpResp: {
+        StatusCode: res.statusCode,
+        Header: respHeader,
+        // @ts-ignore
+        Body: String(ResponseBody.get(req)),
+      },
+      Dependency: deps,
+      TestCasePath: keploy.appConfig.testCasePath,
+      MockPath: keploy.appConfig.mockPath,
+      Mocks: mocks,
+      Type: HTTP,
+    });
+  }
 }
