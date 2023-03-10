@@ -3,58 +3,131 @@
 [![License](.github/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 # Keploy Typescript-SDK
-[Keploy](https://keploy.io) is a no-code testing platform that generates tests from API calls. This is the Typescript client SDK for recording and replaying the API Calls. There are 2 modes:
-1. **Record mode**
-    1. Records the requests/response of API call and generates the corresponding testcase.
-    2. Simulates the same request payload to the API for identifying the noisy fields in response.
-2. **Test mode**
-    1. Fetches the recorded testcases of the application from Keploy.
-    2. Calls the API with same request payload in testcase.
-    3. Validates the respones and uploads results to the Keploy server.
-3. **Off mode**
-    - Turns off the functionality of keploy testing framework. It is the default mode
+This is the client SDK for the [Keploy](https://github.com/keploy/keploy) testing platform. You can use this to generate realistic mock files or entire e2e tests for your applications. The **HTTP mocks/stubs and tests are the same format** and inter-exchangeable.
 
 ## Contents
 1. [Installation](#installation)
-2. [Configure](#configure)
-3. [Usage](#usage)
-4. [Supported Routers](#supported-routers)
-5. [Supported Dependencies](#supported-dependencies)
-6. [Mocking/Stubbing for unit tests](#mockingstubbing-for-unit-tests)
-7. [Test with code coverage](#test-with-code-coverage)
-8. [Development Setup](#development-setup)
-9. [Community support](#community-support)
+2. [Usage](#usage)
+3. [Supported Routers](#supported-routers)
+4. [Supported Dependencies](#supported-dependencies)
+5. [Sample unit test for Mocking/Stubing](#sample-unit-test-for-mockingstubing)
+6. [Test with code coverage](#test-with-code-coverage)
+7. [Development Setup](#development-setup)
+8. [Community support](#community-support)
 
 ## Installation
+1. First install [Node.js](http://nodejs.org/). Then,
 ```bash
+# for npm package manager
 npm i https://github.com/keploy/typescript-sdk
+
+# for yarn package manager
+yarn add https://github.com/keploy/typescript-sdk
 ```
 
-## Configure
-SDK uses environment variables for configuration. If not provided, then SDK uses default values. 
+2. Install and Start the keploy binary on an independent terminal. Follow [this](https://github.com/keploy/keploy#quick-installation) guide
+## Usage
+### Generate E2E tests
+Keploy can generate end-to-end tests without writing any unit tests file and mocks. 
+Mocks/stubs are also generated and linked to their respective tests. 
+These tests can be run just by starting your API server on `test` mode. 
+We can also add code coverage using the recorded tests. Steps for integration: 
+ 1. **Integration** 
+    1. `Add keploy middleware` to your API server. Follow the [Supported Routers](#supported-routers) guide for your router framework.
+    2. `Wrap the dependencies` of your API server like mongoose, etc. Follow the [Supported Dependencies](#supported-dependencies) guide for your dependencies.
+    3. `Configuration`: SDK uses environment variables for configuration. "KEPLOY_APP_PORT" is mandatory during, "record"/"test" modes. Other environment variables are optional, since they have default values.
 
-**Note**: "KEPLOY_APP_PORT" is required else, it will throw error on "record"/"test" mode.
-``` bash
-export KEPLOY_MODE="off"           # Values: "record" / "test" / "off"(default) 
-export KEPLOY_APP_NAME="my-app"    # [app_ids] for different API applications. Default: "sample-app"
-export KEPLOY_APP_HOST="localhost" # Host of API application. Default: "localhost"
-export KEPLOY_APP_PORT=XXXX        # port on which API is running. Required
-export KEPLOY_APP_DELAY=5          # approx time taken by API server to start. Default: 5sec
-export KEPLOY_APP_TIMEOUT=100      # request timeout for keploy server. Default: 60sec
-# export KEPLOY_APP_FILTER={"urlRegex":"*"}  # filters for capturing tcs. It should be a valid JSON
+        Following is an example of `.env` file configuration.
+        ``` bash
+            export KEPLOY_APP_PORT=XXXX        # port on which API is running. Required and it should be a number
+            export KEPLOY_MODE="off"           # Values: "record" / "test" / "off"(default) 
+            export KEPLOY_APP_NAME="my-app"    # [app_ids] for different API applications. Default: "sample-app"
+            export KEPLOY_APP_HOST="localhost" # Host of API application. Default: "localhost"
+            export KEPLOY_APP_DELAY=5          # approx time taken by API server to start. Default: 5sec
+            export KEPLOY_APP_TIMEOUT=100      # request timeout for keploy server. Default: 60sec
+            # export KEPLOY_APP_FILTER={"urlRegex":"*"}  # filters for capturing tcs. It should be a valid JSON
 
-export KEPLOY_SERVER_URL="localhost:6789" # url to running keploy server. Default: "localhost:6789"
-# export KEPLOY_SERVER_LICENSE="XXX-XXX-XXX" # hosted keploy server api key
-```
+            export KEPLOY_SERVER_URL="localhost:6789" # url to running keploy server. Default: "localhost:6789"
+            # export KEPLOY_SERVER_LICENSE="XXX-XXX-XXX" # hosted keploy server api key
+        ```
+ 2. **Record**
+    1. Set the `KEPLOY_MODE` to "record" in your .env configuration file.
+       ```bash
+       export KEPLOY_MODE="record"
+       ```
+    2. Start your API server on `record` mode. 
+       ```bash
+       # <server>.js should be the main file to start API server.
+       source .env && node <server>.js
+       ```
+    3. `Make an API call` on any endpoint of your running API server.
+
+    Now, testcases will be generated for the API call along with the integrated dependencies mocks/stubs. These tests and mocks are generated as `readable/editable` yaml files in the */keploy* directory.
+3. **Test** 
+    1. Set the `KEPLOY_MODE` to "test" in your .env configuration file.
+       ```bash
+       export KEPLOY_MODE="test"
+       ```
+    2. Start your API server on `test` mode. 
+       ```bash
+       # <server>.js should be the main file to start API server.
+       source .env && node <server>.js
+       ```
+
+    🎉TADA: You have made an end-to-end test and tested it without writing any code for test file or managing mocks/stubs.
+    
+Keploy can be integrated with testing frameworks like Mocha.js for `code coverage`. 
+Integartion with fameworks is provided in [Test with code coverage](#test-with-code-coverage) section.
+### Mocking/Stubbing for unit tests
+These mocks/stubs are realistic and frees you up from writing them manually. Keploy creates `readable/editable` mocks/stubs yaml files which can be referenced in any of your unit-tests tests. Steps to mock/stub external calls:
+
+1. **Wrap the dependencies**: 
+   1. `Initialise keploy context` by calling mock.NewContext in test setup for each testcase. 
+      ```js
+      // Set your keploy mode and test name of unit test here.
+      NewContext({Mode: "<record_OR_test_OR_off>", Name: "unique_testcase_name"})  
+      ```
+   2. `Wrap the dependencies` of your unit tests like mongoose, etc. Follow the [Supported Dependencies](#supported-dependencies) guide for your dependencies.
+2. **Record**: 
+   1. Set the mode to `record` in NewContext.
+      ```js
+      // input a unique test name for each testcase in the Name field
+      NewContext({Mode: "record", Name: "unit_test-1"})  
+      ```
+   2. Run your unit test. 
+   
+   Now, a */mocks* directory is created containing yaml file for each testcase of your unit test. 
+   The yaml files contains the recorded `outputs` of external depedencies as yaml docs.
+3. **Test**: 
+   1. Set the mode to `test` in your test setup.
+      ```js
+      // input a unique test name for each testcase in the Name field
+      NewContext({Mode: "test", Name: "unit_test-1"})  
+      ```
+   2. Turn off the dependency service like mongoDB server, etc.
+   3. Run the unit test. 
+   
+   🎉TADA: The unit test will run perfectly, without making any external dependency call. 
+   It uses the recorded outputs from yaml files in generated mocks directory.
+
+An example is provided in [Sample unit test for Mocking/Stubing](#sample-unit-test-for-mockingstubing) section.
 
 ## Supported Routers
 ### 1. Express
-Add the following require statement before the require statement of express.
+Keploy adds a middleware for capturing requests/responses using require hooks. To integrate, just add the following statement before your require statement of `express`.
 ```js
+// Uncomment following blocks to use require in ES Module
+/*
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+*/
 require("typescript-sdk/dist/integrations/express/register");
+/*
+const express = require('express');
+*/
 ```
 
-#### Example
+Example of CommonJS module express app:
 ```js
 require("typescript-sdk/dist/integrations/express/register");
 const express = require('express');
@@ -71,26 +144,36 @@ app.listen(port, () => {
     console.log(`Server is running on port: ${port}`);
 })
 ```
-Note:- Currently not supported for ES module. You can use require statements in esmodule by:
-```js
-// Define "require"
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
-```
 
 ## Supported Dependencies
 ### 1. Octokit
-To integrate just add this line before require statement of Octokit in your application.
+To integrate, just add this line before require statement of Octokit in your application.
 ```js
+// Uncomment following blocks to use require in ES Module
+/*
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+*/
 require("typescript-sdk/dist/integrations/octokit/require")
+/*
+const { Octokit, App } = require("octokit");
+*/
 ```
 
 ### 2. Mongoose
-To integrate just add this line before require statement of mongoose in your application.
+To integrate, just add this line before require statement of mongoose in your application.
 ```js
+// Uncomment following blocks to use require in ES Module
+/*
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+*/
 require("typescript-sdk/dist/integrations/mongoose/require")
+/*
+const mongoose =  require('mongoose');
+*/
 ```
-Currently, keploy mocks/stubs outputs for:
+Mongoose package version should be `^6.4.0`. Keploy mocks/stubs outputs for following mongoose methods:
 1. find()
 2. findOne()
 3. save()
@@ -101,32 +184,9 @@ Currently, keploy mocks/stubs outputs for:
 8. deleteOne()
 9. deleteMany()
 
-### **Note**: 
-Since, this package uses require-in-the-middle for adding hook. Therefore, it is supported for commonjs module currently. Also, you can use require statements in esmodule by:
-```js
-// Define "require"
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
-```
+## Sample unit test for Mocking/Stubing
 
-## Mocking/Stubbing for unit tests
-These mocks/stubs are realistic and frees you up from writing them manually. Keploy creates `readable/editable` mocks/stubs yaml files which can be referenced in any of your unit-tests tests. Steps to mock/stub external calls:
-
-1. **Wrap the dependencies**: 
-   1. Call mock.NewContext with tcsName and mode in test setup for each testcase. 
-   2. Integrate the supported dependecies in your unit-tests.
-2. **Record**: 
-   1. Set the mode in NewContext to "record" 
-   2. Run the unit test. 
-   
-   Now, a mocks directory containing yaml files for each testcase in unit test. The yaml files have docs for recorded outputs of integrated deps call.
-3. **Test**: 
-   1. Set the mode in NewContext to "test" 
-   2. Turn off the dependency server or DB.
-   3. Run the unit test. 
-   And the unit test will run perfectly using the recorded outputs from yaml files in generated mocks directory.
-
-Following is an example of unit test with octokit :
+Following is an example of `CommonJS` module unit test with octokit dependency :
 
 #### Example
 ```js
@@ -175,7 +235,9 @@ const require = createRequire(import.meta.url);
 
 ## Test with code coverage
 ### Integration with Mocha testing framework 
-You just need to do some imports and call a built-in assert function in your code in your unit test file and that's it!!🔥🔥🔥
+To see code coverage please use nyc mocha and see how many lines are covered!!
+
+You just need to create a unit test file with the following code. And that's it!!🔥🔥🔥
 ```js
 const {runServer} = require('../server') //your server wrapper
 const {keploy}  = require('typescript-sdk/dist/integrations/express/register')
@@ -194,16 +256,8 @@ describe("test function", ()=>{
        })
 })
 ```
-Note:- To see code coverage please use nyc mocha and see how many lines are covered!!
 
-Note:- Jest is not supported currently!!
-
-
-- Furthermore, to commit your changes use `yarn commit` instead of `git commit` for better commit experience.
-
-- For VSCode setup, make sure these extensions are installed:
-  - [EditorConfig](https://marketplace.visualstudio.com/items?itemName=EditorConfig.EditorConfig)
-  - [Eslint](https://marketplace.visualstudio.com/items?itemName=dbaeumer.vscode-eslint)
+Note:- Since, Jest framework have an isolated environment. Keploy is unable to add hooks for integration.
 
 ## Development Setup
 
@@ -223,6 +277,11 @@ yarn install
 ```sh
 yarn proto-loader-gen-types --grpcLib=@grpc/grpc-js --outDir=proto/ proto/*.proto
 ```
+- For VSCode setup, make sure these extensions are installed:
+  - [EditorConfig](https://marketplace.visualstudio.com/items?itemName=EditorConfig.EditorConfig)
+  - [Eslint](https://marketplace.visualstudio.com/items?itemName=dbaeumer.vscode-eslint)
+
+- Furthermore, to commit your changes use `yarn commit` instead of `git commit` for better commit experience.
 
 ## Community support
 We'd love to collaborate with you to make Keploy great. To get started:
