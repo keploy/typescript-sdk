@@ -139,6 +139,11 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
     return;
   }
 
+  //to avoid recording tests in the test mode and only recording in the record mode
+  if (process.env.KEPLOY_MODE == "test" && id === undefined) {
+    return;
+  }
+
   // req.headers
   // Since, JSON.stingify trims spaces. Therefore, content-length of request header should be updated
   req.headers["content-length"] = JSON.stringify(
@@ -160,30 +165,28 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
     mocks = kctx.context.mocks;
   }
 
-  if (kctx.context.mode == "test") {
-    keploy.capture({
-      Captured: Date.now(),
-      AppID: keploy.appConfig.name,
-      // change url to uri ex: /url-shortner/:param
-      URI: req.originalUrl,
-      HttpReq: {
-        Method: req.method,
-        URL: req.originalUrl,
-        URLParams: req.params,
-        Header: reqHeader,
-        Body: JSON.stringify(req.body),
-      },
-      HttpResp: {
-        StatusCode: res.statusCode,
-        Header: respHeader,
-        // @ts-ignore
-        Body: String(ResponseBody.get(req)),
-      },
-      Dependency: deps,
-      TestCasePath: keploy.appConfig.testCasePath,
-      MockPath: keploy.appConfig.mockPath,
-      Mocks: mocks,
-      Type: HTTP,
-    });
-  }
+  keploy.capture({
+    Captured: Date.now(),
+    AppID: keploy.appConfig.name,
+    // change url to uri ex: /url-shortner/:param
+    URI: req.originalUrl,
+    HttpReq: {
+      Method: req.method,
+      URL: req.originalUrl,
+      URLParams: req.params,
+      Header: reqHeader,
+      Body: JSON.stringify(req.body),
+    },
+    HttpResp: {
+      StatusCode: res.statusCode,
+      Header: respHeader,
+      // @ts-ignore
+      Body: String(ResponseBody.get(req)),
+    },
+    Dependency: deps,
+    TestCasePath: keploy.appConfig.testCasePath,
+    MockPath: keploy.appConfig.mockPath,
+    Mocks: mocks,
+    Type: HTTP,
+  });
 }
