@@ -14,6 +14,7 @@ import { TestCase } from "../proto/services/TestCase";
 import { StrArr } from "../proto/services/StrArr";
 import assert = require("assert");
 import { createExecutionContext, getExecutionContext } from "./context";
+import { exec, spawn } from "child_process";
 
 const PROTO_PATH = "../proto/services.proto";
 const packageDef = protoLoader.loadSync(path.resolve(__dirname, PROTO_PATH));
@@ -76,6 +77,26 @@ export default class Keploy {
     this.responses = {};
     this.dependencies = {};
     this.mocks = {};
+    if (
+      process.env.KEPLOY_MODE === "record" ||
+      process.env.KEPLOY_MODE === "test"
+    ) {
+      exec("which keploy", (error, stdout, stderr) => {
+        if (!stdout) {
+          console.log(
+            "Keploy Server is not installed. Please install it using https://docs.keploy.io/docs/go/installation "
+          );
+          process.exit();
+        } else {
+          exec("lsof -i:6789", (error, stdout, stderr) => {
+            console.log("stdout", stdout);
+            if (!stdout) {
+              spawn("keploy");
+            }
+          });
+        }
+      });
+    }
   }
 
   validateServerConfig({
