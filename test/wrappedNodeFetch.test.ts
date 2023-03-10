@@ -1,6 +1,8 @@
 import { wrappedNodeFetch } from '../integrations/octokit/require';
 import { Response } from 'node-fetch';
 import { createExecutionContext, getExecutionContext} from '../src/context';
+import { HTTP } from '../src/keploy';
+
 describe('wrappedNodeFetch', () => {
   it('should call fetch function with correct arguments in record mode', async () => {
     const mockFetch = jest.fn().mockResolvedValueOnce(new Response());
@@ -41,7 +43,7 @@ describe('wrappedNodeFetch', () => {
         {
           Version: 'V1_BETA2',
           Name: 'testId',
-          Kind: 'HTTP',
+          Kind: HTTP,
           Spec: {
             Metadata: {
               name: 'node-fetch',
