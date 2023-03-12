@@ -89,7 +89,6 @@ export default class Keploy {
           process.exit();
         } else {
           exec("lsof -i:6789", (error, stdout, stderr) => {
-            console.log("stdout", stdout);
             if (!stdout) {
               spawn("keploy");
             }
