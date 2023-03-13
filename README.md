@@ -84,6 +84,7 @@ These mocks/stubs are realistic and frees you up from writing them manually. Kep
 1. **Wrap the dependencies**: 
    1. `Initialise keploy context` by calling mock.NewContext in test setup for each testcase. 
       ```js
+      const { NewContext } = require('typescript-sdk/dist/mock/mock');
       // Set your keploy mode and test name of unit test here.
       NewContext({Mode: "<record_OR_test_OR_off>", Name: "unique_testcase_name"})  
       ```
