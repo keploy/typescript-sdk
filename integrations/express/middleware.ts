@@ -19,7 +19,7 @@ class ResponseBody {
     this.body = [];
   }
 
-  static push(req: Request, chunks: object): void {
+  static push(req: Request, chunks: any): void {
     const resp = ResponseBody.responseMap.get(req);
     if (resp === undefined || resp.body === undefined) {
       const resp = new ResponseBody();
@@ -107,8 +107,22 @@ function captureResp(
 ) {
   const oldSend = res.send;
 
-  res.send = (chunk: object) => {
-    ResponseBody.push(req, chunk);
+  // send is used to send response as JSON to the client.
+  // If the argument is not a JSON then, send is called twice.
+  res.send = (chunk: any) => {
+    // Since, send is called once for sending response to the client. This ensures
+    // that response is captured only once.
+    if (ResponseBody.get(req) === undefined) {
+      let str = "";
+      // to store the the JSON response since, chunk can be object or array.
+      if (!isJsonValid(chunk)) {
+        str = JSON.stringify(chunk);
+      } else {
+        str = chunk;
+      }
+      // stores the response object corresponding to the request
+      ResponseBody.push(req, str);
+    }
     return oldSend.apply(res, [chunk]);
   };
 
@@ -183,4 +197,14 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
     Mocks: mocks,
     Type: HTTP,
   });
+}
+
+// isJsonValid checks whether o is a valid JSON or not
+function isJsonValid(o: any): boolean {
+  try {
+    JSON.parse(o);
+  } catch (err) {
+    return false;
+  }
+  return true;
 }
