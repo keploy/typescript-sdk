@@ -3,7 +3,7 @@
 import Hook from "require-in-the-middle";
 import mixin from "merge-descriptors";
 import fetch, { Headers, Response, ResponseInit } from "node-fetch";
-import { getExecutionContext } from "../../src/context";
+import { getExecutionContext,createExecutionContext } from "../../src/context";
 import { Readable } from "stream";
 import { ProcessDep, stringToBinary } from "../../src/util";
 import { putMocks } from "../../mock/utils";
@@ -207,6 +207,7 @@ export function wrappedNodeFetch(fetchFunc: Function) {
         );
         return fetchFunc.apply(this, [url, options]);
     }
+    createExecutionContext(ctx);
     return resp;
   }
   return mixin(wrappedFetch, fetchFunc, false);
