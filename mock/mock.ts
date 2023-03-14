@@ -27,8 +27,10 @@ export interface Config {
   Mode: string;
 }
 export function NewContext(conf: Config) {
-  let mode = MODE_TEST,
-    path = conf !== undefined && conf.Path !== undefined ? conf.Path : "";
+  const mode = new Mode();
+  let path = conf !== undefined && conf.Path !== undefined ? conf.Path : "";
+  // default mode: TEST
+  mode.SetMode(MODE_TEST);
 
   if (path === "") {
     try {
@@ -53,13 +55,13 @@ export function NewContext(conf: Config) {
     Mode.Valid(process.env.KEPLOY_MODE)
   ) {
     //   if (process.)
-    mode = process.env.KEPLOY_MODE;
+    mode.SetMode(process.env.KEPLOY_MODE);
   }
   // mode mostly dependent on conf.Mode
   if (Mode.Valid(conf.Mode)) {
-    mode = conf.Mode;
+    mode.SetMode(conf.Mode);
   }
-  switch (mode) {
+  switch (mode.GetMode()) {
     case "test":
       if (conf.Name === "") {
         console.log(
@@ -67,7 +69,7 @@ export function NewContext(conf: Config) {
         );
       }
       createExecutionContext({
-        mode: mode,
+        mode: mode.GetMode(),
         testId: conf.Name,
         mocks: [],
         fileExport: true,
@@ -84,14 +86,14 @@ export function NewContext(conf: Config) {
       break;
     case "record":
       createExecutionContext({
-        mode: mode,
+        mode: mode.GetMode(),
         testId: conf.Name,
         mocks: [],
         fileExport: true,
       });
       break;
     default:
-      console.log("Keploy mode: (", mode, ") is not a valid mode");
+      console.log("Keploy mode: (", mode.GetMode(), ") is not a valid mode");
       break;
   }
 
@@ -101,10 +103,15 @@ export function NewContext(conf: Config) {
   }
   console.log(
     "\n💡⚡️ Keploy created new mocking context in",
-    mode,
+    mode.GetMode(),
     "mode",
     name,
     ".\n If you dont see any logs about your dependencies below, your dependency/s are NOT wrapped.\n"
   );
-  startRecordingMocks(path + "/" + conf.Name + ".yaml", mode, name, conf.Name);
+  startRecordingMocks(
+    path + "/" + conf.Name + ".yaml",
+    mode.GetMode(),
+    name,
+    conf.Name
+  );
 }
