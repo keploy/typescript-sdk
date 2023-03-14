@@ -20,13 +20,11 @@ describe('wrappedNodeFetch', () => {
     };
     const response = await wrappedFetch(url, options);
     const updatedctx= getExecutionContext().context;
-    const mocks=updatedctx.mocks.length;
-    const deps=updatedctx.deps.length;
     const responseBody = await response.text();
     const recordedOutput = updatedctx.mocks[0].Spec.Res.Body;
     expect(response).toBeInstanceOf(Response);
-    expect(mocks).toBeGreaterThan(0);
-    expect(deps).toBeGreaterThan(0);
+    expect(updatedctx.mocks.length).toBeGreaterThan(0);
+    expect(updatedctx.deps.length).toBeGreaterThan(0);
     expect(response).toHaveProperty('body');
     expect(responseBody).toEqual(recordedOutput);
   });
