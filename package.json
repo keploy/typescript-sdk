@@ -6,7 +6,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc && cp ./proto/services.proto ./dist/proto/",
+    "build": "tsc && npm run copy-files",
+    "copy-files": "copyfiles -E -f proto/services.proto dist/proto/",
     "prepare": "npm run build",
     "commit": "cz"
   },
@@ -42,6 +43,7 @@
   "dependencies": {
     "@grpc/grpc-js": "^1.7.1",
     "@grpc/proto-loader": "^0.7.3",
+    "copyfiles": "^2.4.1",
     "cors": "^2.8.5",
     "express": "^4.17.3",
     "got": "^11.5.2",
