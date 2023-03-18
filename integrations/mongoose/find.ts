@@ -35,7 +35,7 @@ export function kFindOne(...args) {
           // wrap callback of findOne to capture the mongodb-native-driver outputs
           // @ts-ignore
           args[args.length - 1] = function (...outputs) {
-            ProcessDep(meta, ...outputs);
+            ProcessDep(ctx, meta, ...outputs);
             // calls the actual mongoose callback for findOne
             callback.apply(this, outputs);
           };
@@ -51,7 +51,7 @@ export function kFindOne(...args) {
         if (typeof callback === "function") {
           // mocked outputs of findOne opperation
           const outputs: any[] = [null, {}];
-          const mocks = ProcessDep(meta, ...outputs);
+          const mocks = ProcessDep(ctx, meta, ...outputs);
           // calls the actual mongoose callback for findOne
           // @ts-ignore
           callback.apply(this, mocks);
@@ -110,7 +110,7 @@ export function kFind(...args) {
                 // call the actual toArray method of cursor
                 const result = await actualToArray.apply(outputs[1], cb);
                 // encode and stores the documents in executionContext
-                ProcessDep(meta, outputs[0], result);
+                ProcessDep(ctx, meta, outputs[0], result);
                 // calls the actual user defined callback
                 cb(outputs[0], result);
                 return result;
@@ -135,7 +135,7 @@ export function kFind(...args) {
           const outputs = [null, {}];
           let result: any[] = [];
           // returns the mocked outputs of find call
-          const mocks = ProcessDep(meta, outputs[0], result);
+          const mocks = ProcessDep(ctx, meta, outputs[0], result);
           if (mocks !== undefined && mocks.length == 2) {
             result = mocks[1];
             outputs[0] = mocks[0];
