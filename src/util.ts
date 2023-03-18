@@ -25,15 +25,19 @@ const transformToSnakeCase = (obj: any): object => {
 
 export { transformToSnakeCase };
 
-export function ProcessDep(meta: { [key: string]: string }, ...outputs: any[]) {
-  if (
-    getExecutionContext() == undefined ||
-    getExecutionContext().context == undefined
-  ) {
-    console.error("keploy context is not present to mock dependencies");
-    return;
-  }
-  const kctx = getExecutionContext().context;
+export function ProcessDep(
+  kctx: any,
+  meta: { [key: string]: string },
+  ...outputs: any[]
+) {
+  // if (
+  //   getExecutionContext() == undefined ||
+  //   getExecutionContext().context == undefined
+  // ) {
+  //   console.error("keploy context is not present to mock dependencies");
+  //   return;
+  // }
+  // const kctx = getExecutionContext().context;
   switch (kctx.mode) {
     case "record":
       const res: DataBytes[] = [];

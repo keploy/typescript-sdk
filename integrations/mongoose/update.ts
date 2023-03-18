@@ -34,7 +34,7 @@ export function kUpdateOne(...args) {
           // wrap callback of updateOne to capture the mongodb-native-driver outputs
           // @ts-ignore
           args[args.length - 1] = function (...outputs) {
-            ProcessDep(meta, ...outputs);
+            ProcessDep(ctx, meta, ...outputs);
             // calls the actual mongoose callback for findOne
             callback.apply(this, outputs);
           };
@@ -49,7 +49,7 @@ export function kUpdateOne(...args) {
         if (typeof callback === "function") {
           // mocked outputs of updateOne opperation
           const outputs: any[] = [null, {}];
-          const mocks = ProcessDep(meta, ...outputs);
+          const mocks = ProcessDep(ctx, meta, ...outputs);
           // calls the actual mongoose callback for findOne
           // @ts-ignore
           callback.apply(this, mocks);
@@ -102,7 +102,7 @@ export function kUpdateMany(...args) {
           // wrap callback of updateMany to capture the mongodb-native-driver outputs
           // @ts-ignore
           args[args.length - 1] = function (...outputs) {
-            ProcessDep(meta, ...outputs);
+            ProcessDep(ctx, meta, ...outputs);
             // calls the actual mongoose callback for findOne
             callback.apply(this, outputs);
           };
@@ -117,7 +117,7 @@ export function kUpdateMany(...args) {
         if (typeof callback === "function") {
           // mocked outputs of updateMany opperation
           const outputs: any[] = [null, {}];
-          const mocks = ProcessDep(meta, ...outputs);
+          const mocks = ProcessDep(ctx, meta, ...outputs);
           // calls the actual mongoose callback for findOne
           // @ts-ignore
           callback.apply(this, mocks);

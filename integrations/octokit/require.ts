@@ -189,7 +189,7 @@ export function wrappedNodeFetch(fetchFunc: Function) {
           }
           ctx.mocks.shift();
         } else {
-          ProcessDep({}, outputs);
+          ProcessDep(ctx, {}, outputs);
         }
         rinit.headers = new Headers(outputs[1].headers);
         rinit.status = outputs[1].status;
