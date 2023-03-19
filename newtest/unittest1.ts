@@ -1,6 +1,5 @@
-import fetchMock, { MockResponse } from "fetch-mock";
+import fetch, { RequestInit } from "node-fetch";
 import { wrappedNodeFetch } from "../integrations/octokit/require";
-import { Response } from 'node-fetch';
 import { createExecutionContext, getExecutionContext} from '../src/context';
 import { HTTP } from '../src/keploy';
 
@@ -24,19 +23,19 @@ describe("wrappedNodeFetch", () => {
         Authorization: "token secret123",
       },
     };
-    const fetchSpy = jest.spyOn(fetchMock, "default").mockReturnValue(
+    const fetchSpy = jest.spyOn(fetch, "default").mockReturnValue(
       Promise.resolve({
         status: 200,
-        body: "Hello world!",
+        text: () => Promise.resolve("Hello world!"),
         headers: {
           "Content-Type": "text/plain",
         },
       })
     );
 
-    const wrappedFetch = wrappedNodeFetch(fetchMock.default);
+    const wrappedFetch = wrappedNodeFetch(fetch);
 
-    await wrappedFetch.call({ fetch: fetchMock.default }, url, options);
+    await wrappedFetch.call({ fetch }, url, options);
 
     expect(fetchSpy).toHaveBeenCalledWith(url, {
       method: options.method,
@@ -64,6 +63,6 @@ describe("wrappedNodeFetch", () => {
     expect(httpMock.Spec.Res.Header).toEqual({
       "Content-Type": "text/plain",
     });
-    expect(httpMock.Spec.Res.Body).toEqual("Hello world!");
+    expect(await httpMock.Spec.Res.Body?.asString()).toEqual("Hello world!");
   });
 });
