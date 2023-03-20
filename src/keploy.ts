@@ -99,7 +99,7 @@ export default class Keploy {
         } else {
           exec("lsof -i:6789", (error, stdout, stderr) => {
             if (!stdout) {
-              spawn("keploy");
+              spawn("export KEPLOY_PORT=6789 && keploy");
             }
           });
         }
