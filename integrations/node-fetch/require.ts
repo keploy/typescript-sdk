@@ -38,15 +38,12 @@ export function wrappedNodeFetch(fetch: any) {
     url: any,
     options: any
   ) {
-    if (process.env.KEPLOY_MODE == MODE_OFF) {
-      return fetchFunc.apply(this, [url, options]);
-    }
     if (
       getExecutionContext() == undefined ||
       getExecutionContext().context == undefined
     ) {
       console.error("keploy context is not present to mock dependencies");
-      return;
+      return fetchFunc.apply(this, [url, options]);
     }
     const ctx = getExecutionContext().context;
     let resp = new fetch.Response();
@@ -147,6 +144,8 @@ export function wrappedNodeFetch(fetch: any) {
         });
         resp = new fetch.Response(Readable.from(buf), rinit);
         break;
+      case "off":
+        return fetchFunc.apply(this, [url, options]);
       default:
         console.debug(
           "mode is not valid. Please set valid keploy mode using env variables"
