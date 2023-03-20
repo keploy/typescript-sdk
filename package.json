@@ -11,7 +11,7 @@
     "commit": "cz"
   },
   "repository": "git@github.com:keploy/typescript-sdk.git",
-  "author": "Rajat Sharma <lunasunkaiser@gmail.com>",
+  "author": "Keploy <dev@keploy.io>",
   "license": "MIT",
   "devDependencies": {
     "@commitlint/cli": "^16.2.1",

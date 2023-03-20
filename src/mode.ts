@@ -13,12 +13,12 @@ export default class Mode {
   mode: string;
 
   constructor() {
-    this.mode = "off";
+    this.mode = MODE_OFF;
   }
 
   // Valid checks if the provided mode is valid
   static Valid(m: string): boolean {
-    if (m == MODE_RECORD || m == MODE_TEST || m == MODE_OFF) {
+    if (m === MODE_RECORD || m === MODE_TEST || m === MODE_OFF) {
       return true;
     }
     return false;
@@ -34,8 +34,8 @@ export default class Mode {
 
   // SetMode sets the keploy SDK mode
   // error is returned if the mode is invalid
-  SetMode(m: string) {
-    if (!Mode.Valid(m)) {
+  SetMode(m: string | undefined) {
+    if (m == undefined || !Mode.Valid(m)) {
       return new Error("invalid mode: " + m);
     }
     this.mode = m;
@@ -43,13 +43,9 @@ export default class Mode {
   // GetModeFromContext returns the mode on which SDK is configured by accessing environment variable.
   GetModeFromContext() {
     const kctx = getExecutionContext();
-    if (
-      getExecutionContext() == undefined ||
-      getExecutionContext().context == undefined ||
-      getExecutionContext().context.keployContext == undefined
-    ) {
+    if (kctx == undefined || kctx.context == undefined) {
       return MODE_OFF;
     }
-    return kctx.Mode;
+    return kctx.context.Mode;
   }
 }

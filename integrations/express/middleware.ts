@@ -2,8 +2,13 @@
 import express from "express";
 import Keploy, { HTTP } from "../../src/keploy";
 import { Request, Response, NextFunction } from "express";
-import { createExecutionContext, getExecutionContext } from "../../src/context";
+import {
+  createExecutionContext,
+  deleteExecutionContext,
+  getExecutionContext,
+} from "../../src/context";
 import { StrArr } from "../../proto/services/StrArr";
+import { MODE_OFF, MODE_RECORD, MODE_TEST } from "../../src/mode";
 
 class ResponseBody {
   static responseMap = new WeakMap<Request, ResponseBody>();
@@ -14,7 +19,7 @@ class ResponseBody {
     this.body = [];
   }
 
-  static push(req: Request, chunks: object): void {
+  static push(req: Request, chunks: any): void {
     const resp = ResponseBody.responseMap.get(req);
     if (resp === undefined || resp.body === undefined) {
       const resp = new ResponseBody();
@@ -70,12 +75,8 @@ export default function middleware(
     res.on("finish", () => {
       afterMiddleware(keploy, req, res);
     });
-    if (
-      (process.env.KEPLOY_MODE != undefined &&
-        process.env.KEPLOY_MODE == "off") ||
-      keploy == undefined
-    ) {
-      createExecutionContext({ mode: "off" });
+    if (keploy.mode.GetMode() == MODE_OFF) {
+      createExecutionContext({ mode: MODE_OFF });
       next();
       return;
     }
@@ -84,7 +85,7 @@ export default function middleware(
     // test mode
     if (id != undefined && id != "") {
       createExecutionContext({
-        mode: "test",
+        mode: MODE_TEST,
         testId: id,
         deps: keploy.getDependencies(id),
         mocks: keploy.getMocks(id),
@@ -94,7 +95,7 @@ export default function middleware(
     }
 
     // record mode
-    createExecutionContext({ mode: "record", deps: [], mocks: [] });
+    createExecutionContext({ mode: MODE_RECORD, deps: [], mocks: [] });
     captureResp(req, res, next);
   };
 }
@@ -106,8 +107,22 @@ function captureResp(
 ) {
   const oldSend = res.send;
 
-  res.send = (chunk: object) => {
-    ResponseBody.push(req, chunk);
+  // send is used to send response as JSON to the client.
+  // If the argument is not a JSON then, send is called twice.
+  res.send = (chunk: any) => {
+    // Since, send is called once for sending response to the client. This ensures
+    // that response is captured only once.
+    if (ResponseBody.get(req) === undefined) {
+      let str = "";
+      // to store the the JSON response since, chunk can be object or array.
+      if (!isJsonValid(chunk)) {
+        str = JSON.stringify(chunk);
+      } else {
+        str = chunk;
+      }
+      // stores the response object corresponding to the request
+      ResponseBody.push(req, str);
+    }
     return oldSend.apply(res, [chunk]);
   };
 
@@ -116,11 +131,7 @@ function captureResp(
 }
 
 export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
-  if (
-    (process.env.KEPLOY_MODE != undefined &&
-      process.env.KEPLOY_MODE == "off") ||
-    keploy == undefined
-  ) {
+  if (keploy.mode.GetMode() == MODE_OFF) {
     return;
   }
 
@@ -136,6 +147,7 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
       body: String(ResponseBody.get(req)),
     };
     keploy.putResp(id, resp);
+    deleteExecutionContext();
     return;
   }
 
@@ -159,6 +171,7 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
     deps = kctx.context.deps;
     mocks = kctx.context.mocks;
   }
+  deleteExecutionContext();
 
   keploy.capture({
     Captured: Date.now(),
@@ -184,4 +197,14 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
     Mocks: mocks,
     Type: HTTP,
   });
+}
+
+// isJsonValid checks whether o is a valid JSON or not
+function isJsonValid(o: any): boolean {
+  try {
+    JSON.parse(o);
+  } catch (err) {
+    return false;
+  }
+  return true;
 }

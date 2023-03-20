@@ -27,3 +27,8 @@ export function getExecutionContext() {
   const asyncId = asyncHooks.executionAsyncId();
   return executionContextMap.get(asyncId);
 }
+
+export function deleteExecutionContext() {
+  const asyncId = asyncHooks.executionAsyncId();
+  executionContextMap.delete(asyncId);
+}
