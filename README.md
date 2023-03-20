@@ -16,11 +16,13 @@ This is the client SDK for the [Keploy](https://github.com/keploy/keploy) testin
 8. [Community support](#community-support)
 
 ## Installation
-1. First install [Node.js](http://nodejs.org/). Then,
+1. First install [Node.js](https://nodejs.org/en/download). Then,
 ```bash
 # for npm package manager
 npm i https://github.com/keploy/typescript-sdk
+```
 
+```bash
 # for yarn package manager
 yarn add https://github.com/keploy/typescript-sdk
 ```
@@ -115,7 +117,7 @@ An example is provided in [Sample unit test for Mocking/Stubing](#sample-unit-te
 
 ## Supported Routers
 ### 1. Express
-Keploy adds a middleware for capturing requests/responses using require hooks. To integrate, just add the following statement before every require statement of `express` in your app.
+Keploy adds a middleware for capturing requests/responses using require hooks. To integrate, just add the following statement before `every require` statement of `express` in your app.
 ```js
 // Uncomment following blocks to use require in ES Module
 /*
@@ -148,7 +150,7 @@ app.listen(port, () => {
 
 ## Supported Dependencies
 ### 1. Octokit
-To integrate, just add this line before every require statement of Octokit in your application.
+To integrate, just add this line before `every require` statement of Octokit in your application.
 ```js
 // Uncomment following blocks to use require in ES Module
 /*
@@ -162,7 +164,7 @@ const { Octokit, App } = require("octokit");
 ```
 
 ### 2. Mongoose
-To integrate, just add this line before every require statement of mongoose in your application.
+To integrate, just add this line before `every require` statement of mongoose in your application.
 ```js
 // Uncomment following blocks to use require in ES Module
 /*
