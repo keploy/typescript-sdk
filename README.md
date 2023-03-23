@@ -20,7 +20,8 @@ This is the client SDK for the [Keploy](https://github.com/keploy/keploy) testin
 ```bash
 # for npm package manager
 npm i https://github.com/keploy/typescript-sdk
-
+```
+```bash
 # for yarn package manager
 yarn add https://github.com/keploy/typescript-sdk
 ```
