@@ -12,6 +12,7 @@ import { getRequestHeader, getResponseHeader } from "../express/middleware";
 import { getReasonPhrase } from "http-status-codes";
 import { DataBytes } from "../../proto/services/DataBytes";
 import { MockIds } from "../../mock/mock";
+import { MODE_OFF, MODE_RECORD, MODE_TEST } from "../../src/mode";
 
 // @ts-ignore
 Hook(["octokit"], function (exported) {
@@ -110,7 +111,7 @@ export function wrappedNodeFetch(fetchFunc: Function) {
       type: "HTTP_CLIENT",
     };
     switch (ctx.mode) {
-      case "record":
+      case MODE_RECORD:
         resp = await fetchFunc.apply(this, [url, options]);
         const clonedResp = resp.clone();
         rinit = {
@@ -163,7 +164,7 @@ export function wrappedNodeFetch(fetchFunc: Function) {
           }
         });
         break;
-      case "test":
+      case MODE_TEST:
         const outputs = new Array(2);
         if (
           ctx.mocks != undefined &&
@@ -188,7 +189,7 @@ export function wrappedNodeFetch(fetchFunc: Function) {
           }
           ctx.mocks.shift();
         } else {
-          ProcessDep({}, outputs);
+          ProcessDep(ctx, {}, outputs);
         }
         rinit.headers = new Headers(outputs[1].headers);
         rinit.status = outputs[1].status;
@@ -199,11 +200,11 @@ export function wrappedNodeFetch(fetchFunc: Function) {
         });
         resp = new Response(Readable.from(buf), rinit);
         break;
-      case "off":
+      case MODE_OFF:
         return fetchFunc.apply(this, [url, options]);
       default:
         console.debug(
-          "mode is not valid. Please set valid keploy mode using env variables"
+          `keploy mode '${ctx.mode}' is invalid. Modes: 'record' / 'test' / 'off'(default)`
         );
         return fetchFunc.apply(this, [url, options]);
     }
