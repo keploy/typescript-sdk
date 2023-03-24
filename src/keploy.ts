@@ -85,6 +85,7 @@ export default class Keploy {
     this.responses = {};
     this.dependencies = {};
     this.mocks = {};
+    console.log("Keploy is running in " + this.mode.GetMode() + " mode");
   }
 
   validateServerConfig({

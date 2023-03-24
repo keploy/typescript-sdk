@@ -3,7 +3,7 @@ import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import path, { resolve } from "path";
 import { ProtoGrpcType } from "../proto/services";
-import Mode, { MODE_TEST } from "../src/mode";
+import Mode, { MODE_TEST, MODE_RECORD } from "../src/mode";
 import { createExecutionContext, getExecutionContext } from "../src/context";
 import { startRecordingMocks } from "./utils";
 
@@ -61,8 +61,9 @@ export function NewContext(conf: Config) {
   if (Mode.Valid(conf.Mode)) {
     mode.SetMode(conf.Mode);
   }
+  console.log("Keploy is running in " + mode.GetMode() + " mode");
   switch (mode.GetMode()) {
-    case "test":
+    case MODE_TEST:
       if (conf.Name === "") {
         console.log(
           "🚨 Please enter the auto generated name to mock the dependencies using Keploy."
@@ -84,7 +85,7 @@ export function NewContext(conf: Config) {
         return response;
       });
       break;
-    case "record":
+    case MODE_RECORD:
       createExecutionContext({
         mode: mode.GetMode(),
         testId: conf.Name,
