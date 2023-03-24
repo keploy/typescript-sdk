@@ -62,6 +62,8 @@ export function NewContext(conf: Config) {
     mode.SetMode(conf.Mode);
   }
   console.log("Keploy is running in " + mode.GetMode() + " mode");
+  modeDescription(mode.GetMode());
+
   switch (mode.GetMode()) {
     case MODE_TEST:
       if (conf.Name === "") {
@@ -115,4 +117,24 @@ export function NewContext(conf: Config) {
     name,
     conf.Name
   );
+}
+
+function modeDescription(mode: string) {
+  switch (mode) {
+    case MODE_RECORD:
+      console.log(
+        "This mode will record all the API calls made to the application and store each call as a test in the keploy/tests directory as a yaml file"
+      );
+      break;
+    case MODE_TEST:
+      console.log(
+        "This mode will run all the tests stored in the keploy/tests directory and report the results"
+      );
+      break;
+    default:
+      console.log(
+        "This mode will not do anything and your application will act normal without any interference from keploy"
+      );
+      break;
+  }
 }
