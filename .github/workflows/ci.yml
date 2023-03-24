@@ -1,6 +1,7 @@
 name: Check PR
 
-on: [pull_request]
+on:
+  pull_request
 
 jobs:
   run-ci:
@@ -33,3 +34,6 @@ jobs:
 
       - name: Check commits messages
         uses: wagoid/commitlint-github-action@v5
+
+      - name: Run the tests
+        run: npm test -- --coverage
