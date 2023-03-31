@@ -83,6 +83,27 @@ export default function middleware(
 
     const id = req.get("KEPLOY_TEST_ID");
     // test mode
+    //user-initiated request,not the appclient
+    //treat as disable for this specific request
+    function handleTestMode(
+      keploy: Keploy,
+      req: Request,
+      res: Response,
+      next: NextFunction
+    ) {
+      if (keploy.mode.GetMode() === MODE_TEST) {
+        createExecutionContext({ mode: MODE_OFF });
+        next();
+      } else {
+        return false;
+      }
+      return true;
+    }
+    // Calling  the handleTestMode function here
+    if (handleTestMode(keploy, req, res, next)) {
+      return;
+    }
+    
     if (id != undefined && id != "") {
       createExecutionContext({
         mode: MODE_TEST,
