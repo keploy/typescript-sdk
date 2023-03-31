@@ -94,6 +94,14 @@ export default function middleware(
       return;
     }
 
+    // Test mode but user is the one who sent the request, not Keploy client
+    // treat as OFF for this particular request
+    if (keploy.mode.GetMode() == MODE_TEST) {
+      createExecutionContext({ mode: MODE_OFF });
+      next();
+      return;
+    }
+
     // record mode
     createExecutionContext({ mode: MODE_RECORD, deps: [], mocks: [] });
     captureResp(req, res, next);
@@ -150,6 +158,10 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
     deleteExecutionContext();
     return;
   }
+
+  // Test mode but user is the one who sent the request, not Keploy client.
+  // What's after this condition is related to Record mode.
+  if (keploy.mode.GetMode() == MODE_TEST) return;
 
   // req.headers
   // Since, JSON.stingify trims spaces. Therefore, content-length of request header should be updated
