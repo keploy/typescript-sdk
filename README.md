@@ -2,6 +2,8 @@
 [![Slack](.github/slack.svg)](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA)
 [![License](.github/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
+**Note** :- Issue Creation is disabled on this Repository, please visit [here](https://github.com/keploy/keploy/issues/new/choose) to submit issue.
+
 # Keploy Typescript-SDK
 This is the client SDK for the [Keploy](https://github.com/keploy/keploy) testing platform. You can use this to generate realistic mock files or entire e2e tests for your applications. The **HTTP mocks/stubs and tests are the same format** and inter-exchangeable.
 
