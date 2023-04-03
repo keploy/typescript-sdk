@@ -46,12 +46,17 @@ describe('wrappedNodeFetch', () => {
     const options = {
       method: 'GET',
     };
+    const expectedResponseBody = ctx.mocks[0].Spec.Res.Body;
+
     const response = await wrappedFetch(url, options);
-    const updatedctx= getExecutionContext().context;
+    const updatedctx = getExecutionContext().context;
     expect(response.status).toEqual(mockResponse.status);
     expect(response.statusText).toEqual(mockResponse.statusText);
-
-    const mocks=updatedctx.mocks.length;
+    
+    const responseBody = await response.text();
+    expect(responseBody).toEqual(expectedResponseBody);
+    
+    const mocks = updatedctx.mocks.length;
     expect(mocks).toBe(0);
   });
 
@@ -97,12 +102,17 @@ describe('wrappedNodeFetch', () => {
     const options = {
       method: 'GET',
     };
+    const expectedResponseBody = ctx.mocks[0].Spec.Res.Body;
+
     const response = await wrappedFetch(url, options);
-    const updatedctx= getExecutionContext().context;
+    const updatedctx = getExecutionContext().context;
     expect(response.status).toEqual(mockResponse.status);
     expect(response.statusText).toEqual(mockResponse.statusText);
-
-    const mocks=updatedctx.mocks.length;
+    
+    const responseBody = await response.text();
+    expect(responseBody).toEqual(expectedResponseBody);
+    
+    const mocks = updatedctx.mocks.length;
     expect(mocks).toBe(0);
   });
   it('should record an HTTP request in record mode', async () => {
