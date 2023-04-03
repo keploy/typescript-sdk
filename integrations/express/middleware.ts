@@ -157,21 +157,9 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
   }
 
   const id = req.get("KEPLOY_TEST_ID");
-  if (id !== undefined && id !== "") {
-    const respHeader: { [key: string]: StrArr } = getResponseHeader(
-      res.getHeaders()
-    );
-    const resp = {
-      status_code: res.statusCode,
-      header: respHeader,
-      // @ts-ignore
-      body: String(ResponseBody.get(req)),
-    };
-    keploy.putResp(id, resp);
-    deleteExecutionContext();
+  if (keploy.mode.GetMode() == MODE_TEST && (id === undefined || id === "")) {
     return;
   }
-
   // req.headers
   // Since, JSON.stingify trims spaces. Therefore, content-length of request header should be updated
   req.headers["content-length"] = JSON.stringify(
