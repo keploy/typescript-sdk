@@ -157,6 +157,21 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
   }
 
   const id = req.get("KEPLOY_TEST_ID");
+  
+  if (id !== undefined && id !== "") {
+    const respHeader: { [key: string]: StrArr } = getResponseHeader(
+      res.getHeaders()
+    );
+    const resp = {
+      status_code: res.statusCode,
+      header: respHeader,
+      // @ts-ignore
+      body: String(ResponseBody.get(req)),
+    };
+    keploy.putResp(id, resp);
+    deleteExecutionContext();
+    return;
+  }
   if (keploy.mode.GetMode() == MODE_TEST && (id === undefined || id === "")) {
     return;
   }
