@@ -108,12 +108,12 @@ export default class Keploy {
           : "lsof -i:6789";
     
         exec(portCheckCommand, (error, stdout, stderr) => {
-          if (error) {
+          if (error && error.code !== 1) {
             console.error(`Error checking port: ${error.message}`);
             return;
           }
     
-          if (!stdout) {
+          if (!stdout || (error && error.code === 1)) {
             const keployProcess = spawn("keploy", [], { env: { KEPLOY_PORT: "6789" } });
             keployProcess.on("error", (error) => {
               console.error(`Error starting keploy: ${error.message}`);
