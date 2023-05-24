@@ -43,7 +43,7 @@ export function wrappedNodeFetch(fetch: any) {
       getExecutionContext().context == undefined
     ) {
       console.error("keploy context is not present to mock dependencies");
-      return;
+      return fetchFunc.apply(this, [url, options]);
     }
     const ctx = getExecutionContext().context;
     let resp = new fetch.Response();
