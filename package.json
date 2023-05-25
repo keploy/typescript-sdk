@@ -3,13 +3,14 @@
   "version": "1.0.0",
   "main": "dist/src/index.js",
   "files": [
-    "dist"
+    "dist",
+    "proto/services.proto"
   ],
   "scripts": {
-    "build": "tsc && cp ./proto/services.proto ./dist/proto/",
+    "build": "tsc",
     "prepare": "npm run build",
     "commit": "cz"
-  },
+    },
   "repository": "git@github.com:keploy/typescript-sdk.git",
   "author": "Keploy <dev@keploy.io>",
   "license": "MIT",

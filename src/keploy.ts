@@ -14,7 +14,7 @@ import assert = require("assert");
 import { createExecutionContext, getExecutionContext } from "./context";
 import Mode, { MODE_OFF } from "./mode";
 
-const PROTO_PATH = "../proto/services.proto";
+const PROTO_PATH = "../../proto/services.proto";
 const packageDef = protoLoader.loadSync(path.resolve(__dirname, PROTO_PATH));
 const grpcObj = grpc.loadPackageDefinition(
   packageDef
