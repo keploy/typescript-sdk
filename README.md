@@ -21,11 +21,11 @@ This is the client SDK for the [Keploy](https://github.com/keploy/keploy) testin
 1. First install [Node.js](https://nodejs.org/en/download). Then,
 ```bash
 # for npm package manager
-npm i https://github.com/keploy/typescript-sdk
+npm i @keploy/typescript-sdk
 ```
 ```bash
 # for yarn package manager
-yarn add https://github.com/keploy/typescript-sdk
+yarn add @keploy/typescript-sdk
 ```
 
 2. Install and Start the keploy binary on an independent terminal. Follow [this](https://github.com/keploy/keploy#quick-installation) guide
@@ -288,7 +288,7 @@ yarn proto-loader-gen-types --grpcLib=@grpc/grpc-js --outDir=proto/ proto/*.prot
 - Furthermore, to commit your changes use `yarn commit` instead of `git commit` for better commit experience.
 
 ## Community support
-We'd love to collaborate with you to make Keploy great. To get started:
+We'd love to collaborate with you to make Keploy.io great. To get started:
 * [Slack](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA) - Discussions with the community and the team.
 * [GitHub](https://github.com/keploy/keploy/issues) - For bug reports and feature requests.
 

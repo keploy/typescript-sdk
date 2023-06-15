@@ -1,5 +1,5 @@
 {
-  "name": "typescript-sdk",
+  "name": "@keploy/typescript-sdk",
   "version": "1.0.0",
   "main": "dist/src/index.js",
   "files": [
@@ -10,7 +10,10 @@
     "prepare": "npm run build",
     "commit": "cz"
   },
-  "repository": "git@github.com:keploy/typescript-sdk.git",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/keploy/typescript-sdk.git"
+  },
   "author": "Keploy <dev@keploy.io>",
   "license": "MIT",
   "devDependencies": {
@@ -50,5 +53,17 @@
     "merge-descriptors": "^1.0.1",
     "node-fetch": "^2.6.7",
     "require-in-the-middle": "^5.1.0"
-  }
+  },
+  "description": "[![contributions welcome](https://img.shields.io/badge/contributions-welcome-brightgreen?logo=github)](CODE_OF_CONDUCT.md) [![Slack](.github/slack.svg)](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA) [![License](.github/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)",
+  "bugs": {
+    "url": "https://github.com/keploy/keploy/issues"
+  },
+  "homepage": "https://github.com/keploy/typescript-sdk#readme",
+  "keywords": [
+    "node.js",
+    "typescript",
+    "testcases",
+    "generation"
+  ],
+  "types": "./dist/src/index.d.ts"
 }
