@@ -8,7 +8,7 @@ import {
   getExecutionContext,
 } from "../../src/context";
 import { StrArr } from "../../proto/services/StrArr";
-import { MODE_OFF, MODE_RECORD, MODE_TEST } from "../../src/mode";
+import { MODE_TEST, MODE_RECORD, MODE_OFF } from "../../src/mode";
 
 class ResponseBody {
   static responseMap = new WeakMap<Request, ResponseBody>();
@@ -75,7 +75,11 @@ export default function middleware(
     res.on("finish", () => {
       afterMiddleware(keploy, req, res);
     });
-    if (keploy.mode.GetMode() == MODE_OFF) {
+    if (
+      (process.env.KEPLOY_MODE != undefined &&
+        keploy.mode.GetMode() == MODE_OFF) ||
+      keploy == undefined
+    ) {
       createExecutionContext({ mode: MODE_OFF });
       next();
       return;
@@ -131,7 +135,11 @@ function captureResp(
 }
 
 export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
-  if (keploy.mode.GetMode() == MODE_OFF) {
+  if (
+    (process.env.KEPLOY_MODE != undefined &&
+      keploy.mode.GetMode() == MODE_OFF) ||
+    keploy == undefined
+  ) {
     return;
   }
 
@@ -148,6 +156,11 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
     };
     keploy.putResp(id, resp);
     deleteExecutionContext();
+    return;
+  }
+
+  //to avoid recording tests in the test mode and only recording in the record mode
+  if (keploy.mode.GetMode() == MODE_OFF && id === undefined) {
     return;
   }
 
