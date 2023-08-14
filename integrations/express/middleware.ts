@@ -83,6 +83,7 @@ export default function middleware(
 
     const id = req.get("KEPLOY_TEST_ID");
     // test mode
+
     if (id != undefined && id != "") {
       createExecutionContext({
         mode: MODE_TEST,
@@ -93,6 +94,19 @@ export default function middleware(
       captureResp(req, res, next);
       return;
     }
+
+    //   the user is makiing the request so we made the fun - off , i.e the keploy server is in off mode 
+    const fun = keploy.mode.GetMode();
+    if (fun == MODE_TEST) {
+      createExecutionContext({ mode: MODE_OFF });
+      next();
+      return;
+    }
+
+
+
+
+
 
     // record mode
     createExecutionContext({ mode: MODE_RECORD, deps: [], mocks: [] });
@@ -130,6 +144,9 @@ function captureResp(
   return;
 }
 
+
+
+
 export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
   if (keploy.mode.GetMode() == MODE_OFF) {
     return;
@@ -150,6 +167,14 @@ export function afterMiddleware(keploy: Keploy, req: Request, res: Response) {
     deleteExecutionContext();
     return;
   }
+
+
+
+  if (keploy.mode.GetMode() == MODE_TEST) {
+    return;
+  }
+
+
 
   // req.headers
   // Since, JSON.stingify trims spaces. Therefore, content-length of request header should be updated
