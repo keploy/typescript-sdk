@@ -13,6 +13,8 @@ import { StrArr } from "../proto/services/StrArr";
 import assert = require("assert");
 import { createExecutionContext, getExecutionContext } from "./context";
 import Mode, { MODE_OFF } from "./mode";
+import { exec, spawn } from "child_process";
+
 
 const PROTO_PATH = "../proto/services.proto";
 const packageDef = protoLoader.loadSync(path.resolve(__dirname, PROTO_PATH));
@@ -85,7 +87,35 @@ export default class Keploy {
     this.responses = {};
     this.dependencies = {};
     this.mocks = {};
-  }
+    if (process.env.KEPLOY_MODE === "record" || process.env.KEPLOY_MODE === "test") {
+      exec("which keploy", (error: Error | null, stdout: string, stderr: string) => {
+        if (error) {
+          console.error(`Error finding keploy: ${error.message}`);
+          return;
+        }
+    
+        if (!stdout) {
+          console.log(
+            "Keploy Server is not installed. Please install it using https://docs.keploy.io/docs/go/installation"
+          );
+          return;
+        }
+    
+        exec("lsof -i:6789", (error: Error | null, stdout: string, stderr: string) => {
+          if (error) {
+            console.error(`Error checking port: ${error.message}`);
+            return;
+          }
+    
+          if (!stdout) {
+            const keployProcess = spawn("keploy", [], { env: { KEPLOY_PORT: "6789" } });
+            keployProcess.on("error", (error: Error) => {
+              console.error(`Error starting keploy: ${error.message}`);
+            });
+          }
+        });
+      });
+    }}
 
   validateServerConfig({
     url = process.env.KEPLOY_SERVER_URL || "localhost:6789",
