@@ -25,6 +25,8 @@ export interface Config {
   Name: string;
   Path: string;
   Mode: string;
+  Remove?: string[];
+  Replace?: { [key: string]: string };
 }
 export function NewContext(conf: Config) {
   const mode = new Mode();
@@ -90,6 +92,8 @@ export function NewContext(conf: Config) {
         testId: conf.Name,
         mocks: [],
         fileExport: true,
+        Remove: conf.Remove,
+        Replace: conf.Replace,
       });
       break;
     default:

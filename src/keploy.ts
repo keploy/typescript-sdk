@@ -29,6 +29,8 @@ export const V1_BETA2 = "api.keploy.io/v1beta2",
 
 type AppConfigFilter = {
   urlRegex?: string;
+  remove?: string[];
+  replace?: { [key: string]: string };
 };
 
 type AppConfig = {
@@ -182,6 +184,8 @@ export default class Keploy {
   }
 
   capture(req: TestCaseReq) {
+    req.Remove=this.appConfig.filter.remove
+    req.Replace=this.appConfig.filter.replace
     return this.put(req);
   }
 
