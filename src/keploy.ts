@@ -70,21 +70,28 @@ export default class Keploy {
   ) {
     // extract config from environment variables
     this.mode = new Mode();
+
     if (
       process.env.KEPLOY_MODE !== undefined &&
       Mode.Valid(process.env.KEPLOY_MODE)
     ) {
       this.mode.SetMode(process.env.KEPLOY_MODE);
     }
+
     this.appConfig = this.validateAppConfig(app);
     this.serverConfig = this.validateServerConfig(server);
     this.grpcClient = new grpcObj.services.RegressionService(
       this.serverConfig.url,
       grpc.credentials.createInsecure()
     );
+
     this.responses = {};
     this.dependencies = {};
     this.mocks = {};
+
+    console.log("Keploy running in: ", process.env.KEPLOY_MODE, " mode");
+
+
   }
 
   validateServerConfig({

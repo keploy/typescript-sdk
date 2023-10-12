@@ -61,6 +61,9 @@ export function NewContext(conf: Config) {
   if (Mode.Valid(conf.Mode)) {
     mode.SetMode(conf.Mode);
   }
+
+  // log the value of the mode
+  console.log("keploy is in :", mode, " mode");
   switch (mode.GetMode()) {
     case "test":
       if (conf.Name === "") {
