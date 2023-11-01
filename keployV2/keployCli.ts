@@ -110,9 +110,8 @@ export const RunKeployServer = (pid: number, delay: number, testPath: string, po
         process.on('SIGTERM', cleanup);
         const command = [
             'sudo',
-            // '-E env PATH=$PATH',
             '-S',
-            '/home/shivamsouravjha.linux/keploy/server',
+            'keploybin',
             'serve',
             `--pid=${pid}`,
             `-p=${testPath}`,
