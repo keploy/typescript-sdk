@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { exec, execSync, spawn, ChildProcess } from 'child_process';
+const treeKill = require('tree-kill');
 
 const GRAPHQL_ENDPOINT = '/query';
 const HOST = 'http://localhost:';
@@ -18,6 +19,19 @@ export const setTestRunCompletionStatus = (status: boolean) => {
     hasTestRunCompleted = status;
 };
 
+let userCommandPID:any = 0;
+
+export const StartUserApplication = (userCmd:string) =>{
+    const [cmd, ...args] = userCmd.split(' ');
+    const npmStartProcess = spawn(cmd, args,{
+        stdio: [process.stdin, 'pipe', process.stderr],
+    });
+    userCommandPID = npmStartProcess.pid
+}
+
+export const StopUserApplication = () =>{
+    treeKill(userCommandPID)
+}
 let childProcesses: ChildProcess[] = [];
 const processWrap = (command: string): Promise<void> => {
     return new Promise((resolve, reject) => {
@@ -182,7 +196,6 @@ export const FetchTestSets = async (): Promise<string[] | null> => {
     return null;
 };
 
-
 export const FetchTestSetStatus = async (testRunId: string): Promise<TestRunStatus | null> => {
     try {
         const client = await setHttpClient();
@@ -211,10 +224,8 @@ export const RunTestSet = async (testSetName: string): Promise<string | null> =>
         if (!client) throw new Error("Could not initialize HTTP client.");
 
         const response = await client.post('', {
-            timeout: 5000, // Set a timeout (5000 ms or 5 seconds, adjust as necessary)
             query: `mutation { runTestSet(testSet: "${testSetName}") { success testRunId message } }`
         });
-
         if (response.data && response.data.data && response.data.data.runTestSet) {
             return response.data.data.runTestSet.testRunId;
         } else {
@@ -226,10 +237,10 @@ export const RunTestSet = async (testSetName: string): Promise<string | null> =>
     return null;
 };
 
-
 export const StopKeployServer = () => {
     return killProcessOnPort(serverPort);
 };
+
 export const killProcessOnPort = async (port: number): Promise<void> => {
     return new Promise<void>((resolve, reject) => {
         //console.debug(`Trying to kill process running on port: ${port}`);
