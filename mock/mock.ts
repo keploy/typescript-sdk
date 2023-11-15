@@ -3,7 +3,7 @@ import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 import path, { resolve } from "path";
 import { ProtoGrpcType } from "../proto/services";
-import Mode, { MODE_TEST } from "../src/mode";
+import Mode, { MODE_TEST, MODE_RECORD } from "../src/mode";
 import { createExecutionContext, getExecutionContext } from "../src/context";
 import { startRecordingMocks } from "./utils";
 
@@ -61,8 +61,11 @@ export function NewContext(conf: Config) {
   if (Mode.Valid(conf.Mode)) {
     mode.SetMode(conf.Mode);
   }
+  console.log("Keploy is running in " + mode.GetMode() + " mode");
+  modeDescription(mode.GetMode());
+
   switch (mode.GetMode()) {
-    case "test":
+    case MODE_TEST:
       if (conf.Name === "") {
         console.log(
           "🚨 Please enter the auto generated name to mock the dependencies using Keploy."
@@ -84,7 +87,7 @@ export function NewContext(conf: Config) {
         return response;
       });
       break;
-    case "record":
+    case MODE_RECORD:
       createExecutionContext({
         mode: mode.GetMode(),
         testId: conf.Name,
@@ -114,4 +117,24 @@ export function NewContext(conf: Config) {
     name,
     conf.Name
   );
+}
+
+function modeDescription(mode: string) {
+  switch (mode) {
+    case MODE_RECORD:
+      console.log(
+        "This mode will record all the API calls made to the application and store each call as a test in the keploy/tests directory as a yaml file"
+      );
+      break;
+    case MODE_TEST:
+      console.log(
+        "This mode will run all the tests stored in the keploy/tests directory and report the results"
+      );
+      break;
+    default:
+      console.log(
+        "This mode will not do anything and your application will act normal without any interference from keploy"
+      );
+      break;
+  }
 }

@@ -12,7 +12,7 @@ import { TestCase } from "../proto/services/TestCase";
 import { StrArr } from "../proto/services/StrArr";
 import assert = require("assert");
 import { createExecutionContext, getExecutionContext } from "./context";
-import Mode, { MODE_OFF } from "./mode";
+import Mode, { MODE_OFF, MODE_RECORD, MODE_TEST } from "./mode";
 
 const PROTO_PATH = "../proto/services.proto";
 const packageDef = protoLoader.loadSync(path.resolve(__dirname, PROTO_PATH));
@@ -85,6 +85,8 @@ export default class Keploy {
     this.responses = {};
     this.dependencies = {};
     this.mocks = {};
+    console.log("Keploy is running in " + this.mode.GetMode() + " mode");
+    this.modeDescription();
   }
 
   validateServerConfig({
@@ -444,5 +446,26 @@ export default class Keploy {
         return response;
       }
     );
+  }
+
+  // logs the description of the mode for the user to understand about the mode their application is running in
+  modeDescription() {
+    switch (this.mode.GetMode()) {
+      case MODE_RECORD:
+        console.log(
+          "This mode will record all the API calls made to the application and store each call as a test in the keploy/tests directory as a yaml file"
+        );
+        break;
+      case MODE_TEST:
+        console.log(
+          "This mode will run all the tests stored in the keploy/tests directory and report the results"
+        );
+        break;
+      default:
+        console.log(
+          "This mode will not do anything and your application will act normal without any interference from keploy"
+        );
+        break;
+    }
   }
 }
