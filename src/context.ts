@@ -1,5 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import asyncHooks from "async_hooks";
 
 const executionContextMap = new Map();
@@ -7,14 +5,14 @@ const executionContextMap = new Map();
 const asyncHook = asyncHooks.createHook({ init, destroy });
 asyncHook.enable();
 
-function init(asyncId: any, type: any, triggerAsyncId: any) {
+function init(asyncId: number, type: string, triggerAsyncId: number) {
   const parentContext = executionContextMap.get(triggerAsyncId);
   if (!parentContext) return;
 
   executionContextMap.set(asyncId, { context: parentContext.context });
 }
 
-function destroy(asyncId: any) {
+function destroy(asyncId: number) {
   executionContextMap.delete(asyncId);
 }
 

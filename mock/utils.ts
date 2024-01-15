@@ -1,4 +1,3 @@
-import { response } from "express";
 import { Mock } from "../proto/services/Mock";
 import { grpcClient, MockIds, mockPath } from "./mock";
 
@@ -20,7 +19,9 @@ export function startRecordingMocks(
   path: string,
   mode: string,
   name: string,
-  mockId: string
+  mockId: string,
+  resolve: (value: string | PromiseLike<string>) => void,
+  reject: (reason?: string) => void
 ) {
   grpcClient.StartMocking(
     {
@@ -30,6 +31,7 @@ export function startRecordingMocks(
     function (err, response) {
       if (err !== null) {
         console.error("failed to start mocking due to error: ", err);
+        reject(`failed to start mocking due to error: ${err}`);
         return;
       }
       if (response?.Exists) {
@@ -42,6 +44,7 @@ export function startRecordingMocks(
         );
         MockIds[mockId] = true;
       }
+      resolve("Passed");
     }
   );
 }
