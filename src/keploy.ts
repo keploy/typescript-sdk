@@ -12,8 +12,10 @@ import { TestCase } from "../proto/services/TestCase";
 import { StrArr } from "../proto/services/StrArr";
 import assert = require("assert");
 import { createExecutionContext, getExecutionContext } from "./context";
-import Mode, { MODE_OFF } from "./mode";
+import Mode, { MODE_OFF,MODE_RECORD,MODE_TEST } from "./mode";
+import { exec, spawn } from "child_process";
 
+const isWindows = process.platform === "win32";
 const PROTO_PATH = "../proto/services.proto";
 const packageDef = protoLoader.loadSync(path.resolve(__dirname, PROTO_PATH));
 const grpcObj = grpc.loadPackageDefinition(
@@ -85,6 +87,41 @@ export default class Keploy {
     this.responses = {};
     this.dependencies = {};
     this.mocks = {};
+    if ( process.env.KEPLOY_MODE == MODE_RECORD || process.env.KEPLOY_MODE === MODE_TEST) {
+      const findKeploy = isWindows ? "where keploy" : "which keploy";
+    
+      exec(findKeploy, (error, stdout, stderr) => {
+        if (error) {
+          console.error(`Error finding keploy: ${error.message}`);
+          return;
+        }
+    
+        if (!stdout) {
+          console.log(
+            "Keploy Server is not installed. Please install it using https://docs.keploy.io/docs/go/installation"
+          );
+          return;
+        }
+    
+        const portCheckCommand = isWindows
+          ? 'netstat -ano | findstr "LISTENING" | findstr ":6789"'
+          : "lsof -i:6789";
+    
+        exec(portCheckCommand, (error, stdout, stderr) => {
+          if (error && error.code !== 1) {
+            console.error(`Error checking port: ${error.message}`);
+            return;
+          }
+    
+          if (!stdout || (error && error.code === 1)) {
+            const keployProcess = spawn("keploy", [], { env: { KEPLOY_PORT: "6789" } });
+            keployProcess.on("error", (error) => {
+              console.error(`Error starting keploy: ${error.message}`);
+            });
+          }
+        });
+      });
+    }
   }
 
   validateServerConfig({
