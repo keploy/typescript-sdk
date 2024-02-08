@@ -1,6 +1,6 @@
 import axios from 'axios';
-import { exec, execSync, spawn, ChildProcess } from 'child_process';
-const treeKill = require('tree-kill');
+import { exec, spawn, ChildProcess } from 'child_process';
+import kill from 'tree-kill';
 
 const GRAPHQL_ENDPOINT = '/query';
 const HOST = 'http://localhost:';
@@ -13,24 +13,82 @@ export enum TestRunStatus {
     FAILED = 'FAILED'
 }
 
+export class Config {
+    appCmd: string;
+
+    constructor(appCmd: string) {
+        this.appCmd = appCmd;
+    }
+}
 let hasTestRunCompleted = false;
 
 export const setTestRunCompletionStatus = (status: boolean) => {
     hasTestRunCompleted = status;
 };
 
-let userCommandPID:any = 0;
+let userCommandPID: any = 0;
 
-export const StartUserApplication = (userCmd:string) =>{
+export const KeployTest = async (config: Config = { appCmd: '' }) => {
+    if (config.appCmd == "") {
+        config.appCmd = "npm start"
+    }
+    let testResult = true;
+    const MAX_TIMEOUT = 10000;
+    let startTime = Date.now();
+    try {
+        const testSets = await FetchTestSets();
+        if (testSets === null) {
+            throw new Error('Test sets are null');
+        }
+        console.log("TestSets: ", [...testSets]);
+        console.log("starting user application");
+        for (let testset of testSets) {
+            let result = true;
+            StartUserApplication(config.appCmd)
+            const testRunId = await RunTestSet(testset);
+            let testRunStatus;
+            while (true) {
+                await new Promise(res => setTimeout(res, 10000));
+                testRunStatus = await FetchTestSetStatus(testRunId);
+                if (testRunStatus === TestRunStatus.RUNNING) {
+                    console.log("testRun still in progress");
+                    if (Date.now() - startTime > MAX_TIMEOUT) {
+                        console.log("Timeout reached, exiting loop");
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            }
+
+            if (testRunStatus === TestRunStatus.FAILED || testRunStatus === TestRunStatus.RUNNING) {
+                console.log("testrun failed");
+                result = false;
+            } else if (testRunStatus === TestRunStatus.PASSED) {
+                console.log("testrun passed");
+                result = true;
+            }
+            console.log(`TestResult of [${testset}]: ${result}`);
+            testResult = testResult && result;
+            StopUserApplication()
+            setTimeout(() => { }, 5000); // wait for the application to stop
+        }
+        return testResult
+    } catch (error) {
+        throw error;
+    }
+}
+
+export const StartUserApplication = (userCmd: string) => {
     const [cmd, ...args] = userCmd.split(' ');
-    const npmStartProcess = spawn(cmd, args,{
+    const npmStartProcess = spawn(cmd, args, {
         stdio: [process.stdin, 'pipe', process.stderr],
     });
     userCommandPID = npmStartProcess.pid
 }
 
-export const StopUserApplication = () =>{
-    treeKill(userCommandPID)
+export const StopUserApplication = () => {
+    kill(userCommandPID)
 }
 let childProcesses: ChildProcess[] = [];
 const processWrap = (command: string): Promise<void> => {
@@ -51,20 +109,20 @@ const processWrap = (command: string): Promise<void> => {
             }
         };
 
-        if(!isPromiseSettled){
-        childProcess.stdout.on('data', (data) => {
-            console.log(`stdout: ${data}`);
-        });
+        if (!isPromiseSettled) {
+            childProcess.stdout.on('data', (data) => {
+                console.log(`stdout: ${data}`);
+            });
 
-        childProcess.stderr.on('data', (data) => {
-            console.log(`stderr: ${data}`);
-        });
+            childProcess.stderr.on('data', (data) => {
+                console.log(`stderr: ${data}`);
+            });
 
-        childProcess.on('error', (error) => {
-            console.error(`Failed to start process: ${error.message}`);
-            cleanup();
-        });
-    }
+            childProcess.on('error', (error) => {
+                console.error(`Failed to start process: ${error.message}`);
+                cleanup();
+            });
+        }
         childProcess.on('exit', (code, signal) => {
             if (code !== 0 && signal !== "SIGTERM") {
                 reject(new Error(`Process exited with code: ${code}, signal: ${signal}`));
@@ -218,7 +276,7 @@ export const FetchTestSetStatus = async (testRunId: string): Promise<TestRunStat
     return null;
 };
 
-export const RunTestSet = async (testSetName: string): Promise<string | null> => {
+export const RunTestSet = async (testSetName: string): Promise<string> => {
     try {
         const client = await setHttpClient();
         if (!client) throw new Error("Could not initialize HTTP client.");
@@ -234,7 +292,7 @@ export const RunTestSet = async (testSetName: string): Promise<string | null> =>
     } catch (error) {
         console.error('Error running test set', error);
     }
-    return null;
+    return " ";
 };
 
 export const StopKeployServer = () => {
