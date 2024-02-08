@@ -1,28 +1,71 @@
 {
   "name": "@keploy/typescript-sdk",
-  "version": "2.0.0",
-  "description": "This is the client SDK for the [Keploy](https://github.com/keploy/keploy) testing platform. With the TypeScript SDK, you can test both your existing unit test cases in Jest and create new end-to-end test cases for your applications.",
-  "main": "keployCli.ts",
+  "version": "1.0.0",
+  "main": "dist/src/index.js",
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp ./proto/services.proto ./dist/proto/",
     "prepare": "npm run build",
     "commit": "cz"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/keploy/typescript-sdk.git"
+    "url": "git+ssh://git@github.com/keploy/typescript-sdk.git"
   },
   "author": "Keploy <dev@keploy.io>",
   "license": "MIT",
+  "devDependencies": {
+    "@commitlint/cli": "^16.2.1",
+    "@commitlint/config-conventional": "^16.2.1",
+    "@types/cors": "^2.8.12",
+    "@types/express": "^4.17.13",
+    "@types/merge-descriptors": "^1.0.1",
+    "@types/node": "^18.7.18",
+    "@types/node-fetch": "^2.6.2",
+    "@types/pino": "^7.0.5",
+    "@typescript-eslint/eslint-plugin": "^5.13.0",
+    "@typescript-eslint/parser": "^5.13.0",
+    "commitizen": "^4.2.4",
+    "cz-conventional-changelog": "^3.3.0",
+    "eslint": "^8.10.0",
+    "eslint-config-prettier": "^8.4.0",
+    "eslint-plugin-import": "^2.25.4",
+    "eslint-plugin-prettier": "^4.0.0",
+    "husky": "^7.0.4",
+    "prettier": "^2.5.1",
+    "typescript": "^4.6.2"
+  },
+  "config": {
+    "commitizen": {
+      "path": "cz-conventional-changelog"
+    }
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.7.1",
+    "@grpc/proto-loader": "^0.7.3",
+    "@types/axios": "^0.14.0",
+    "cors": "^2.8.5",
+    "express": "^4.17.3",
+    "got": "^11.5.2",
+    "http-status-codes": "^2.2.0",
+    "import-in-the-middle": "^1.3.4",
+    "merge-descriptors": "^1.0.1",
+    "node-fetch": "^2.6.7",
+    "require-in-the-middle": "^5.1.0",
+    "tree-kill": "^1.2.2"
+  },
+  "description": "[![contributions welcome](https://img.shields.io/badge/contributions-welcome-brightgreen?logo=github)](CODE_OF_CONDUCT.md) [![Slack](.github/slack.svg)](https://join.slack.com/t/keploy/shared_invite/zt-12rfbvc01-o54cOG0X1G6eVJTuI_orSA) [![License](.github/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)",
   "bugs": {
     "url": "https://github.com/keploy/keploy/issues"
   },
   "homepage": "https://github.com/keploy/typescript-sdk#readme",
-  "dependencies": {
-    "@types/express": "^4.17.21",
-    "@types/node": "^20.11.16",
-    "axios": "^1.6.7",
-    "tree-kill": "^1.2.2",
-    "typescript": "^5.3.3"
-  }
+  "keywords": [
+    "node.js",
+    "typescript",
+    "testcases",
+    "generation"
+  ],
+  "types": "./dist/src/index.d.ts"
 }
