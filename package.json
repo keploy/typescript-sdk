@@ -4,7 +4,7 @@
   "description": "This is the client SDK for the [Keploy](https://github.com/keploy/keploy) testing platform. With the TypeScript SDK, you can test both your existing unit test cases in Jest and create new end-to-end test cases for your applications.",
   "main": "keployCli.ts",
   "scripts": {
-    "build": "tsc && cp ./keployV1/proto/services.proto ./dist/keployV1/proto/",
+    "build": "tsc",
     "prepare": "npm run build",
     "commit": "cz"
   },
@@ -15,7 +15,7 @@
   "author": "Keploy <dev@keploy.io>",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/keploy/typescript-sdk/issues"
+    "url": "https://github.com/keploy/keploy/issues"
   },
   "homepage": "https://github.com/keploy/typescript-sdk#readme",
   "dependencies": {
