@@ -15,7 +15,7 @@
   "author": "Keploy <dev@keploy.io>",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/keploy/keploy/issues"
+    "url": "https://github.com/keploy/typescript-sdk/issues"
   },
   "homepage": "https://github.com/keploy/typescript-sdk#readme",
   "dependencies": {
