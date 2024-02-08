@@ -59,71 +59,27 @@ Keploy simplifies the testing process by seamlessly generating end-to-end test c
     The contents of the file will be
     ```bash
         const {
-            FetchTestSets,
-            RunTestSet,
-            FetchTestSetStatus,
-            TestRunStatus,
-            StopUserApplication,
-            StartUserApplication,
-        } = require('@keploy/typescript-sdk/dist/keployV2/keployCli');
+            KeployTest,
+            Config,
+        } = require('../../typescript-sdk/dist/keployCli');
+
+        const timeOut = 300000;
+
         const { expect } = require('@jest/globals');
         describe('Keploy Server Tests', () => {
             test('TestKeploy', async () => {
-                let testResult = true;
-                const MAX_TIMEOUT = 10000;
-                let startTime = Date.now();
-                try {
-                    const testSets = await FetchTestSets();
-                    if (testSets === null) {
-                        throw new Error('Test sets are null');
-                    }
-                    console.log("TestSets: ", [...testSets]);
-                    console.log("starting user application");
-                    for (let testset of testSets) {
-                        let result = true;
-                        console.log(testset,"testsset")
-                        StartUserApplication(<commandToStartUserApplication>)
-                        const testRunId = await RunTestSet(testset);
-                        let testRunStatus;
-                        while (true) {
-                            await new Promise(res => setTimeout(res, 10000));
-                            testRunStatus = await FetchTestSetStatus(testRunId);
-                            if (testRunStatus === TestRunStatus.RUNNING) {
-                                console.log("testRun still in progress");
-                                if (Date.now() - startTime > MAX_TIMEOUT) {
-                                    console.log("Timeout reached, exiting loop");
-                                    break;
-                                }
-                                continue;
-                            }
-                            break;
-                        }
-
-                        if (testRunStatus === TestRunStatus.FAILED || testRunStatus === TestRunStatus.RUNNING) {
-                            console.log("testrun failed");
-                            result = false;
-                        } else if (testRunStatus === TestRunStatus.PASSED) {
-                            console.log("testrun passed");
-                            result = true;
-                        }
-                        console.log(`TestResult of [${testset}]: ${result}`);
-                        testResult = testResult && result;
-                        StopUserApplication()
-                    }
-                } catch (error) {
-                    throw error;
-                }
+                // testResult = await KeployTest()
+                const config = new Config('npm start')
+                testResult =  await KeployTest(config)
+                //by default command is set to "npm start", incase of custom command update the keployTest as shown above
                 expect(testResult).toBeTruthy();
-
-            }, 300000);
-        }, 300000);
+            }, timeOut);
+        }, timeOut);
     ```
-    Replace ```<commandToStartUserApplication>``` with the command to start the application.
-
 3. **Test** 
     Execute
     ```bash
-        keploy serve -c "npm test" --delay 10
+        keploy test -c "npm test" --delay 10
     ```
 
 🎉TADA: You've successfully tested end-to-end test cases alongside unit test cases without the need to write additional test files or manage mocks/stubs.
