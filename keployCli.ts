@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { exec, spawn, ChildProcess } from 'child_process';
-const treeKill = require('tree-kill');
+import kill from 'tree-kill';
 
 const GRAPHQL_ENDPOINT = '/query';
 const HOST = 'http://localhost:';
@@ -15,11 +15,11 @@ export enum TestRunStatus {
 
 export class Config {
     appCmd: string;
-  
+
     constructor(appCmd: string) {
-      this.appCmd = appCmd;
+        this.appCmd = appCmd;
     }
-  }
+}
 let hasTestRunCompleted = false;
 
 export const setTestRunCompletionStatus = (status: boolean) => {
@@ -28,7 +28,7 @@ export const setTestRunCompletionStatus = (status: boolean) => {
 
 let userCommandPID: any = 0;
 
-export const KeployTest = async (config: Config) => {
+export const KeployTest = async (config: Config = { appCmd: '' }) => {
     if (config.appCmd == "") {
         config.appCmd = "npm start"
     }
@@ -88,7 +88,7 @@ export const StartUserApplication = (userCmd: string) => {
 }
 
 export const StopUserApplication = () => {
-    treeKill(userCommandPID)
+    kill(userCommandPID)
 }
 let childProcesses: ChildProcess[] = [];
 const processWrap = (command: string): Promise<void> => {
