@@ -61,7 +61,7 @@ Keploy simplifies the testing process by seamlessly generating end-to-end test c
         const {
             KeployTest,
             Config,
-        } = require('../../typescript-sdk/dist/keployCli');
+        } = require('@keploy/typescript-sdk/dist/keployCli');
 
         const timeOut = 300000;
 
