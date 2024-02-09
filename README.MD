@@ -59,7 +59,7 @@ Keploy simplifies the testing process by seamlessly generating end-to-end test c
     The contents of the file will be
     ```bash
         const { expect } = require('@jest/globals');
-        const keploy = require('@keploy-sdk'); //shortend this
+        const keploy = require('@keploy/sdk');
         const timeOut = 300000;
 
         describe('Keploy Server Tests', () => {
