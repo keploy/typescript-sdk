@@ -79,7 +79,13 @@ Keploy simplifies the testing process by seamlessly generating end-to-end test c
 3. **Test** 
     Execute
     ```bash
-        keploy test -c "npm test" --delay 10
+        keploy test -c "npm test" --delay 10 --coverage
+    ```
+
+4. **Get Combined coverage**
+    Execute
+    ```bash
+        keploy test -c "npm run coverage" --delay 10 --coverage
     ```
 
 🎉TADA: You've successfully tested end-to-end test cases alongside unit test cases without the need to write additional test files or manage mocks/stubs.
