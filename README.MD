@@ -46,10 +46,10 @@ Keploy simplifies the testing process by seamlessly generating end-to-end test c
     ``` bash
             "scripts": {
                 // ... other scripts
-                "test": "jest",
+                "test": "jest --coverage",
                 "coverage": "nyc npm test && npm run coverage:merge && npm run coverage:report",
-                "coverage:merge": "nyc merge ./coverage .nyc_output/out.json",
-                "coverage:report": "nyc report --reporter=lcov --reporter=text",
+                "coverage:merge": "mkdir -p ./coverage && nyc merge ./coverage .nyc_output/out.json",
+                "coverage:report": "nyc report --reporter=lcov --reporter=text"
                 // ... other scripts
             }
     ```
@@ -58,28 +58,35 @@ Keploy simplifies the testing process by seamlessly generating end-to-end test c
 
     The contents of the file will be
     ```bash
-        const {
-            KeployTest,
-            Config,
-        } = require('../../typescript-sdk/dist/keployCli');
-
+        const { expect } = require('@jest/globals');
+        const keploy = require('@keploy-sdk'); //shortend this
         const timeOut = 300000;
 
-        const { expect } = require('@jest/globals');
         describe('Keploy Server Tests', () => {
-            test('TestKeploy', async () => {
-                // testResult = await KeployTest()
-                const config = new Config('npm start')
-                testResult =  await KeployTest(config)
-                //by default command is set to "npm start", incase of custom command update the keployTest as shown above
-                expect(testResult).toBeTruthy();
+            test('TestKeploy', (done) => {
+                const cmd = 'npm start';
+                const options = {};
+                keploy.Test(cmd, options, (err, res) => { 
+                    if (err) {
+                        done(err);
+                    } else {
+                        expect(res).toBeTruthy(); // Assert the test result
+                        done();
+                    }
+                });
             }, timeOut);
         }, timeOut);
     ```
 3. **Test** 
     Execute
     ```bash
-        keploy test -c "npm test" --delay 10
+        keploy test -c "npm test" --delay 10 --coverage
+    ```
+
+4. **Get Combined coverage**
+    Execute
+    ```bash
+        keploy test -c "npm run coverage" --delay 10 --coverage
     ```
 
 🎉TADA: You've successfully tested end-to-end test cases alongside unit test cases without the need to write additional test files or manage mocks/stubs.
