@@ -46,10 +46,10 @@ Keploy simplifies the testing process by seamlessly generating end-to-end test c
     ``` bash
             "scripts": {
                 // ... other scripts
-                "test": "jest",
+                "test": "jest --coverage",
                 "coverage": "nyc npm test && npm run coverage:merge && npm run coverage:report",
-                "coverage:merge": "nyc merge ./coverage .nyc_output/out.json",
-                "coverage:report": "nyc report --reporter=lcov --reporter=text",
+                "coverage:merge": "mkdir -p ./coverage && nyc merge ./coverage .nyc_output/out.json",
+                "coverage:report": "nyc report --reporter=lcov --reporter=text"
                 // ... other scripts
             }
     ```
