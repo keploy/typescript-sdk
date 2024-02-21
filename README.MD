@@ -58,21 +58,22 @@ Keploy simplifies the testing process by seamlessly generating end-to-end test c
 
     The contents of the file will be
     ```bash
-        const {
-            KeployTest,
-            Config,
-        } = require('@keploy/typescript-sdk/dist/keployCli');
-
+        const { expect } = require('@jest/globals');
+        const keploy = require('@keploy-sdk'); //shortend this
         const timeOut = 300000;
 
-        const { expect } = require('@jest/globals');
         describe('Keploy Server Tests', () => {
-            test('TestKeploy', async () => {
-                // testResult = await KeployTest()
-                const config = new Config('npm start')
-                testResult =  await KeployTest(config)
-                //by default command is set to "npm start", incase of custom command update the keployTest as shown above
-                expect(testResult).toBeTruthy();
+            test('TestKeploy', (done) => {
+                const cmd = 'npm start';
+                const options = {};
+                keploy.Test(cmd, options, (err, res) => { 
+                    if (err) {
+                        done(err);
+                    } else {
+                        expect(res).toBeTruthy(); // Assert the test result
+                        done();
+                    }
+                });
             }, timeOut);
         }, timeOut);
     ```
