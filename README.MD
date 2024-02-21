@@ -17,11 +17,11 @@ The **HTTP mocks/stubs and tests are the same format** and inter-exchangeable.
 1. First install [Node.js](https://nodejs.org/en/download). Then,
 ```bash
 # for npm package manager
-npm i @keploy/typescript-sdk
+npm i @keploy/sdk
 ```
 ```bash
 # for yarn package manager
-yarn add @keploy/typescript-sdk
+yarn add @keploy/sdk
 ```
 
 2. Install and Start the keploy binary on an independent terminal. Follow [this](https://github.com/keploy/keploy#quick-installation) guide
@@ -59,7 +59,7 @@ Keploy simplifies the testing process by seamlessly generating end-to-end test c
     The contents of the file will be
     ```bash
         const { expect } = require('@jest/globals');
-        const keploy = require('@keploy-sdk'); //shortend this
+        const keploy = require('@keploy/sdk');
         const timeOut = 300000;
 
         describe('Keploy Server Tests', () => {
