@@ -13,13 +13,6 @@ export enum TestRunStatus {
     FAILED = 'FAILED'
 }
 
-export class Config {
-    appCmd: string;
-
-    constructor(appCmd: string) {
-        this.appCmd = appCmd;
-    }
-}
 let hasTestRunCompleted = false;
 
 export const setTestRunCompletionStatus = (status: boolean) => {
@@ -28,9 +21,9 @@ export const setTestRunCompletionStatus = (status: boolean) => {
 
 let userCommandPID: any = 0;
 
-export const KeployTest = async (config: Config = { appCmd: '' }) => {
-    if (config.appCmd == "") {
-        config.appCmd = "npm start"
+export const Test = async (appCmd: string, options: any, callback: (err: Error | null, result?: boolean) => void) => {
+    if (appCmd == "") {
+        appCmd = "npm start"
     }
     let testResult = true;
     const MAX_TIMEOUT = 10000;
@@ -44,7 +37,7 @@ export const KeployTest = async (config: Config = { appCmd: '' }) => {
         console.log("starting user application");
         for (let testset of testSets) {
             let result = true;
-            StartUserApplication(config.appCmd)
+            StartUserApplication(appCmd)
             const testRunId = await RunTestSet(testset);
             let testRunStatus;
             while (true) {
@@ -71,11 +64,11 @@ export const KeployTest = async (config: Config = { appCmd: '' }) => {
             console.log(`TestResult of [${testset}]: ${result}`);
             testResult = testResult && result;
             StopUserApplication()
-            setTimeout(() => { }, 5000); // wait for the application to stop
+            await new Promise(res => setTimeout(res, 5000)); // wait for the application to stop
         }
-        return testResult
+        callback(null, testResult); // Callback with no error and the test result
     } catch (error) {
-        throw error;
+        callback(error as Error); // Callback with the error cast to an Error object
     }
 }
 
