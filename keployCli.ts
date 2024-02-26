@@ -13,6 +13,11 @@ export enum TestRunStatus {
     FAILED = 'FAILED'
 }
 
+interface TestOptions {
+    maxTimeout: number;
+
+}
+
 let hasTestRunCompleted = false;
 
 export const setTestRunCompletionStatus = (status: boolean) => {
@@ -21,12 +26,16 @@ export const setTestRunCompletionStatus = (status: boolean) => {
 
 let userCommandPID: any = 0;
 
-export const Test = async (appCmd: string, options: any, callback: (err: Error | null, result?: boolean) => void) => {
+export const Test = async (appCmd: string, options: TestOptions, callback: (err: Error | null, result?: boolean) => void) => {
+    // set default values
     if (appCmd == "") {
         appCmd = "npm start"
     }
+    if (options.maxTimeout === 0 || options.maxTimeout === undefined || options.maxTimeout === null) {
+        options.maxTimeout = 30000;
+    }
+
     let testResult = true;
-    const MAX_TIMEOUT = 10000;
     let startTime = Date.now();
     try {
         const testSets = await FetchTestSets();
@@ -41,17 +50,18 @@ export const Test = async (appCmd: string, options: any, callback: (err: Error |
             const testRunId = await RunTestSet(testset);
             let testRunStatus;
             while (true) {
-                await new Promise(res => setTimeout(res, 10000));
+                await new Promise(res => setTimeout(res, 2000));
                 testRunStatus = await FetchTestSetStatus(testRunId);
-                if (testRunStatus === TestRunStatus.RUNNING) {
-                    console.log("testRun still in progress");
-                    if (Date.now() - startTime > MAX_TIMEOUT) {
-                        console.log("Timeout reached, exiting loop");
-                        break;
-                    }
-                    continue;
+                // break the loop if the testRunStatus is not running or if it's been more than `maxTimeout` milliseconds
+                if (testRunStatus !== TestRunStatus.RUNNING) {
+                    break;
                 }
-                break;
+                if (Date.now() - startTime > options.maxTimeout) {
+                    console.log("Timeout reached, exiting loop. maxTimeout: ", options.maxTimeout);
+                    break;
+                }
+                console.log("testRun still in progress");
+                // break;
             }
 
             if (testRunStatus === TestRunStatus.FAILED || testRunStatus === TestRunStatus.RUNNING) {
@@ -66,6 +76,8 @@ export const Test = async (appCmd: string, options: any, callback: (err: Error |
             StopUserApplication()
             await new Promise(res => setTimeout(res, 5000)); // wait for the application to stop
         }
+        // stop the ebpf hooks
+        stopTest();
         callback(null, testResult); // Callback with no error and the test result
     } catch (error) {
         callback(error as Error); // Callback with the error cast to an Error object
@@ -245,6 +257,27 @@ export const FetchTestSets = async (): Promise<string[] | null> => {
         }
     }
     return null;
+};
+
+const stopTest = async (): Promise<boolean> => {
+    try {
+        const client = await setHttpClient();
+        if (!client) throw new Error("Could not initialize HTTP client.");
+        const response = await client.post('', {
+            query: `{ stopTest }`
+        });
+        if (response.status >= 200 && response.status < 300) {
+            if (response.data && response.data.data) {
+                return response.data.data.stopTest;
+            } else {
+                console.error('Unexpected response structure', response.data);
+                return false;
+            }
+        }
+    } catch (error) {
+        console.error('Error stopping the test', error);
+    }
+    return false;
 };
 
 export const FetchTestSetStatus = async (testRunId: string): Promise<TestRunStatus | null> => {
