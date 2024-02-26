@@ -32,10 +32,8 @@ export const Test = async (appCmd: string, options: TestOptions, callback: (err:
         appCmd = "npm start"
     }
     if (options.maxTimeout === 0 || options.maxTimeout === undefined || options.maxTimeout === null) {
-        console.log("setting the max timeout for the test to 30 seconds")
         options.maxTimeout = 30000;
     }
-    console.log("max timeout: ", options);
 
     let testResult = true;
     let startTime = Date.now();
