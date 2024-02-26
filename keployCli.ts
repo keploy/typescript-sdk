@@ -57,7 +57,7 @@ export const Test = async (appCmd: string, options: TestOptions, callback: (err:
                     break;
                 }
                 if (Date.now() - startTime > options.maxTimeout) {
-                    console.log("Timeout reached, exiting loop", Date.now() - startTime, options.maxTimeout);
+                    console.log("Timeout reached, exiting loop. maxTimeout: ", options.maxTimeout);
                     break;
                 }
                 console.log("testRun still in progress");
