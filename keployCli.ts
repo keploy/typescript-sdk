@@ -33,7 +33,6 @@ export const Test = async (appCmd: string, options: TestOptions, callback: (err:
     }
     if (options.maxTimeout === 0 || options.maxTimeout === undefined || options.maxTimeout === null) {
         options.maxTimeout = 300000;
-    }
 
     let testResult = true;
     let startTime = Date.now();
