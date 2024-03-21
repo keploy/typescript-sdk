@@ -183,7 +183,7 @@ const StopKeployServer = async (): Promise<void> => {
 
 const RunKeployServer = (appCmd: string, delay: number, debug: boolean, port: number): void => {
 
-    const command = `sudo -E env "PATH=$PATH" /usr/local/bin/keploy test -c "${appCmd}" --coverage --delay ${delay} --port ${port} ${debug ? '--debug' : ''}`;
+    const command = `sudo -E env "PATH=$PATH" /usr/local/bin/keploybin test -c "${appCmd}" --coverage --delay ${delay} --port ${port} ${debug ? '--debug' : ''}`;
 
     const keployProcess = spawn(command, { shell: true });
 
