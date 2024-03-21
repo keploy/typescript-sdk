@@ -1,243 +1,218 @@
 import axios from 'axios';
-import { exec, spawn, ChildProcess } from 'child_process';
-import kill from 'tree-kill';
+import * as fs from 'fs';
+import { spawn } from 'child_process';
 
 const GRAPHQL_ENDPOINT = '/query';
 const HOST = 'http://localhost:';
 
-let serverPort = 6789;
+let SERVER_PORT = 6789;
+
+const setHttpClient = async () => {
+    const url = `${HOST}${SERVER_PORT}${GRAPHQL_ENDPOINT}`;
+    return axios.create({
+        baseURL: url,
+        timeout: 10000,
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }
+    });
+}
 
 export enum TestRunStatus {
     RUNNING = 'RUNNING',
     PASSED = 'PASSED',
-    FAILED = 'FAILED'
+    FAILED = 'FAILED',
+    APP_HALTED = 'APP_HALTED',
+    USER_ABORT = 'USER_ABORT',
+    APP_FAULT = 'APP_FAULT',
+    INTERNAL_ERR = 'INTERNAL_ERR'
 }
 
-interface TestOptions {
-    maxTimeout: number;
-
+interface RunOptions {
+    delay: number;
+    debug: boolean;
+    port: number;
+    path: string;
 }
 
-let hasTestRunCompleted = false;
-
-export const setTestRunCompletionStatus = (status: boolean) => {
-    hasTestRunCompleted = status;
+const DEFAULT_RUN_OPTIONS: RunOptions = {
+    delay: 5,
+    debug: false,
+    port: 6789,
+    path: '.'
 };
 
-let userCommandPID: any = 0;
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-export const Test = async (appCmd: string, options: TestOptions, callback: (err: Error | null, result?: boolean) => void) => {
-    // set default values
-    if (appCmd == "") {
-        appCmd = "npm start"
-    }
-    if (options.maxTimeout === 0 || options.maxTimeout === undefined || options.maxTimeout === null) {
-        options.maxTimeout = 300000;
-    }
+export const Test = async (appCmd: string, runOptions: RunOptions, callback: (err: Error | null, result?: boolean) => void) => {
+    const options = { ...DEFAULT_RUN_OPTIONS, ...runOptions };
+    // Start Keploy
+    RunKeployServer(appCmd, options.delay, options.debug, SERVER_PORT);
+    await sleep(5000);
     let testResult = true;
-    let startTime = Date.now();
     try {
         const testSets = await FetchTestSets();
-        if (testSets === null) {
-            throw new Error('Test sets are null');
+        if (!testSets) {
+            throw new Error('No test sets found. Are you in the right directory?');
         }
-        console.log("TestSets: ", [...testSets]);
-        console.log("starting user application");
-        for (let testset of testSets) {
+        for (const testSet of testSets) {
             let result = true;
-            StartUserApplication(appCmd)
-            const testRunId = await RunTestSet(testset);
-            let testRunStatus;
+            const { appId, testRunId } = await StartHooks();
+            await RunTestSet(testRunId, testSet, appId);
+            await StartUserApplication(appId);
+
+            const reportPath = `${options.path}/Keploy/reports/${testRunId}/${testSet}-report.yaml`;
+
+            await CheckReportFile(reportPath, 5 + 10);
+
+            let status: TestRunStatus | null = null;
+
+            console.log(`Test set: ${testSet} is running`);
+
             while (true) {
-                await new Promise(res => setTimeout(res, 2000));
-                testRunStatus = await FetchTestSetStatus(testRunId);
-                // break the loop if the testRunStatus is not running or if it's been more than `maxTimeout` milliseconds
-                if (testRunStatus !== TestRunStatus.RUNNING) {
+                status = await FetchTestSetStatus(testRunId, testSet);
+                if (status === TestRunStatus.RUNNING) {
+                } else {
                     break;
                 }
-                if (Date.now() - startTime > options.maxTimeout) {
-                    console.log("Timeout reached, exiting loop. maxTimeout: ", options.maxTimeout);
-                    break;
-                }
-                console.log("testRun still in progress");
-                // break;
             }
 
-            if (testRunStatus === TestRunStatus.FAILED || testRunStatus === TestRunStatus.RUNNING) {
-                console.log("testrun failed");
+            if (status !== TestRunStatus.PASSED) {
                 result = false;
-            } else if (testRunStatus === TestRunStatus.PASSED) {
-                console.log("testrun passed");
-                result = true;
-            }
-            console.log(`TestResult of [${testset}]: ${result}`);
-            testResult = testResult && result;
-            StopUserApplication()
-            await new Promise(res => setTimeout(res, 5000)); // wait for the application to stop
-        }
-        // stop the ebpf hooks
-        stopTest();
-        callback(null, testResult); // Callback with no error and the test result
-    } catch (error) {
-        callback(error as Error); // Callback with the error cast to an Error object
-    }
-}
-
-export const StartUserApplication = (userCmd: string) => {
-    const [cmd, ...args] = userCmd.split(' ');
-    const npmStartProcess = spawn(cmd, args, {
-        stdio: [process.stdin, 'pipe', process.stderr],
-    });
-    userCommandPID = npmStartProcess.pid
-}
-
-export const StopUserApplication = () => {
-    kill(userCommandPID)
-}
-let childProcesses: ChildProcess[] = [];
-const processWrap = (command: string): Promise<void> => {
-    return new Promise((resolve, reject) => {
-        let isPromiseSettled = false;
-        const [cmd, ...args] = command.split(' ');
-
-        const childProcess = spawn(cmd, args, { shell: true });
-
-        const cleanup = () => {
-            if (!isPromiseSettled) {
-                isPromiseSettled = true;
-                childProcesses = childProcesses.filter(cp => cp !== childProcess);
-                if (!childProcess.killed) {
-                    childProcess.kill();
-                }
-                resolve(); // or reject based on your requirement
-            }
-        };
-
-        if (!isPromiseSettled) {
-            childProcess.stdout.on('data', (data) => {
-                console.log(`stdout: ${data}`);
-            });
-
-            childProcess.stderr.on('data', (data) => {
-                console.log(`stderr: ${data}`);
-            });
-
-            childProcess.on('error', (error) => {
-                console.error(`Failed to start process: ${error.message}`);
-                cleanup();
-            });
-        }
-        childProcess.on('exit', (code, signal) => {
-            if (code !== 0 && signal !== "SIGTERM") {
-                reject(new Error(`Process exited with code: ${code}, signal: ${signal}`));
+                console.error(`Test set: ${testSet} failed with status: ${status}`);
+                callback(new Error(`Test set: ${testSet} failed with status: ${status}`), false);
+                break;
             } else {
-                resolve();
+                result = true;
+                console.log(`Test set: ${testSet} passed`);
             }
-            cleanup();
-        });
-
-        childProcess.on('close', () => {
-            cleanup();
-        });
-
-        childProcesses.push(childProcess);
-    });
-};
-
-export const cleanupProcesses = () => {
-    childProcesses.forEach(cp => {
-        try {
-            if (!cp.killed) {
-                if (cp.stdout) {
-                    cp.stdout.destroy();
-                }
-                if (cp.stderr) {
-                    cp.stderr.destroy();
-                }
-                if (cp.stdin) {
-                    cp.stdin.destroy();
-                }
-                cp.kill();
-            }
-        } catch (error) {
-            //console.error(`Failed to kill process: ${error}`);
+            testResult = testResult && result;
+            await StopUserApplication(appId);
         }
-    });
-    childProcesses.length = 0;  // A way to clear the array without reassigning
-};
-
-process.on('exit', cleanupProcesses);
-
-export const RunKeployServer = (pid: number, delay: number, testPath: string, port: number) => {
-    return new Promise<void>(async (resolve, reject) => {
-        let kprocess: ChildProcess | null = null;
-        const cleanup = () => {
-            process.off('exit', cleanup);
-            process.off('SIGINT', cleanup);
-            process.off('SIGTERM', cleanup);
-
-            if (kprocess) {
-                kprocess.kill();
-            }
-            cleanupProcesses();
-        };
-        process.on('exit', cleanup);
-        process.on('SIGINT', cleanup);
-        process.on('SIGTERM', cleanup);
-        const command = [
-            'sudo',
-            '-S',
-            'keploybin',
-            'serve',
-            `--pid=${pid}`,
-            `-p=${testPath}`,
-            `-d=${delay}`,
-            `--port=${port}`,
-            `--language="js"`
-        ];
-        if (port !== 0) {
-            serverPort = port;
-        }
-        if (!hasTestRunCompleted) {
-            try {
-                await processWrap(command.join(' '))
-                    .then(() => {
-                        if (hasTestRunCompleted) {
-                            resolve();
-                        }
-                    })
-                    .catch(error => {
-                        reject(error);
-                    });
-            } catch (error) {
-                reject(error);
-            }
-        } else {
-            resolve();
-        }
-
-
-    });
-}
-
-export const setHttpClient = async () => {
-    try {
-        const url = `${HOST}${serverPort}${GRAPHQL_ENDPOINT}`;
-        return axios.create({
-            baseURL: url,
-            timeout: 10000,
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }
-        });
     } catch (error) {
-        throw error; // Re-throw the error after logging it
+        callback(error as Error, false);
+    } finally {
+        await StopKeployServer();
+        await sleep(2000)
+        callback(null, testResult);
     }
-}
+};
 
-export const FetchTestSets = async (): Promise<string[] | null> => {
+
+const StartUserApplication = async (appId: string): Promise<void> => {
+    const client = await setHttpClient();
+    const response = await client.post('', {
+        query: `mutation StartApp { startApp(appId: ${appId}) }`
+    });
+
+    if (!(response.status >= 200 && response.status < 300 && response.data.data.startApp)) {
+        throw new Error(`Failed to start user application. Status code: ${response.status}`);
+    }
+};
+
+const StartHooks = async (): Promise<{ appId: string, testRunId: string }> => {
+    const client = await setHttpClient();
+    const response = await client.post('', {
+        query: `mutation StartHooks { startHooks { appId testRunId } }`
+    });
+
+    if (response.status >= 200 && response.status < 300 && response.data.data.startHooks) {
+        return {
+            appId: response.data.data.startHooks.appId,
+            testRunId: response.data.data.startHooks.testRunId
+        };
+    } else {
+        throw new Error(`Failed to start hooks. Status code: ${response.status}`);
+    }
+};
+
+const RunTestSet = async (testRunId: string, testSet: string, appId: string): Promise<void> => {
+    const client = await setHttpClient();
+    const response = await client.post('', {
+        query: `mutation RunTestSet { runTestSet(testSetId: "${testSet}", testRunId: "${testRunId}", appId: ${appId}) }`
+    });
+
+    if (!(response.status >= 200 && response.status < 300 && response.data.data.runTestSet)) {
+        throw new Error(`Failed to run test set. Status code: ${response.status}`);
+    }
+};
+
+const CheckReportFile = async (reportPath: string, timeout: number): Promise<void> => {
+    const startTime = Date.now();
+    while (Date.now() - startTime < timeout * 1000) {
+        if (fs.existsSync(reportPath)) {
+            return;
+        }
+        await new Promise(res => setTimeout(res, 1000));
+    }
+    throw new Error(`Report file not created within ${timeout} seconds`);
+};
+
+const FetchTestSetStatus = async (testRunId: string, testSet: string): Promise<TestRunStatus | null> => {
+    const client = await setHttpClient();
+    const response = await client.post('', {
+        query: `query GetTestSetStatus { testSetStatus(testRunId: "${testRunId}", testSetId: "${testSet}") { status } }`
+    });
+
+    if (response.status >= 200 && response.status < 300 && response.data.data.testSetStatus) {
+        return response.data.data.testSetStatus.status as TestRunStatus;
+    } else {
+        throw new Error(`Failed to fetch test set status. Status code: ${response.status}`);
+    }
+};
+
+const StopUserApplication = async (appId: string): Promise<void> => {
+    const client = await setHttpClient();
+    const response = await client.post('', {
+        query: `mutation StopApp { stopApp(appId: ${appId}) }`
+    });
+
+    if (!(response.status >= 200 && response.status < 300 && response.data.data.stopApp)) {
+        throw new Error(`Failed to stop user application. Status code: ${response.status}`);
+    }
+};
+
+const StopKeployServer = async (): Promise<void> => {
+    const client = await setHttpClient();
+    const response = await client.post('', {
+        query: `mutation { stopHooks }`
+    });
+
+    if (!(response.status >= 200 && response.status < 300 && response.data.data.stopHooks)) {
+        throw new Error(`Failed to stop Keploy server. Status code: ${response.status}`);
+    }
+};
+
+const RunKeployServer = (appCmd: string, delay: number, debug: boolean, port: number): void => {
+
+    const command = `sudo -E env "PATH=$PATH" /usr/local/bin/keploy test -c "${appCmd}" --coverage --delay ${delay} --port ${port} ${debug ? '--debug' : ''}`;
+
+    const keployProcess = spawn(command, { shell: true });
+
+    // Log stdout
+    keployProcess.stdout.on('data', (data) => {
+        const log = data.toString().trim(); 
+        console.log(log);
+    });
+
+    // Log stderr
+    keployProcess.stderr.on('data', (data) => {
+        const log = data.toString().trim(); // Convert Buffer to string and trim whitespace
+        console.error(log);
+    });
+
+    keployProcess.on('error', (error) => {
+        console.error(`Error starting Keploy server: ${error}`);
+    });
+
+    keployProcess.on('close', (code) => {
+        if (code !== 0) {
+            console.error(`Keploy server exited with code ${code}`);
+        }
+    });
+};
+
+const FetchTestSets = async (): Promise<string[] | null> => {
     try {
         const client = await setHttpClient();
-        if (!client) throw new Error("Could not initialize HTTP client.");
-
         const response = await client.post('', {
             query: "{ testSets }"
         });
@@ -245,137 +220,11 @@ export const FetchTestSets = async (): Promise<string[] | null> => {
         if (response.status >= 200 && response.status < 300) {
             return response.data.data.testSets;
         } else {
-            //////console.error('Error: Unexpected response status', response.status);
+            console.error(`Error fetching test sets: Status code ${response.status}`);
             return null;
         }
     } catch (error) {
-        if (error instanceof Error) {
-            console.error('Error fetching test sets', error.message, error.stack);
-        } else {
-            console.error('An unknown error occurred while fetching test sets', error);
-        }
+        console.error(`Error fetching test sets: ${error}`);
+        return null;
     }
-    return null;
-};
-
-const stopTest = async (): Promise<boolean> => {
-    try {
-        const client = await setHttpClient();
-        if (!client) throw new Error("Could not initialize HTTP client.");
-        const response = await client.post('', {
-            query: `{ stopTest }`
-        });
-        if (response.status >= 200 && response.status < 300) {
-            if (response.data && response.data.data) {
-                return response.data.data.stopTest;
-            } else {
-                console.error('Unexpected response structure', response.data);
-                return false;
-            }
-        }
-    } catch (error) {
-        console.error('Error stopping the test', error);
-    }
-    return false;
-};
-
-export const FetchTestSetStatus = async (testRunId: string): Promise<TestRunStatus | null> => {
-    try {
-        const client = await setHttpClient();
-        if (!client) throw new Error("Could not initialize HTTP client.");
-        const response = await client.post('', {
-            query: `{ testSetStatus(testRunId: "${testRunId}") { status } }`
-        });
-        if (response.status >= 200 && response.status < 300) {
-            if (response.data && response.data.data && response.data.data.testSetStatus) {
-                const testStatus = response.data.data.testSetStatus.status as keyof typeof TestRunStatus;
-                return TestRunStatus[testStatus];
-            } else {
-                console.error('Unexpected response structure', response.data);
-                return null;
-            }
-        }
-    } catch (error) {
-        console.error('Error fetching test set status', error);
-    }
-    return null;
-};
-
-export const RunTestSet = async (testSetName: string): Promise<string> => {
-    try {
-        const client = await setHttpClient();
-        if (!client) throw new Error("Could not initialize HTTP client.");
-
-        const response = await client.post('', {
-            query: `mutation { runTestSet(testSet: "${testSetName}") { success testRunId message } }`
-        });
-        if (response.data && response.data.data && response.data.data.runTestSet) {
-            return response.data.data.runTestSet.testRunId;
-        } else {
-            console.error('Unexpected response format:', response.data);
-        }
-    } catch (error) {
-        console.error('Error running test set', error);
-    }
-    return " ";
-};
-
-export const StopKeployServer = () => {
-    return killProcessOnPort(serverPort);
-};
-
-export const killProcessOnPort = async (port: number): Promise<void> => {
-    return new Promise<void>((resolve, reject) => {
-        //console.debug(`Trying to kill process running on port: ${port}`);
-        const command = `lsof -t -i:${port}`;
-
-        exec(command, async (error, stdout, stderr) => {
-            if (error) {
-                console.error(`Error executing command: ${stderr}`, error);
-                return reject(error);
-            }
-
-            const pids = stdout.split('\n').filter(pid => pid);
-            console.log(`PIDs found: ${pids}`);  // Logging the PIDs found
-
-            if (pids.length === 0) {
-                console.error(`No process found running on port: ${port}`);
-                return resolve();
-            }
-
-            try {
-                const jestPid = process.pid.toString();  // Get the PID of the Jest process
-                const filteredPids = pids.filter(pid => pid !== jestPid);  // Filter out the Jest PID from the list of PIDs
-
-                for (let pid of filteredPids) {
-                    try {
-                        await forceKillProcessByPID(parseInt(pid.trim(), 10));
-                    } catch (error) {
-                        console.error(`Failed to kill process ${pid}:`, error);
-                    }
-                }
-                resolve();
-            } catch (error) {
-                console.error(`Error killing processes:`, error);
-                reject(error);
-            }
-        });
-    });
-};
-
-export const forceKillProcessByPID = (pid: number): Promise<void> => {
-    return new Promise<void>((resolve, reject) => {
-        try {
-            if (process?.getuid) {
-                process.kill(pid, 'SIGKILL');
-                resolve();
-            } else {
-                //console.error(`Script is not run as root, cannot kill process with pid ${pid}`);
-                reject(new Error(`EPERM: Not running as root`));
-            }
-        } catch (error) {
-            console.error(`Error killing process with pid ${pid}`, error);
-            reject(error);
-        }
-    });
 };
