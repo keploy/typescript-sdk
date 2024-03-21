@@ -189,13 +189,13 @@ const RunKeployServer = (appCmd: string, delay: number, debug: boolean, port: nu
 
     // Log stdout
     keployProcess.stdout.on('data', (data) => {
-        const log = data.toString().trim(); 
+        const log = data.toString();
         console.log(log);
     });
 
     // Log stderr
     keployProcess.stderr.on('data', (data) => {
-        const log = data.toString().trim(); // Convert Buffer to string and trim whitespace
+        const log = data.toString(); // Convert Buffer to string and trim whitespace
         console.error(log);
     });
 
