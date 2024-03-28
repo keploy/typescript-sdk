@@ -78,7 +78,7 @@ Keploy simplifies the testing process by seamlessly generating end-to-end test c
         }, timeOut);
     ```
 3.**RunOptions**
-`   ``bash
+    ```bash
        options {
         delay: number; // delay for the application ro run
         debug: boolean; // enable or disable debug flag
