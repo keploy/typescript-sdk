@@ -78,7 +78,7 @@ Keploy simplifies the testing process by seamlessly generating end-to-end test c
         }, timeOut);
     ```
 3.**RunOptions**
-    Execute
+    
     ```bash
        options {
         delay: number; // delay for the application ro run
