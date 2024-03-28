@@ -77,7 +77,7 @@ Keploy simplifies the testing process by seamlessly generating end-to-end test c
             }, timeOut);
         }, timeOut);
     ```
-3.**RunOptions**
+3. **RunOptions**
     
     ```bash
         options {
@@ -88,9 +88,6 @@ Keploy simplifies the testing process by seamlessly generating end-to-end test c
         }
     ```
     
-    
-        
-
 4. **Test** 
     Execute
     ```bash
