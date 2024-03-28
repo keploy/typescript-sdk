@@ -61,7 +61,7 @@ export const Test = async (appCmd: string, runOptions: RunOptions, callback: (er
 
             const reportPath = `${options.path}/keploy/reports/${testRunId}/${testSet}-report.yaml`;
 
-            await CheckReportFile(reportPath, 5 + 10);
+            await CheckReportFile(reportPath, options.delay + 15);
 
             let status: TestRunStatus | null = null;
 
@@ -90,7 +90,7 @@ export const Test = async (appCmd: string, runOptions: RunOptions, callback: (er
         callback(error as Error, false);
     } finally {
         await StopKeployServer();
-        await sleep(options.delay)
+        await sleep(3000)
         callback(null, testResult);
     }
 };
