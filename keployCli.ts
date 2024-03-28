@@ -11,7 +11,7 @@ const setHttpClient = async () => {
     const url = `${HOST}${SERVER_PORT}${GRAPHQL_ENDPOINT}`;
     return axios.create({
         baseURL: url,
-        timeout: 10000,
+        timeout: 30000,
         headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }
     });
 }
@@ -59,7 +59,7 @@ export const Test = async (appCmd: string, runOptions: RunOptions, callback: (er
             await RunTestSet(testRunId, testSet, appId);
             await StartUserApplication(appId);
 
-            const reportPath = `${options.path}/Keploy/reports/${testRunId}/${testSet}-report.yaml`;
+            const reportPath = `${options.path}/keploy/reports/${testRunId}/${testSet}-report.yaml`;
 
             await CheckReportFile(reportPath, 5 + 10);
 
@@ -78,7 +78,6 @@ export const Test = async (appCmd: string, runOptions: RunOptions, callback: (er
             if (status !== TestRunStatus.PASSED) {
                 result = false;
                 console.error(`Test set: ${testSet} failed with status: ${status}`);
-                callback(new Error(`Test set: ${testSet} failed with status: ${status}`), false);
                 break;
             } else {
                 result = true;
@@ -91,7 +90,7 @@ export const Test = async (appCmd: string, runOptions: RunOptions, callback: (er
         callback(error as Error, false);
     } finally {
         await StopKeployServer();
-        await sleep(2000)
+        await sleep(options.delay)
         callback(null, testResult);
     }
 };

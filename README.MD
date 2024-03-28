@@ -77,13 +77,23 @@ Keploy simplifies the testing process by seamlessly generating end-to-end test c
             }, timeOut);
         }, timeOut);
     ```
-3. **Test** 
+3.**RunOptions**
+`   ``bash
+       options {
+        delay: number; // delay for the application ro run
+        debug: boolean; // enable or disable debug flag
+        port: number; // port of keploy you want to run
+        path: string; // path of the keploy tests and mocks
+        }
+    ```
+
+4. **Test** 
     Execute
     ```bash
         keploy test -c "npm test" --delay 10 --coverage
     ```
 
-4. **Get Combined coverage**
+5. **Get Combined coverage**
     Execute
     ```bash
         keploy test -c "npm run coverage" --delay 10 --coverage
