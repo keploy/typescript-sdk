@@ -80,13 +80,16 @@ Keploy simplifies the testing process by seamlessly generating end-to-end test c
 3.**RunOptions**
     
     ```bash
-       options {
-        delay: number; // delay for the application ro run
-        debug: boolean; // enable or disable debug flag
-        port: number; // port of keploy you want to run
-        path: string; // path of the keploy tests and mocks
+        options {
+            delay: number; // delay for the application ro run
+            debug: boolean; // enable or disable debug flag
+            port: number; // port of keploy you want to run
+            path: string; // path of the keploy tests and mocks
         }
     ```
+    
+    
+        
 
 4. **Test** 
     Execute
