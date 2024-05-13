@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import { log } from "console";
 import { Request, Response, NextFunction } from "express";
 const fs = require('fs');
 const yaml = require('js-yaml');
@@ -14,7 +15,7 @@ export default function middleware(
 
   // @ts-ignore
   fs.access(filePath, fs.constants.F_OK, (err) => {
-    console.log(err ? 'File does not exist' : 'File exists');
+
     if (err) {
       // Create the file if it doesn't exist
       fs.writeFileSync(filePath, '', 'utf-8');
@@ -56,6 +57,10 @@ export function afterMiddleware(req: Request, res: Response) {
   }
 
 
+  if (!Array.isArray(existingData)) {
+    console.error('Expected an array for existingData, but got:', typeof existingData);
+    existingData = []; // Reset to an empty array or handle accordingly
+  }
 
   // Add or update the entry for the current id
   existingData.push(currentData);
