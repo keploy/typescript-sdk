@@ -15,7 +15,7 @@ export default function middleware(
 
   // @ts-ignore
   fs.access(filePath, fs.constants.F_OK, (err) => {
-    // console.log(err ? 'File does not exist' : 'File exists');
+
     if (err) {
       // Create the file if it doesn't exist
       fs.writeFileSync(filePath, '', 'utf-8');
@@ -81,7 +81,7 @@ export function afterMiddleware(req: Request, res: Response) {
 let count = 0;
 const executedLinebyEachTest = new Array();
 function GetCoverage() {
-  // console.log("Inside GetCoverage");
+  console.log("Inside GetCoverage");
   count++;
   let executedLinesByFile = {};
   // iterate over global.__coverage__
@@ -124,7 +124,7 @@ function GetCoverage() {
     // @ts-ignore
     executedLinebyEachTest.push({ ...hitCounts });
 
-    // console.log("Executed lines by file:", executedLinesByFile);
+    console.log("Executed lines by file:", executedLinesByFile);
     // extract s from the coverage data
   }
   return executedLinesByFile;
