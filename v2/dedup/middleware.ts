@@ -1,5 +1,4 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { log } from "console";
 import { Request, Response, NextFunction } from "express";
 const fs = require('fs');
 const yaml = require('js-yaml');
