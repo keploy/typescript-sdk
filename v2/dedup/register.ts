@@ -4,7 +4,7 @@ import expressMiddleware from "./middleware";
 import bodyParser from "body-parser";
 import cors from "cors";
 // import mixin from "merge-descriptors";
-
+const _ = require('lodash');
 
 // @ts-ignore
 Hook(["express"], function (exports) {
@@ -22,7 +22,8 @@ Hook(["express"], function (exports) {
   // copy the properties and methods of exported Function object into wrapped Funtion(keployWrappedExpress).
   // In order to prevent "express._Method_ or express._Field_ is not declared" error.
   // mixin(keployWrappedExpress, expressApp, false);
+  _.assign(keployWrappedExpress, expressApp);
   exports = keployWrappedExpress;
   return exports;
 });
-export {};
+export { };
