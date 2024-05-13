@@ -56,7 +56,10 @@ export function afterMiddleware(req: Request, res: Response) {
   }
 
 
-
+  if (!Array.isArray(existingData)) {
+    console.error('Expected an array for existingData, but got:', typeof existingData);
+    existingData = []; // Reset to an empty array or handle accordingly
+  }
   // Add or update the entry for the current id
   existingData.push(currentData);
 
