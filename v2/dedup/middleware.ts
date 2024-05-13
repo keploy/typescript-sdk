@@ -15,7 +15,11 @@ export default function middleware(
 
   // @ts-ignore
   fs.access(filePath, fs.constants.F_OK, (err) => {
+<<<<<<< debug_node14
+    // console.log(err ? 'File does not exist' : 'File exists');
+=======
 
+>>>>>>> main
     if (err) {
       // Create the file if it doesn't exist
       fs.writeFileSync(filePath, '', 'utf-8');
