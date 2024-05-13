@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import { log } from "console";
 import { Request, Response, NextFunction } from "express";
 const fs = require('fs');
 const yaml = require('js-yaml');
@@ -60,6 +61,8 @@ export function afterMiddleware(req: Request, res: Response) {
     console.error('Expected an array for existingData, but got:', typeof existingData);
     existingData = []; // Reset to an empty array or handle accordingly
   }
+  console.log("CURRENT DATA", currentData);
+
   // Add or update the entry for the current id
   existingData.push(currentData);
 
