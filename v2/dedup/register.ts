@@ -8,6 +8,7 @@ const _ = require('lodash');
 
 // @ts-ignore
 Hook(["express"], function (exports) {
+  console.log("Inside keploy hook...");
   const expressApp = exports;
   function keployWrappedExpress() {
     const keployApp = expressApp();
