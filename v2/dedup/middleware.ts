@@ -128,3 +128,5 @@ function GetCoverage() {
   }
   return executedLinesByFile;
 }
+
+module.exports = middleware;
