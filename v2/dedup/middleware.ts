@@ -11,7 +11,7 @@ const filePath = 'dedupData.yaml';
 export default function middleware(
 
 ): (req: Request, res: Response, next: NextFunction) => void {
-  console.log("Inside middleware...");
+  // console.log("Inside middleware...");
 
   // @ts-ignore
   fs.access(filePath, fs.constants.F_OK, (err) => {
@@ -71,8 +71,8 @@ export function afterMiddleware(req: Request, res: Response) {
   fs.writeFileSync(filePath, yamlData, 'utf-8');
 
   // Log to the console
-  console.log("Executed lines by file:", executedLinesByFile);
-  console.log("Data has been appended and logged to", filePath);
+  // console.log("Executed lines by file:", executedLinesByFile);
+  // console.log("Data has been appended and logged to", filePath);
 }
 
 // isJsonValid checks whether o is a valid JSON or not
@@ -80,7 +80,7 @@ export function afterMiddleware(req: Request, res: Response) {
 let count = 0;
 const executedLinebyEachTest = new Array();
 function GetCoverage() {
-  console.log("Inside GetCoverage");
+  console.log("Calculating per request coverage...");
   count++;
   let executedLinesByFile = {};
   // iterate over global.__coverage__
@@ -123,7 +123,7 @@ function GetCoverage() {
     // @ts-ignore
     executedLinebyEachTest.push({ ...hitCounts });
 
-    console.log("Executed lines by file:", executedLinesByFile);
+    // console.log("Executed lines by file:", executedLinesByFile);
     // extract s from the coverage data
   }
   return executedLinesByFile;
