@@ -27,4 +27,4 @@ Hook(["express"], function (exports) {
   exports = keployWrappedExpress;
   return exports;
 });
-export { khook };
+export { expressMiddleware };
