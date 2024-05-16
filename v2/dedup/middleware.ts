@@ -1,18 +1,18 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { log } from "console";
 import { Request, Response, NextFunction } from "express";
+require('dotenv').config();
 const fs = require('fs');
 const yaml = require('js-yaml');
 
 const filePath = 'dedupData.yaml';
-
 
 // middleware
 export default function middleware(
 
 ): (req: Request, res: Response, next: NextFunction) => void {
   // console.log("Inside middleware...");
-
+  var dedup = process.env.DEDUP;
   // @ts-ignore
   fs.access(filePath, fs.constants.F_OK, (err) => {
     if (err) {
@@ -22,8 +22,9 @@ export default function middleware(
   });
   return (req: Request, res: Response, next: NextFunction) => {
     res.on("finish", () => {
-
-      afterMiddleware(req, res);
+      if (dedup === "true") {
+        afterMiddleware(req, res);
+      }
     });
     next();
 
