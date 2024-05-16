@@ -12,7 +12,7 @@ export default function middleware(
 
 ): (req: Request, res: Response, next: NextFunction) => void {
   // console.log("Inside middleware...");
-  var dedup = process.env.DEDUP;
+  var dedup = process.env.ENABLE_DEDUP;
   log("Deduplication is set to: ", dedup);
   // @ts-ignore
   fs.access(filePath, fs.constants.F_OK, (err) => {
