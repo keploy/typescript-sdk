@@ -6,11 +6,8 @@ const yaml = require('js-yaml');
 
 const filePath = 'dedupData.yaml';
 
-
 // middleware
-export default function middleware(
-
-): (req: Request, res: Response, next: NextFunction) => void {
+export default function middleware(): (req: Request, res: Response, next: NextFunction) => void {
   // console.log("Inside middleware...");
 
   // @ts-ignore
@@ -22,14 +19,11 @@ export default function middleware(
   });
   return (req: Request, res: Response, next: NextFunction) => {
     res.on("finish", () => {
-
       afterMiddleware(req, res);
     });
     next();
-
   };
 }
-
 
 export function afterMiddleware(req: Request, res: Response) {
   let id = req.get("KEPLOY-TEST-ID");
@@ -44,7 +38,6 @@ export function afterMiddleware(req: Request, res: Response) {
     executedLinesByFile: executedLinesByFile
   };
 
-
   let existingData = [];
 
   try {
@@ -54,7 +47,6 @@ export function afterMiddleware(req: Request, res: Response) {
     // Handle the case where the file doesn't exist or is not valid YAML
     console.error("Error reading existing file:", error);
   }
-
 
   if (!Array.isArray(existingData)) {
     console.error('Expected an array for existingData, but got:', typeof existingData);
@@ -75,58 +67,58 @@ export function afterMiddleware(req: Request, res: Response) {
   // console.log("Data has been appended and logged to", filePath);
 }
 
-// isJsonValid checks whether o is a valid JSON or not
-
 let count = 0;
-const executedLinebyEachTest = new Array();
+type HitCounts = { [statementId: string]: number };
+type CoverageData = { [filename: string]: { statementMap: any, s: HitCounts } };
+type ExecutedLineByEachTest = { [filename: string]: HitCounts }[];
+
+const executedLinebyEachTest: ExecutedLineByEachTest = [];
+const executedLinesByFile: { [filename: string]: number[] } = {};
+
+declare const global: { __coverage__: CoverageData };
+
 function GetCoverage() {
-  console.log("Calculating per request coverage...");
-  count++;
-  let executedLinesByFile = {};
-  // iterate over global.__coverage__
-  // @ts-ignore
-  for (const filename in global.__coverage__) {
-    // console.log("FIlenamae", filename);
-    // while (1) {
-    // @ts-ignore
-    let coverageData = global.__coverage__[filename];
-    // console.log("Inside GetCoverage " + count);
-    // console.log(coverageData);
+    count++;
 
+    for (const filename in global.__coverage__) {
+        let coverageData = global.__coverage__[filename];
+        const executedLines = new Set<number>();
+        const fileCoverage = coverageData;
+        const statementMap = fileCoverage.statementMap;
+        const hitCounts = fileCoverage.s;
+        // console.log("hitcounts", hitCounts);
 
-    // for (const filePath of Object.keys(coverageData)) {
-    const executedLines = new Set();
-    const fileCoverage = coverageData;
-    const statementMap = fileCoverage.statementMap;
-    const hitCounts = fileCoverage.s;
-    if (count > 1) {
-      // iterate over hitcounts and subtract the previous hitcounts
-      // @ts-ignore
-      var prevHitCounts = executedLinebyEachTest[count - 2];
+        if (count > 1) {
+            if (!executedLinebyEachTest[count - 2]) {
+                executedLinebyEachTest[count - 2] = {};
+            }
+            const prevHitCounts = executedLinebyEachTest[count - 2][filename] || {};
+            for (const statementId in hitCounts) {
+                const currentHitCount = isNaN(hitCounts[statementId]) ? 0 : hitCounts[statementId];
+                const previousHitCount = isNaN(prevHitCounts[statementId]) ? 0 : prevHitCounts[statementId];
+                hitCounts[statementId] = Math.abs(currentHitCount - previousHitCount);
+            }
+        }
 
-      for (const statementId in hitCounts) {
-        hitCounts[statementId] = Math.abs(
-          hitCounts[statementId] - prevHitCounts[statementId]
-        );
-      }
+        for (const statementId in statementMap) {
+            if (hitCounts[statementId] > 0) {
+                const executedLine = statementMap[statementId].start.line;
+                // console.log("executedLine", executedLine);
+                executedLines.add(executedLine);
+            }
+        }
+
+        executedLinesByFile[filename] = Array.from(executedLines).sort((a, b) => a - b);
+
+        if (!executedLinebyEachTest[count - 1]) {
+            executedLinebyEachTest[count - 1] = {};
+        }
+
+        executedLinebyEachTest[count - 1][filename] = { ...hitCounts };
+
+        // console.log("Executed lines by file executedLinebyEachTest:", executedLinebyEachTest);
     }
-
-    for (const statementId in statementMap) {
-      if (hitCounts[statementId] > 0) {
-        const executedLine = statementMap[statementId].start.line;
-        executedLines.add(executedLine);
-      }
-    }
-    // @ts-ignore
-    executedLinesByFile[filename] = Array.from(executedLines).sort((a, b) => a - b);
-    // }
-    // @ts-ignore
-    executedLinebyEachTest.push({ ...hitCounts });
-
-    // console.log("Executed lines by file:", executedLinesByFile);
-    // extract s from the coverage data
-  }
-  return executedLinesByFile;
+    return executedLinesByFile;
 }
 
 module.exports = middleware;
