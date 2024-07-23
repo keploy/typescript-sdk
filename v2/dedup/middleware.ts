@@ -27,6 +27,7 @@ export default function middleware(): (req: Request, res: Response, next: NextFu
 
 export function afterMiddleware(req: Request, res: Response) {
   let id = req.get("KEPLOY-TEST-ID");
+  let testSet = req.get("KEPLOY-TEST-SET-ID");
   if (!id) {
     console.error("No test ID found in the request headers");
     return;
@@ -34,7 +35,7 @@ export function afterMiddleware(req: Request, res: Response) {
   let executedLinesByFile = GetCoverage();
 
   let currentData = {
-    id: id,
+    id: testSet + "/" + id,
     executedLinesByFile: executedLinesByFile
   };
 
