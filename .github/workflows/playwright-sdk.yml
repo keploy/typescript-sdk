@@ -16,8 +16,13 @@ jobs:
     name: build and rows (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
     strategy:
+      # One leg failing must not cancel the others: each Node version's
+      # result is its own.
+      fail-fast: false
       matrix:
-        node: [18, 22]
+        # Playwright 1.62 (the rows' version) needs Node.js 20 or later, and
+        # so does this package (package.json engines).
+        node: [20, 22, 24]
     defaults:
       run:
         working-directory: playwright

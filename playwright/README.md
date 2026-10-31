@@ -10,6 +10,8 @@ This package tells keploy where each test begins and ends. Through it, keploy sk
 npm install --save-dev @keploy/playwright
 ```
 
+It needs Node.js 20 or later. Its rows run on Node.js 20, 22 and 24.
+
 Import `test` and `expect` from this package instead of `@playwright/test`. A fixture file that extends `test` extends this one:
 
 ```ts
