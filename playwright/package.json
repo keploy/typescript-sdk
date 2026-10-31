@@ -1,0 +1,32 @@
+{
+  "name": "@keploy/playwright",
+  "version": "0.1.0",
+  "description": "Join a Playwright suite to keploy's Universal Mocker: keploy mock record and keploy mock replay judge each test.",
+  "license": "Apache-2.0",
+  "author": "Keploy <dev@keploy.io>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/keploy/typescript-sdk.git",
+    "directory": "playwright"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "peerDependencies": {
+    "@playwright/test": ">=1.40.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@types/node": "22.19.1",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,90 @@
+// Settle: before a test's browser context closes, wait until none of the
+// calls its pages made is in flight, so a call the test started is answered
+// inside the test instead of being cut by the close (a call keploy recorded
+// whole would be cut at a different byte each run). Counted by the
+// browser's own request events; no time window decides it.
+
+import type { BrowserContext, Frame, Page, Request } from '@playwright/test';
+
+export class Inflight {
+  private readonly open = new Map<Request, { frame: Frame | null; nav: boolean }>();
+  private waiters: (() => void)[] = [];
+
+  constructor(context: BrowserContext) {
+    context.on('request', (r) => {
+      let frame: Frame | null = null;
+      // A service worker's call has no frame.
+      try { frame = r.frame(); } catch { frame = null; }
+      this.open.set(r, { frame, nav: r.isNavigationRequest() });
+    });
+    context.on('requestfinished', (r) => this.done(r));
+    context.on('requestfailed', (r) => this.done(r));
+    // The frames whose navigation request was answered with a document, which
+    // the frame commits next.
+    const loading = new Set<Frame>();
+    context.on('response', (res) => {
+      const r = res.request();
+      if (!r.isNavigationRequest()) return;
+      let f: Frame | null = null;
+      try { f = r.frame(); } catch { f = null; }
+      // A 204 or 205 answer, or a download, leaves the document in place.
+      const keeps = res.status() === 204 || res.status() === 205 || /attachment/i.test(res.headers()['content-disposition'] ?? '');
+      if (f && !keeps) loading.add(f);
+    });
+    const watch = (p: Page): void => {
+      // The browser reports no end for a call whose document was replaced
+      // while it ran: a frame that commits a new document has cancelled
+      // every call the old one still had open. The new document's calls
+      // start after the commit. A navigation inside the document (the
+      // history API, a client-side route change) has no navigation request
+      // and replaces nothing.
+      p.on('framenavigated', (f) => {
+        if (!loading.delete(f)) return;
+        this.drop((o) => o.frame === f && !o.nav);
+      });
+      p.on('framedetached', (f) => { loading.delete(f); this.drop((o) => o.frame === f); });
+      p.on('close', () => this.drop((o) => o.frame !== null && pageOf(o.frame) === p));
+    };
+    context.pages().forEach(watch);
+    context.on('page', watch);
+    context.on('close', () => this.drop(() => true));
+  }
+
+  /** The calls still in flight, for a step's title. */
+  describe(): string[] {
+    return [...this.open.keys()].map((r) => `${r.method()} ${r.url()}`);
+  }
+
+  get size(): number {
+    return this.open.size;
+  }
+
+  /** Resolves once no call is in flight. */
+  settled(): Promise<void> {
+    if (this.open.size === 0) return Promise.resolve();
+    return new Promise((resolve) => this.waiters.push(resolve));
+  }
+
+  private done(r: Request): void {
+    if (this.open.delete(r)) this.wake();
+  }
+
+  private drop(gone: (o: { frame: Frame | null; nav: boolean }) => boolean): void {
+    let n = 0;
+    for (const [r, o] of this.open) {
+      if (gone(o)) { this.open.delete(r); n++; }
+    }
+    if (n > 0) this.wake();
+  }
+
+  private wake(): void {
+    if (this.open.size !== 0) return;
+    const w = this.waiters;
+    this.waiters = [];
+    w.forEach((f) => f());
+  }
+}
+
+function pageOf(f: Frame): Page | null {
+  try { return f.page(); } catch { return null; }
+}

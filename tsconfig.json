@@ -97,5 +97,7 @@
     /* Completeness */
     // "skipDefaultLibCheck": true,                      /* Skip type checking .d.ts files that are included with TypeScript. */
     "skipLibCheck": true                                 /* Skip type checking all .d.ts files. */
-  }
+  },
+  // @keploy/playwright (playwright/) is its own package, with its own build.
+  "exclude": ["node_modules", "dist", "playwright"]
 }

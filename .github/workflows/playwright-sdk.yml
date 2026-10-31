@@ -1,0 +1,31 @@
+name: "@keploy/playwright"
+
+on:
+  pull_request:
+    paths:
+      - "playwright/**"
+      - ".github/workflows/playwright-sdk.yml"
+  push:
+    branches: [main]
+    paths:
+      - "playwright/**"
+      - ".github/workflows/playwright-sdk.yml"
+
+jobs:
+  rows:
+    name: build and rows (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [18, 22]
+    defaults:
+      run:
+        working-directory: playwright
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm test
