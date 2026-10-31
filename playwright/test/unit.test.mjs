@@ -127,7 +127,7 @@ test('an answer over 1 MiB is an error', async () => {
   } finally { await a.close(); }
 });
 
-test('given: the variable comes back; an agent without the route says to match releases', async () => {
+test('given: the variable comes back; an agent without the route names the route and the keploy change that adds it', async () => {
   let a = await agent(() => ({ body: { v: 1, status: 'ok', variable: 'given:session' } }));
   try {
     assert.equal(await new AgentClient(a.url, '').given('session', 'tok-1', 'tests/a.spec.ts:3'), 'given:session');
@@ -135,7 +135,7 @@ test('given: the variable comes back; an agent without the route says to match r
   } finally { await a.close(); }
   a = await agent(() => ({ status: 404, body: '404 page not found' }));
   try {
-    await rejects(new AgentClient(a.url, '').given('session', 'tok-1', ''), /does not take a test's given values.*same release/);
+    await rejects(new AgentClient(a.url, '').given('session', 'tok-1', ''), /^keploy: this keploy agent answered 404 to POST \/agent\/scope\/given, so it cannot take the given value session: given needs a keploy that serves that route, which keploy\/keploy#5016 adds$/);
   } finally { await a.close(); }
   a = await agent(() => ({ status: 422, body: { error: 'not_open', message: 'a value was given while no test was open' } }));
   try {

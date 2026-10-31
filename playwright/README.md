@@ -23,14 +23,14 @@ test('lists the apps', async ({ page }) => {
 });
 ```
 
-Run the suite under keploy with one worker:
+Run the suite under keploy with one worker and no retries:
 
 ```sh
-keploy mock record -c "npx playwright test --workers=1"
-keploy mock replay -c "npx playwright test --workers=1"
+keploy mock record -c "npx playwright test --workers=1 --retries=0"
+keploy mock replay -c "npx playwright test --workers=1 --retries=0"
 ```
 
-keploy's first release runs one test process at a time. A second worker that is still alive while another runs is refused by keploy, and its tests fail.
+keploy's first release runs one test process at a time. A second worker that is still alive while another runs is refused by keploy, and its tests fail. Turn retries off: keploy sets aside a test it cannot prove, with its reason, and fails a test whose calls changed, and a retry changes neither.
 
 ## Without keploy
 
@@ -43,7 +43,7 @@ With `KEPLOY_MOCK_AGENT` unset or `off`, nothing changes. Only `keploy mock reco
 - **Skip.** When keploy has set a test aside, the test is skipped through Playwright's own skip, and the report shows keploy's reason (`keploy: ...`).
 - **Settle.** Before the test's `context` (and its `page`) closes, the test waits until none of its pages' calls is in flight. Calls are counted by the browser's own request events, and no time window decides. A call that never ends keeps the test waiting until Playwright's test timeout fails it. The test shows a step that names each call still in flight. A call is not waited for once the browser has cancelled it, which happens when its page loads another document, its frame is removed or its page closes. A route change inside the page (the history API) cancels nothing.
 - **End.** The test ends (`POST /agent/scope/end`) after its last teardown, with its own outcome. When keploy saw a call with no recorded answer, or a recorded call the test no longer made, the test fails with keploy's text.
-- **Given values.** `await given(name, value)` tells keploy a value the test made itself. Examples are a session token it signs and a name it stamps with the time. keploy then follows the value wherever the test's calls carry it, as it follows an incoming request's values in a server test. Give a distinctive value, whole, as the calls carry it. `given` must be called inside a test, or in its `beforeEach` or `afterEach` hooks. It returns the value.
+- **Given values.** `await given(name, value)` tells keploy a value the test made itself. Examples are a session token it signs and a name it stamps with the time. keploy then follows the value wherever the test's calls carry it, as it follows an incoming request's values in a server test. Give a distinctive value, whole, as the calls carry it. `given` must be called inside a test, or in its `beforeEach` or `afterEach` hooks. It returns the value. It needs a keploy whose agent serves `POST /agent/scope/given` (see the limits below).
 
 Any answer from the agent that this package cannot trust fails the test. That covers an agent it cannot reach, an error answer, an unreadable answer, and an answer that does not speak scope protocol v1. Nothing is retried.
 
@@ -51,3 +51,12 @@ Any answer from the agent that this package cannot trust fails the test. That co
 
 - Settle covers the `context` and `page` fixtures. A context the test makes with `browser.newContext()` is the test's own to close.
 - Calls that `beforeAll`/`afterAll` hooks and worker fixtures make outside every test are answered from the worker's claim, one slice per Playwright project.
+- The `beforeAll` and `afterAll` hooks of a describe group whose tests keploy has all set aside still run, and their calls are answered from the claim. Each test is skipped at its begin, after the group's hooks have started; skipping the whole group before its hooks run needs a way to ask keploy for the set-aside tests first, which this version does not have.
+- `given` needs the agent route `POST /agent/scope/given`, which keploy/keploy#5016 adds. When this version was published, no keploy release served it yet. On a keploy without it, `given` fails the test with `keploy: this keploy agent answered 404 to POST /agent/scope/given, so it cannot take the given value <name>: given needs a keploy that serves that route, which keploy/keploy#5016 adds`. Claim, begin, settle and end work with released keploy.
+
+## Releasing
+
+1. In a pull request, set `"version": "X.Y.Z"` in `playwright/package.json`. The pull request's publish dry run checks the package.
+2. Once it is merged, push the tag `playwright-vX.Y.Z` on that commit of `main`: `git tag playwright-vX.Y.Z <sha> && git push origin playwright-vX.Y.Z`. The tag runs the rows, then publishes to npm (`.github/workflows/playwright-publish.yml`).
+
+Push the tag as a plain git tag. Never create a GitHub release for it: a published GitHub release also starts any workflow of this repository that runs on releases, such as the root `@keploy/sdk` release workflow (keploy/typescript-sdk#117), which would try to publish that package under the tag's name and fail.

@@ -150,7 +150,10 @@ export class AgentClient {
       a = await this.post(PATH_GIVEN, source ? { name, value, source } : { name, value });
     } catch (err) {
       if (err instanceof KeployError && err.status === 404 && err.code === '') {
-        throw new KeployError(`keploy: this keploy agent does not take a test's given values (${PATH_GIVEN}): use a keploy and a @keploy/playwright of the same release`, 404);
+        // The route came after the rest of the protocol: begin, end and
+        // settle work on an agent without it.
+        throw new KeployError(`keploy: this keploy agent answered 404 to POST ${PATH_GIVEN}, so it cannot take the given value ${name}: ` +
+          'given needs a keploy that serves that route, which keploy/keploy#5016 adds', 404);
       }
       throw err;
     }

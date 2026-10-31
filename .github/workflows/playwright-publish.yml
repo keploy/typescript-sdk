@@ -9,6 +9,12 @@ name: "@keploy/playwright publish"
 # name package.json's version (scripts/release-version.mjs). npm itself
 # refuses a version it already has.
 #
+# Push playwright-vX.Y.Z as a plain git tag, never as a GitHub release: a
+# published GitHub release also starts any workflow of this repository that
+# runs on releases (the root @keploy/sdk release workflow, #117), which would
+# try to publish that package under this tag's name. playwright/README.md,
+# "Releasing", says the same.
+#
 # On a pull request the same package is published as a dry run, with no
 # token, so a package that would ship without its build shows before a tag.
 on:
