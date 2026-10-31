@@ -1,0 +1,99 @@
+name: "@keploy/playwright publish"
+
+# Publishes @keploy/playwright to npm from a tag.
+#
+# To release X.Y.Z: set "version": "X.Y.Z" in playwright/package.json on main
+# (a pull request, so the dry run below checks it), then push the tag
+# playwright-vX.Y.Z on that commit. The rows run on the tagged commit first;
+# the publish runs only when every leg passes, and refuses a tag that does not
+# name package.json's version (scripts/release-version.mjs). npm itself
+# refuses a version it already has.
+#
+# On a pull request the same package is published as a dry run, with no
+# token, so a package that would ship without its build shows before a tag.
+on:
+  push:
+    tags: ["playwright-v*"]
+  pull_request:
+    paths:
+      - "playwright/**"
+      - ".github/workflows/playwright-publish.yml"
+      - ".github/workflows/playwright-sdk.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  rows:
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/playwright-sdk.yml
+
+  publish:
+    name: publish to npm
+    if: github.event_name == 'push'
+    needs: rows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm --provenance signs the package with this run's identity
+    defaults:
+      run:
+        shell: bash # -eo pipefail: a failed command before a pipe fails the step
+        working-directory: playwright
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          # Writes the token line for registry.npmjs.org and pins the @keploy
+          # scope to it (@keploy:registry), in the runner's own npmrc.
+          registry-url: https://registry.npmjs.org
+          scope: "@keploy"
+      - name: The tag names package.json's version
+        run: node scripts/release-version.mjs "$GITHUB_REF_NAME"
+      - name: The npm token is set
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: test -n "$NPM_TOKEN" || { echo "::error::the NPM_TOKEN secret is not set; refusing to publish"; exit 1; }
+      - name: The @keploy scope publishes to registry.npmjs.org
+        # npm sends a scoped package to its scope's registry, whatever
+        # --registry says. Read the setting npm will use, with every npmrc in
+        # it (a project one included), and refuse any other.
+        run: |
+          got=$(npm config get @keploy:registry)
+          test "$got" = https://registry.npmjs.org/ || { echo "::error::@keploy:registry is '$got', not https://registry.npmjs.org/; refusing to publish"; exit 1; }
+      - run: npm ci
+      - name: The token authenticates
+        # Fails here, named, on a token that is expired, revoked or pasted
+        # with a stray character, before anything is uploaded.
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm whoami --registry https://registry.npmjs.org/
+      - name: Publish
+        # prepublishOnly builds dist/ first.
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
+
+  dry-run:
+    name: publish dry run
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash # -eo pipefail: a failed command before a pipe fails the step
+        working-directory: playwright
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - name: Publish, dry run
+        run: npm publish --dry-run --access public 2>&1 | tee "$RUNNER_TEMP/publish.log"
+      - name: The package carries its build
+        # A fresh checkout has no dist/; only prepublishOnly puts it there.
+        run: |
+          for f in dist/index.js dist/index.d.ts package.json README.md; do
+            grep -qE "npm notice [0-9.]+[kMG]?B +$f\$" "$RUNNER_TEMP/publish.log" || { echo "::error::the package would ship without $f"; exit 1; }
+          done

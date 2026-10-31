@@ -10,6 +10,8 @@ on:
     paths:
       - "playwright/**"
       - ".github/workflows/playwright-sdk.yml"
+  # playwright-publish.yml runs these rows on a release tag before it publishes.
+  workflow_call:
 
 jobs:
   rows:
