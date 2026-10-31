@@ -51,9 +51,12 @@ async function pageServer(j) {
   const srv = http.createServer((req, res) => {
     if (req.url === '/page') { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><body>page</body></html>'); return; }
     if (req.url === '/release') { release(); res.end('ok'); return; }
+    // A service worker that calls /slow as it installs.
+    if (req.url === '/sw.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end("self.addEventListener('install', () => { void fetch('/slow'); });"); return; }
     if (req.url === '/nocontent') { res.writeHead(204); res.end(); return; }
     if (req.url === '/resetcontent') { res.writeHead(205); res.end(); return; }
-    if (req.url === '/download') { res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename="d.bin"' }); res.end('bytes'); return; }
+    // A disposition's type is case-insensitive (RFC 6266): the browser downloads "Attachment" too.
+    if (req.url === '/download') { res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': 'Attachment; filename="d.bin"' }); res.end('bytes'); return; }
     if (req.url === '/slowdoc') {
       // A document whose last byte comes only once /release is called.
       j.add({ page: 'slowdoc sent' });
@@ -319,6 +322,7 @@ for (const [title, why, call] of [
   ['a document still loading after its frame commits', 'a navigation\'s own request stays in flight after its document commits', '/slowdoc'],
   ['a call in flight while another page of the test closes', 'another page closing cancels nothing of this page', '/slow'],
   ['a call in flight across a route change after an answered call', 'a route change after an answered call cancels nothing', '/slow'],
+  ['a call its service worker has in flight', 'a service worker\'s call, which has no frame, is counted', '/slow'],
 ]) {
   test(`settle: ${why}, so the call is still waited for`, async () => {
     const j = journal();

@@ -127,3 +127,11 @@ test('a call in flight when the test closes its own context', async ({ page, con
   await sent;
   await context.close();
 });
+test('a call its service worker has in flight', async ({ page, context }) => {
+  // A service worker's call has no frame (Playwright's request.frame() throws
+  // for it). It is counted like a page's call, and no page change drops it.
+  await page.goto(`${base}/page`);
+  const sent = context.waitForEvent('request', (r) => r.url().endsWith('/slow'));
+  await page.evaluate(() => { void navigator.serviceWorker.register('/sw.js'); });
+  await sent;
+});
