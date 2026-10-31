@@ -42,7 +42,8 @@ export class Inflight {
         if (!loading.delete(f)) return;
         this.drop((o) => o.frame === f && !o.nav);
       });
-      p.on('framedetached', (f) => { loading.delete(f); this.drop((o) => o.frame === f); });
+      // Nor for the calls of a page that closes. (A removed frame's calls
+      // it does end, as failed requests.)
       p.on('close', () => this.drop((o) => o.frame !== null && pageOf(o.frame) === p));
     };
     context.pages().forEach(watch);

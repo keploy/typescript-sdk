@@ -43,7 +43,8 @@ async function fakeAgent(j, answer = () => undefined) {
   return { url: `http://127.0.0.1:${srv.address().port}`, close: () => new Promise((r) => { srv.closeAllConnections(); srv.close(r); }) };
 }
 
-// The settle rows' page server: /slow is answered only once /release is called.
+// The settle rows' page server: /slow and the end of /slowdoc are answered
+// only once /release is called.
 async function pageServer(j) {
   let release = null;
   const released = new Promise((r) => { release = r; });
@@ -51,6 +52,16 @@ async function pageServer(j) {
     if (req.url === '/page') { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><body>page</body></html>'); return; }
     if (req.url === '/release') { release(); res.end('ok'); return; }
     if (req.url === '/nocontent') { res.writeHead(204); res.end(); return; }
+    if (req.url === '/resetcontent') { res.writeHead(205); res.end(); return; }
+    if (req.url === '/download') { res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename="d.bin"' }); res.end('bytes'); return; }
+    if (req.url === '/slowdoc') {
+      // A document whose last byte comes only once /release is called.
+      j.add({ page: 'slowdoc sent' });
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.write('<html><body>loading');
+      void released.then(() => res.end('</body></html>'));
+      return;
+    }
     if (req.url === '/slow') {
       j.add({ page: 'slow sent' });
       res.on('close', () => { if (!res.writableFinished) j.add({ page: 'slow cut' }); });
@@ -261,3 +272,60 @@ test('settle: a navigation answered 204 replaces no document, so a call in fligh
     assert.ok(t.steps.some((s) => /^keploy: wait for the test's 1 call\(s\) in flight .*\/slow$/.test(s)), t.steps.join('\n'));
   } finally { await p.close(); await a.close(); }
 });
+
+test('an unnamed Playwright project claims with the key ".", and its tests name no project', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  try {
+    const { tests, out } = await playwright(['agent-says.spec.ts', '-g', 'judged red'], { ...keployEnv(a.url), PW_UNNAMED: '1' });
+    assert.equal(tests['judged red'].status, 'passed', out);
+    const r = { name: 'judged red', file: 'test/fixtures/agent-says.spec.ts' };
+    assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
+      ['/agent/instance', { key: '.', dir: fs.realpathSync(PKG) }],
+      ['/agent/scope/begin', { ...r, canSkip: true }],
+      ['/agent/scope/end', { ...r, outcome: 'passed' }],
+    ]);
+  } finally { await a.close(); }
+});
+
+// Settle rows where the browser cancelled a call: the test passes at once,
+// with no wait step. The browser ends a removed frame's calls itself; a
+// closed page's it does not, and the package drops them.
+for (const [title, why] of [
+  ['a call its removed cross-site frame had in flight', 'its cross-site frame is removed'],
+  ['a call its closed page had in flight', 'its page closes'],
+]) {
+  test(`settle: a call is not waited for once ${why}`, async () => {
+    const j = journal();
+    const a = await fakeAgent(j);
+    const p = await pageServer(j);
+    try {
+      const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, NO_RELEASE: '1', PW_TIMEOUT: '20000' });
+      const t = tests[title];
+      assert.equal(t.status, 'passed', out);
+      assert.deepEqual(t.steps.filter((s) => s.startsWith('keploy:')), []);
+      assert.ok(j.events.some((e) => e.page === 'slow sent'));
+    } finally { await p.close(); await a.close(); }
+  });
+}
+
+// Settle rows where nothing was cancelled: the call is still waited for, and
+// the test times out naming it.
+for (const [title, why, call] of [
+  ['a call in flight across a navigation answered 205', 'a navigation answered 205 replaces no document', '/slow'],
+  ['a call in flight across a download', 'a navigation answered with an attachment (a download) replaces no document', '/slow'],
+  ['a document still loading after its frame commits', 'a navigation\'s own request stays in flight after its document commits', '/slowdoc'],
+]) {
+  test(`settle: ${why}, so the call is still waited for`, async () => {
+    const j = journal();
+    const a = await fakeAgent(j);
+    const p = await pageServer(j);
+    try {
+      const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, NO_RELEASE: '1', PW_TIMEOUT: '4000' });
+      const t = tests[title];
+      assert.equal(t.status, 'timedOut', out);
+      const named = new RegExp(`^keploy: wait for the test's 1 call\\(s\\) in flight before its browser context closes: GET http://127\\.0\\.0\\.1:\\d+${call}$`);
+      assert.ok(t.steps.some((s) => named.test(s)), t.steps.join('\n'));
+    } finally { await p.close(); await a.close(); }
+  });
+}

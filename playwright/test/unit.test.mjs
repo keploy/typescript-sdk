@@ -2,7 +2,9 @@
 // fake agent. No browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { AgentClient, KeployError } from '../dist/agent.js';
 import { decide } from '../dist/join.js';
@@ -18,7 +20,7 @@ async function agent(answer) {
       const call = { path: req.url, auth: req.headers.authorization ?? '', body: body ? JSON.parse(body) : null };
       calls.push(call);
       const a = answer(call);
-      res.writeHead(a.status ?? 200, { 'content-type': 'application/json' });
+      res.writeHead(a.status ?? 200, { 'content-type': 'application/json', ...(a.headers ?? {}) });
       res.end(typeof a.body === 'string' ? a.body : JSON.stringify(a.body));
     });
   });
@@ -79,6 +81,23 @@ test('every answer the client cannot trust is an error', async () => {
       await rejects(new AgentClient(a.url, '').begin({ name: 'a', file: 'a.spec.ts' }), re);
     } finally { await a.close(); }
   }
+});
+
+test('a redirect from the agent is an error, and is not followed', async () => {
+  // Following it would send the call again, or to somewhere else.
+  const a = await agent(({ path: p }) => (p === '/elsewhere' ? { body: { v: 1, status: 'ok' } }
+    : { status: 307, headers: { location: '/elsewhere' }, body: '' }));
+  try {
+    await rejects(new AgentClient(a.url, '').begin({ name: 'a', file: 'a.spec.ts' }), /answered 307 Temporary Redirect to \/agent\/scope\/begin/);
+    assert.deepEqual(a.calls.map((x) => x.path), ['/agent/scope/begin']);
+  } finally { await a.close(); }
+});
+
+test('an end answered with a status other than ok is an error', async () => {
+  const a = await agent(() => ({ body: { v: 1, status: 'busy' } }));
+  try {
+    await rejects(new AgentClient(a.url, '').end({ name: 'a', file: 'a.spec.ts' }, 'passed'), /end of a with status "busy"/);
+  } finally { await a.close(); }
 });
 
 test('an end takes only fail as its action', async () => {
@@ -151,6 +170,16 @@ test('testRef: the file relative to the project, the titles after it, the projec
   const ti = { file: path.join(process.cwd(), 'tests', 'a.spec.ts'), titlePath: ['a.spec.ts', 'group', 'inner', 'title'], project: { name: 'chromium' } };
   assert.deepEqual(testRef(ti, process.cwd()), { name: 'group › inner › title', file: 'tests/a.spec.ts', project: 'chromium' });
   assert.deepEqual(testRef({ ...ti, project: { name: '' } }, process.cwd()), { name: 'group › inner › title', file: 'tests/a.spec.ts' });
+  // A spec reached through a symbolic link is named by its real path, as the
+  // project directory is.
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'kpw-ref-')));
+  try {
+    fs.mkdirSync(path.join(root, 'proj', 'tests'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'proj', 'tests', 'a.spec.ts'), '');
+    fs.symlinkSync(path.join(root, 'proj', 'tests'), path.join(root, 'linked'));
+    assert.deepEqual(testRef({ ...ti, file: path.join(root, 'linked', 'a.spec.ts') }, path.join(root, 'proj')),
+      { name: 'group › inner › title', file: 'tests/a.spec.ts', project: 'chromium' });
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
 test('outcomeOf: the test\'s own verdict', () => {

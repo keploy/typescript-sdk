@@ -8,5 +8,7 @@ export default defineConfig({
   timeout: Number(process.env.PW_TIMEOUT || 30000),
   reporter: [['json'], ['./steps-reporter.cjs']],
   outputDir: process.env.PW_OUTPUT_DIR || 'test-results',
-  projects: [{ name: 'p1', use: { headless: true } }],
+  // PW_UNNAMED=1: one unnamed project, Playwright's default when a config
+  // lists none.
+  projects: [{ name: process.env.PW_UNNAMED ? '' : 'p1', use: { headless: true } }],
 });
