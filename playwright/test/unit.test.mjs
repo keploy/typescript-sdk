@@ -6,7 +6,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { AgentClient, KeployError } from '../dist/agent.js';
 import { decide } from '../dist/join.js';
-import { testRef, outcomeOf, sourceOf } from '../dist/index.js';
+import { testRef, outcomeOf, sourceOf, keployText } from '../dist/index.js';
 
 // One fake agent answering every call with answer(path, body).
 async function agent(answer) {
@@ -172,4 +172,13 @@ test('sourceOf: the first frame outside the package, relative to the project', (
   assert.equal(sourceOf(['Error', '    at Object.<anonymous> (/proj/t/b.spec.ts:3:1)'].join('\n'), '/proj'), 't/b.spec.ts:3');
   assert.equal(sourceOf(['Error', '    at x (file:///proj/t/c.spec.mjs:4:2)'].join('\n'), '/proj'), 't/c.spec.mjs:4');
   assert.equal(sourceOf('Error\n    at <anonymous>', '/proj'), '');
+});
+
+test('keployText: keploy\'s reason once prefixed, or the fallback when it gave none', () => {
+  assert.equal(keployText('keploy: GET /a had no recorded answer', 'fb'), 'keploy: GET /a had no recorded answer');
+  assert.equal(keployText('flaky/request_changed: the body changed', 'fb'), 'keploy: flaky/request_changed: the body changed');
+  assert.equal(keployText('', 'keploy: fb'), 'keploy: fb');
+  assert.equal(keployText(undefined, 'keploy: fb'), 'keploy: fb');
+  // Only the whole word with its separator counts as keploy's prefix.
+  assert.equal(keployText('keploy:x', 'fb'), 'keploy: keploy:x');
 });

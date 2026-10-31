@@ -143,7 +143,7 @@ test('keploy skips a set-aside test with its reason, fails a judged-red one, and
   const j = journal();
   const a = await fakeAgent(j, (c) => {
     if (c.path === '/agent/scope/begin' && c.body.name === 'set aside') return { body: { v: 1, status: 'ok', action: 'skip', reason: 'flaky/request_changed: the body changed' } };
-    if (c.path === '/agent/scope/end' && c.body.name === 'judged red') return { body: { v: 1, status: 'ok', action: 'fail', reason: 'GET /company: no recorded answer' } };
+    if (c.path === '/agent/scope/end' && c.body.name === 'judged red') return { body: { v: 1, status: 'ok', action: 'fail', reason: 'keploy: GET /company had no recorded answer' } };
     if (c.path === '/agent/scope/begin' && c.body.name === 'refused') return { status: 422, body: { error: 'one_test_at_a_time', message: 'refused began while x was open', remedy: 'run one at a time' } };
     return undefined;
   });
@@ -153,7 +153,9 @@ test('keploy skips a set-aside test with its reason, fails a judged-red one, and
     assert.deepEqual(tests['set aside'].annotations.filter((x) => x.type === 'skip').map((x) => x.description), ['keploy: flaky/request_changed: the body changed']);
     assert.ok(!fs.existsSync(path.join(tmp, 'set-aside-ran')), 'the set-aside test ran');
     assert.equal(tests['judged red'].status, 'failed');
-    assert.match(tests['judged red'].error, /keploy: GET \/company: no recorded answer/);
+    // The agent's judging reason already starts with "keploy: "; the test shows it once (gap13 showed it twice).
+    assert.match(tests['judged red'].error, /keploy: GET \/company had no recorded answer/);
+    assert.doesNotMatch(tests['judged red'].error, /keploy: keploy:/);
     assert.equal(tests.refused.status, 'failed');
     assert.match(tests.refused.error, /keploy: refused began while x was open \(run one at a time\)/);
     assert.ok(!fs.existsSync(path.join(tmp, 'refused-ran')), 'the refused test ran');

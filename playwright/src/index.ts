@@ -102,14 +102,14 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
     const b = await c.begin(ref);
     if (b.action === ACTION_SKIP) {
       // The framework's own skip, with keploy's reason; no end follows.
-      testInfo.skip(true, `keploy: ${b.reason ?? ''}`);
+      testInfo.skip(true, keployText(b.reason, 'keploy: set aside (the agent gave no reason)'));
       return;
     }
     open = ref;
     await use();
     open = null;
     const e = await c.end(ref, outcomeOf(testInfo));
-    if (e.action === ACTION_FAIL) throw new KeployError(`keploy: ${e.reason ?? ''}`);
+    if (e.action === ACTION_FAIL) throw new KeployError(keployText(e.reason, 'keploy: the keploy agent failed this test and gave no reason'));
   }, { auto: true }],
 });
 
@@ -142,6 +142,17 @@ export function testRef(ti: Pick<TestInfo, 'file' | 'titlePath' | 'project'>, di
   const name = ti.titlePath.slice(1).join(' › ');
   const project = ti.project.name;
   return project ? { name, file, project } : { name, file };
+}
+
+/**
+ * keploy's reason as the test shows it: once prefixed with "keploy: " (a
+ * judging reason from the agent already is; a skip reason, "<class>/<reason>:
+ * <detail>", is not), or fallback when the agent gave none, as go-sdk's
+ * keploytest shows it.
+ */
+export function keployText(reason: string | undefined, fallback: string): string {
+  if (!reason) return fallback;
+  return reason.startsWith('keploy: ') ? reason : `keploy: ${reason}`;
 }
 
 /** The test's own verdict, as keploy's end takes it. */
