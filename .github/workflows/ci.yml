@@ -12,24 +12,24 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # The repo's package manager is npm (package-lock.json, no yarn.lock).
+      # borales/actions-yarn@v2.1.0 ran a docker image with no yarn in it
+      # ("sh: yarn: not found"), so this check failed on every PR.
       - name: Set up Node
-        uses: actions/setup-node@v2
+        uses: actions/setup-node@v4
         with:
-          node-version: 14
+          node-version: 22
+          cache: npm
 
       - name: Install Dependencies
-        uses: borales/actions-yarn@v2.1.0
-        with:
-          cmd: install
+        run: npm ci
 
       - name: Build Project
-        uses: borales/actions-yarn@v2.1.0
-        with:
-          cmd: build
+        run: npm run build
 
       - name: Check commits messages
         uses: wagoid/commitlint-github-action@v5
