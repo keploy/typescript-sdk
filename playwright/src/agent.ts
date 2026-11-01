@@ -108,7 +108,23 @@ export class AgentClient {
 
   /** Claims keploy's run for this test process (a Playwright worker). */
   async claim(key: string, dir: string): Promise<Answer> {
-    const a = await this.post(PATH_INSTANCE, { key, dir });
+    let a: Answer;
+    try {
+      a = await this.post(PATH_INSTANCE, { key, dir });
+    } catch (err) {
+      if (err instanceof KeployError && err.status === 404 && err.code === '') {
+        // keploy speaks scope protocol v1 only under its proven switch. With
+        // it off (keploy's default) the agent has no claim route and answers
+        // the mux's plain 404, as a keploy from before the protocol does
+        // (its begin and end answer an older, unversioned wire). The claim is
+        // this package's first call, so it is the one that names the switch.
+        throw new KeployError(`keploy: this keploy agent answered 404 to POST ${PATH_INSTANCE}, so this worker cannot claim keploy's run: ` +
+          'keploy speaks @keploy/playwright\'s wire, scope protocol v1, only when it runs with KEPLOY_PROVEN=1 ' +
+          '(KEPLOY_PROVEN=1 keploy mock record|replay -c "npx playwright test --workers=1 --retries=0"); ' +
+          'a keploy run without KEPLOY_PROVEN=1, or one from before scope protocol v1, answers 404 there', 404);
+      }
+      throw err;
+    }
     if (!a.instance) {
       throw new KeployError('keploy: the keploy agent answered the claim of this test process without an instance');
     }
@@ -150,12 +166,13 @@ export class AgentClient {
       a = await this.post(PATH_GIVEN, source ? { name, value, source } : { name, value });
     } catch (err) {
       if (err instanceof KeployError && err.status === 404 && err.code === '') {
-        // The route came after the rest of the protocol (keploy v3.6.192),
-        // and keploy serves it only under KEPLOY_PROVEN=1: begin, end and
-        // settle work on an agent without it.
+        // The route came after the rest of the protocol (keploy v3.6.192):
+        // begin, end and settle work on an agent without it. given runs only
+        // in a worker whose claim the agent took, so the switch is on and
+        // only the version can be missing.
         throw new KeployError(`keploy: this keploy agent answered 404 to POST ${PATH_GIVEN}, so it cannot take the given value ${name}: ` +
-          'given needs keploy v3.6.192 or later (keploy/keploy#5016), or an enterprise release on keploy v3.6.192 or later, ' +
-          'run with KEPLOY_PROVEN=1; an older keploy, or one run without KEPLOY_PROVEN=1, answers 404 there', 404);
+          'given needs keploy v3.6.192 or later (keploy/keploy#5016), or an enterprise release on keploy v3.6.192 or later; ' +
+          'an older keploy answers 404 there', 404);
       }
       throw err;
     }

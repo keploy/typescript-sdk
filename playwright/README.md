@@ -23,12 +23,14 @@ test('lists the apps', async ({ page }) => {
 });
 ```
 
-Run the suite under keploy with one worker and no retries:
+Run the suite under keploy with `KEPLOY_PROVEN=1`, one worker and no retries:
 
 ```sh
-keploy mock record -c "npx playwright test --workers=1 --retries=0"
-keploy mock replay -c "npx playwright test --workers=1 --retries=0"
+KEPLOY_PROVEN=1 keploy mock record -c "npx playwright test --workers=1 --retries=0"
+KEPLOY_PROVEN=1 keploy mock replay -c "npx playwright test --workers=1 --retries=0"
 ```
+
+`KEPLOY_PROVEN=1` is keploy's switch for its proven model. keploy speaks this package's wire, scope protocol v1 (the claim, begin, end and given), only under it. Without it, keploy answers the worker's claim with a plain 404, and every test of the worker fails with `keploy: this keploy agent answered 404 to POST /agent/instance, so this worker cannot claim keploy's run: ...`, which names the switch.
 
 keploy's first release runs one test process at a time. A second worker that is still alive while another runs is refused by keploy, and its tests fail. Turn retries off: keploy sets aside a test it cannot prove, with its reason, and fails a test whose calls changed, and a retry changes neither.
 
@@ -53,7 +55,7 @@ Any answer from the agent that this package cannot trust fails the test. That co
 - Settle's rows run in Chromium. Which calls the browser itself ends (a removed frame's) is proven there only; Firefox and WebKit are not rowed.
 - Calls that `beforeAll`/`afterAll` hooks and worker fixtures make outside every test are answered from the worker's claim, one slice per Playwright project.
 - The `beforeAll` and `afterAll` hooks of a describe group whose tests keploy has all set aside still run, and their calls are answered from the claim. Each test is skipped at its begin, after the group's hooks have started; skipping the whole group before its hooks run needs a way to ask keploy for the set-aside tests first, which this version does not have.
-- `given` needs the agent route `POST /agent/scope/given` (keploy/keploy#5016). keploy v3.6.192 and later serve it, and only when keploy runs with `KEPLOY_PROVEN=1`; with the enterprise keploy, that is an enterprise release on keploy v3.6.192 or later, run the same way. An older keploy, or one run without `KEPLOY_PROVEN=1`, answers that route with a plain 404, and `given` fails the test with `keploy: this keploy agent answered 404 to POST /agent/scope/given, so it cannot take the given value <name>: given needs keploy v3.6.192 or later (keploy/keploy#5016), or an enterprise release on keploy v3.6.192 or later, run with KEPLOY_PROVEN=1; an older keploy, or one run without KEPLOY_PROVEN=1, answers 404 there`. Claim, begin, settle and end do not need that route.
+- `given` needs the agent route `POST /agent/scope/given` (keploy/keploy#5016). keploy v3.6.192 and later serve it; with the enterprise keploy, that is an enterprise release on keploy v3.6.192 or later. An older keploy answers that route with a plain 404, and `given` fails the test with `keploy: this keploy agent answered 404 to POST /agent/scope/given, so it cannot take the given value <name>: given needs keploy v3.6.192 or later (keploy/keploy#5016), or an enterprise release on keploy v3.6.192 or later; an older keploy answers 404 there`. Claim, begin, settle and end do not need that route.
 
 ## Releasing
 
