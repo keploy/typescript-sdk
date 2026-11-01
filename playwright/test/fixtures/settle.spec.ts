@@ -101,3 +101,29 @@ test('a document still loading after its frame commits', async ({ page }) => {
   // byte: committing the new document cancels only the old document's calls.
   await page.goto(`${base}/slowdoc`, { waitUntil: 'commit' });
 });
+test('a call in flight while another page of the test closes', async ({ page, context }) => {
+  await page.goto(`${base}/page`);
+  const sent = page.waitForRequest(/\/slow$/);
+  await page.evaluate(() => { void fetch('/slow'); });
+  await sent;
+  const other = await context.newPage();
+  await other.goto(`${base}/page?other`);
+  await other.close();
+});
+test('a call in flight across a route change after an answered call', async ({ page }) => {
+  await page.goto(`${base}/page`);
+  const sent = page.waitForRequest(/\/slow$/);
+  await page.evaluate(() => { void fetch('/slow'); });
+  await sent;
+  await page.evaluate(() => fetch('/page').then((r) => r.text()));
+  const routed = page.waitForEvent('framenavigated');
+  await page.evaluate(() => { history.pushState({}, '', '/page?route'); });
+  await routed;
+});
+test('a call in flight when the test closes its own context', async ({ page, context }) => {
+  await page.goto(`${base}/page`);
+  const sent = page.waitForRequest(/\/slow$/);
+  await page.evaluate(() => { void fetch('/slow'); });
+  await sent;
+  await context.close();
+});

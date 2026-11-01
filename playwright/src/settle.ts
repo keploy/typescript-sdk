@@ -42,12 +42,14 @@ export class Inflight {
         if (!loading.delete(f)) return;
         this.drop((o) => o.frame === f && !o.nav);
       });
-      // Nor for the calls of a page that closes. (A removed frame's calls
-      // it does end, as failed requests.)
+      // Nor for the calls of a page that closes. Only that page's calls: a
+      // popup that closes cancels nothing of its opener. (A removed frame's
+      // calls the browser does end, as failed requests.)
       p.on('close', () => this.drop((o) => o.frame !== null && pageOf(o.frame) === p));
     };
     context.pages().forEach(watch);
     context.on('page', watch);
+    // Nor for any call when the test closes its own context.
     context.on('close', () => this.drop(() => true));
   }
 
