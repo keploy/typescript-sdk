@@ -47,15 +47,29 @@ test('the client sends the token and the protocol body, and takes v1 answers', a
     await c.begin({ name: 'g › a', file: 'tests/a.spec.ts', project: 'chromium' });
     await c.begin({ name: 'g › b', file: 'tests/a.spec.ts' }, 'seeded');
     await c.begin({ name: 'g › c', file: 'tests/a.spec.ts' }, 'own');
+    await c.begin({ name: 'g › d', file: 'tests/a.spec.ts' }, 'seeded', '0123abcd');
     await c.end({ name: 'g › a', file: 'tests/a.spec.ts', project: 'chromium' }, 'passed');
+    await c.end({ name: 'g › d', file: 'tests/a.spec.ts' }, 'failed', 'own');
     assert.deepEqual(a.calls.map((x) => [x.path, x.auth, x.body]), [
       ['/agent/instance', 'Bearer tok', { key: 'chromium', dir: '/proj' }],
       ['/agent/scope/begin', 'Bearer tok', { name: 'g › a', file: 'tests/a.spec.ts', project: 'chromium', canSkip: true }],
       ['/agent/scope/begin', 'Bearer tok', { name: 'g › b', file: 'tests/a.spec.ts', canSkip: true, random: 'seeded' }],
       ['/agent/scope/begin', 'Bearer tok', { name: 'g › c', file: 'tests/a.spec.ts', canSkip: true, random: 'own' }],
+      ['/agent/scope/begin', 'Bearer tok', { name: 'g › d', file: 'tests/a.spec.ts', canSkip: true, random: 'seeded', seed: '0123abcd' }],
       ['/agent/scope/end', 'Bearer tok', { name: 'g › a', file: 'tests/a.spec.ts', project: 'chromium', outcome: 'passed' }],
+      ['/agent/scope/end', 'Bearer tok', { name: 'g › d', file: 'tests/a.spec.ts', outcome: 'failed', random: 'own' }],
     ]);
   } finally { await a.close(); }
+});
+
+test('a begin\'s answer gives the seed keploy answered, or none', async () => {
+  for (const [body, seed] of [[{ v: 1, status: 'ok', seed: '0123abcd' }, '0123abcd'], [{ v: 1, status: 'ok', seed: '' }, ''], [{ v: 1, status: 'ok' }, undefined]]) {
+    const a = await agent(() => ({ body }));
+    try {
+      const b = await new AgentClient(a.url, '').begin({ name: 'a', file: 'a.spec.ts' }, 'seeded', 'ffffffff');
+      assert.equal(b.seed, seed);
+    } finally { await a.close(); }
+  }
 });
 
 test('no token: no authorization header', async () => {
@@ -80,6 +94,12 @@ test('every answer the client cannot trust is an error', async () => {
     [{ status: 302, body: '' }, /answered 302/],
     [{ body: { v: 1, status: 'busy' } }, /begin of a with status "busy"/],
     [{ body: { v: 1, status: 'ok', action: 'fail' } }, /begin of a with the unknown action "fail"/],
+    // A seed keploy would not keep, or one that is no string.
+    [{ body: { v: 1, status: 'ok', seed: 'not-hex-at-all' } }, /^keploy: the keploy agent answered the begin of a with the seed "not-hex-at-all", which is no seed keploy keeps \(8 to 64 lower-case hex digits\)$/],
+    [{ body: { v: 1, status: 'ok', seed: '0123ABCD' } }, /with the seed "0123ABCD", which is no seed/],
+    [{ body: { v: 1, status: 'ok', seed: '0123abc' } }, /with the seed "0123abc", which is no seed/],
+    [{ body: { v: 1, status: 'ok', seed: 12345678 } }, /with the seed "12345678", which is no seed/],
+    [{ body: { v: 1, status: 'ok', seed: null } }, /with the seed "null", which is no seed/],
   ];
   for (const [answer, re] of cases) {
     const a = await agent(() => answer);

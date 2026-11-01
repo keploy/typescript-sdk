@@ -9,7 +9,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SEEDED_LINE, initScript, seedOf, testID } from '../dist/random.js';
+import { SEEDED_LINE, initScript, unseededLine } from '../dist/random.js';
 import { DRAWS, documentAt } from './draws.mjs';
 
 const PKG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -23,7 +23,8 @@ function journal() {
 }
 
 // A fake keploy agent. answer(call) returns {status, body} or undefined for
-// the protocol's plain "ok".
+// the protocol's plain "ok", which answers a begin with the seed it sent, as
+// a record does.
 async function fakeAgent(j, answer = () => undefined) {
   const srv = http.createServer((req, res) => {
     let body = '';
@@ -35,7 +36,8 @@ async function fakeAgent(j, answer = () => undefined) {
       if (!a) {
         a = { body: call.path === '/agent/instance' ? { v: 1, instance: 'run', timeFile: '' }
           : call.path === '/agent/scope/given' ? { v: 1, status: 'ok', variable: `given:${call.body.name}` }
-            : { v: 1, status: 'ok' } };
+            : call.path === '/agent/scope/begin' && call.body.seed ? { v: 1, status: 'ok', seed: call.body.seed }
+              : { v: 1, status: 'ok' } };
       }
       res.writeHead(a.status ?? 200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(a.body));
@@ -124,6 +126,15 @@ async function playwright(specs, env, cwd = PKG) {
 
 const keployEnv = (url) => ({ KEPLOY_MOCK_AGENT: url, KEPLOY_MOCK_AGENT_TOKEN: 'tok', KEPLOY_MOCK_PROJECT: PKG, KEPLOY_TEST_PID: undefined });
 const calls = (j) => j.events.filter((e) => e.agent).map((e) => e.agent);
+// Every call's path and body, each begin's seed shown as FRESH once it is
+// checked to be a fresh one: 128 bits of hex, no two begins the same.
+const FRESH = '<a fresh seed>';
+function wire(j) {
+  const seeds = calls(j).filter((c) => c.path === '/agent/scope/begin' && c.body.seed !== undefined).map((c) => c.body.seed);
+  for (const sd of seeds) assert.match(sd, /^[0-9a-f]{32}$/);
+  assert.equal(new Set(seeds).size, seeds.length, seeds.join(' '));
+  return calls(j).map((c) => [c.path, c.body && c.body.seed !== undefined ? { ...c.body, seed: FRESH } : c.body]);
+}
 const ref = (file, name) => ({ name, file: `test/fixtures/${file}`, project: 'p1' });
 
 test('inert without keploy: no call, every test runs as written', async () => {
@@ -151,13 +162,13 @@ test('a worker claims the run, each test begins before its beforeEach and ends w
     const given = { name: 'seed', value: 'seed-value-1', source: 'test/fixtures/basic.spec.ts:7' };
     const claim = { key: 'p1', dir: fs.realpathSync(PKG) };
     // b fails, so Playwright runs c and d in a new worker, which claims again.
-    assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
+    assert.deepEqual(wire(j), [
       ['/agent/instance', claim],
-      ['/agent/scope/begin', { ...r('a'), canSkip: true, random: 'seeded' }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('a'), outcome: 'passed' }],
-      ['/agent/scope/begin', { ...r('b'), canSkip: true, random: 'seeded' }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('b'), outcome: 'failed' }],
+      ['/agent/scope/begin', { ...r('a'), canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('a'), outcome: 'passed' }],
+      ['/agent/scope/begin', { ...r('b'), canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('b'), outcome: 'failed' }],
       ['/agent/instance', claim],
-      ['/agent/scope/begin', { ...r('c'), canSkip: true, random: 'seeded' }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('c'), outcome: 'skipped' }],
-      ['/agent/scope/begin', { ...r('d'), canSkip: true, random: 'seeded' }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('d'), outcome: 'passed' }],
+      ['/agent/scope/begin', { ...r('c'), canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('c'), outcome: 'skipped' }],
+      ['/agent/scope/begin', { ...r('d'), canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('d'), outcome: 'passed' }],
     ]);
     assert.ok(calls(j).every((c) => c.auth === 'Bearer tok'));
     // KEPLOY_TEST_PID named the claiming worker (test a checks it).
@@ -295,9 +306,9 @@ test('an unnamed Playwright project claims with the key ".", and its tests name 
     const { tests, out } = await playwright(['agent-says.spec.ts', '-g', 'judged red'], { ...keployEnv(a.url), PW_UNNAMED: '1' });
     assert.equal(tests['judged red'].status, 'passed', out);
     const r = { name: 'judged red', file: 'test/fixtures/agent-says.spec.ts' };
-    assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
+    assert.deepEqual(wire(j), [
       ['/agent/instance', { key: '.', dir: fs.realpathSync(PKG) }],
-      ['/agent/scope/begin', { ...r, canSkip: true, random: 'seeded' }],
+      ['/agent/scope/begin', { ...r, canSkip: true, random: 'seeded', seed: FRESH }],
       ['/agent/scope/end', { ...r, outcome: 'passed' }],
     ]);
   } finally { await a.close(); }
@@ -315,9 +326,9 @@ test('a worker started above keploy\'s project claims with the project\'s folder
     const { tests, out } = await playwright(['agent-says.spec.ts', '-g', 'judged red'], keployEnv(a.url), path.dirname(PKG));
     assert.equal(tests['judged red'].status, 'passed', out);
     const r = ref('agent-says.spec.ts', 'judged red');
-    assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
+    assert.deepEqual(wire(j), [
       ['/agent/instance', { key: 'p1', dir: fs.realpathSync(PKG) }],
-      ['/agent/scope/begin', { ...r, canSkip: true, random: 'seeded' }],
+      ['/agent/scope/begin', { ...r, canSkip: true, random: 'seeded', seed: FRESH }],
       ['/agent/scope/end', { ...r, outcome: 'passed' }],
     ]);
   } finally { await a.close(); }
@@ -331,9 +342,9 @@ test('when keploy names no project, a worker claims with the current folder, whi
     const { tests, out } = await playwright(['agent-says.spec.ts', '-g', 'judged red'], { ...keployEnv(a.url), KEPLOY_MOCK_PROJECT: undefined }, cwd);
     assert.equal(tests['judged red'].status, 'passed', out);
     const r = { name: 'judged red', file: `${path.basename(PKG)}/test/fixtures/agent-says.spec.ts`, project: 'p1' };
-    assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
+    assert.deepEqual(wire(j), [
       ['/agent/instance', { key: 'p1', dir: fs.realpathSync(cwd) }],
-      ['/agent/scope/begin', { ...r, canSkip: true, random: 'seeded' }],
+      ['/agent/scope/begin', { ...r, canSkip: true, random: 'seeded', seed: FRESH }],
       ['/agent/scope/end', { ...r, outcome: 'passed' }],
     ]);
   } finally { await a.close(); }
@@ -408,47 +419,157 @@ async function drawsServer() {
   return { url: `http://127.0.0.1:${srv.address().port}`, close: () => new Promise((r) => { srv.closeAllConnections(); srv.close(r); }) };
 }
 
-// One run of seeded.spec.ts: what each test's pages drew, and the run's tests.
-async function drawRun(env) {
+// One run of seeded.spec.ts (or another spec of the /draws page): what each
+// test's pages drew, the run's tests, and what its begins and ends sent.
+async function drawRun(j, env, specs = ['seeded.spec.ts'], names = ['one', 'two', 'again', 'three']) {
   const d = await drawsServer();
+  const from = j.events.length;
   try {
-    const { tests, tmp, out } = await playwright(['seeded.spec.ts'], { ...env, DRAWS_BASE: d.url });
+    const { tests, tmp, out } = await playwright(specs, { ...env, DRAWS_BASE: d.url });
     for (const [k, t] of Object.entries(tests)) assert.equal(t.status, 'passed', `${k}: ${t.error}\n${out}`);
     const drew = {};
-    for (const n of ['one', 'two', 'again', 'three']) drew[n] = JSON.parse(fs.readFileSync(path.join(tmp, `${n}.json`), 'utf8'));
-    const said = Object.values(tests).map((t) => t.stdout).join('').split('\n').filter((l) => l === SEEDED_LINE).length;
-    return { drew, said };
+    for (const n of names) drew[n] = JSON.parse(fs.readFileSync(path.join(tmp, `${n}.json`), 'utf8'));
+    const lines = Object.values(tests).map((t) => t.stdout).join('').split('\n');
+    const said = lines.filter((l) => l === SEEDED_LINE).length;
+    const sent = j.events.slice(from).filter((e) => e.agent).map((e) => e.agent);
+    const begins = sent.filter((c) => c.path === '/agent/scope/begin').map((c) => c.body);
+    const ends = sent.filter((c) => c.path === '/agent/scope/end').map((c) => [c.body.name, c.body.random]);
+    // The seed each test's begin sent.
+    const seeds = Object.fromEntries(begins.map((b) => [b.name.replace(/^own › /, ''), b.seed]));
+    return { drew, said, lines, tests, tmp, begins, ends, seeds };
   } finally { await d.close(); }
 }
 
-// What a page at path draws first under the seed of the test named name.
-const expected = (name, path, storage) => documentAt(initScript(seedOf(testID(ref('seeded.spec.ts', name)))), path, storage).draws();
+// What a page at path draws first under seed.
+const expected = (seed, path, storage) => documentAt(initScript(seed), path, storage).draws();
+const NAMES = ['one', 'two', 'again', 'own › three'];
 
-test('seeded: each test\'s pages draw the same numbers every run, from their first script and in a cross-site frame; another test draws others', async () => {
+test('seeded: a record seeds each test\'s pages from the fresh seed its begin sent, from their first script and in a cross-site frame; another test, or the record made again, draws others', async () => {
   const j = journal();
   const a = await fakeAgent(j);
   try {
-    const r1 = await drawRun(keployEnv(a.url));
-    const r2 = await drawRun(keployEnv(a.url));
-    for (const n of ['one', 'two', 'again']) assert.deepEqual(r2.drew[n], r1.drew[n], n);
-    // The numbers are the test's seed's: the init script ran before the
-    // page's first script, in every frame.
-    for (const n of ['one', 'two']) assert.deepEqual(r1.drew[n], { top: expected(n, '/draws'), frame: expected(n, '/frame') }, n);
-    assert.notDeepEqual(r1.drew.one, r1.drew.two);
-    // A page loaded again draws new numbers; a query is no part of its name.
-    const tab = new Map();
-    const loads = [expected('again', '/draws', tab), expected('again', '/draws', tab), expected('again', '/draws', tab)];
-    assert.deepEqual(r1.drew.again.map((l) => l.top), loads);
-    assert.notDeepEqual(loads[0], loads[1]);
+    const r1 = await drawRun(j, keployEnv(a.url));
+    const r2 = await drawRun(j, keployEnv(a.url));
+    for (const r of [r1, r2]) {
+      // The numbers are the seed's: the init script ran before the page's
+      // first script, in every frame.
+      for (const n of ['one', 'two']) assert.deepEqual(r.drew[n], { top: expected(r.seeds[n], '/draws'), frame: expected(r.seeds[n], '/frame') }, n);
+      // A page loaded again draws new numbers; a query is no part of its name.
+      const tab = new Map();
+      const loads = [expected(r.seeds.again, '/draws', tab), expected(r.seeds.again, '/draws', tab), expected(r.seeds.again, '/draws', tab)];
+      assert.deepEqual(r.drew.again.map((l) => l.top), loads);
+      assert.notDeepEqual(loads[0], loads[1]);
+      assert.notDeepEqual(r.drew.one, r.drew.two);
+      // Each begin says how its test's browser means to draw; one that
+      // seeds sends a fresh seed. The option's test sends none.
+      assert.deepEqual(r.begins.map((b) => [b.name, b.random, typeof b.seed === 'string' && /^[0-9a-f]{32}$/.test(b.seed)]),
+        [['one', 'seeded', true], ['two', 'seeded', true], ['again', 'seeded', true], ['own › three', 'own', false]]);
+      // Each end says what its pages drew from.
+      assert.deepEqual(r.ends, [['one', 'seeded'], ['two', 'seeded'], ['again', 'seeded'], ['own › three', 'own']]);
+      // Said once a worker: one worker, one line; and no test went unseeded.
+      assert.equal(r.said, 1);
+      assert.equal(r.lines.filter((l) => l.includes('with no seed')).length, 0);
+      // Called with a this that is no Crypto, the seeded functions throw
+      // as the browser's own do.
+      assert.deepEqual(JSON.parse(fs.readFileSync(path.join(r.tmp, 'this.json'), 'utf8')),
+        { grv: 'TypeError: Illegal invocation', uuid: 'TypeError: Illegal invocation', drew: true });
+    }
+    // A record made again draws new numbers: a browser-made ID is not sent
+    // twice to a real server.
+    for (const n of ['one', 'two', 'again']) {
+      assert.notEqual(r2.seeds[n], r1.seeds[n], n);
+      assert.notDeepEqual(r2.drew[n], r1.drew[n], n);
+    }
     // A test that turned it off with the option draws the browser's own.
     assert.notDeepEqual(r2.drew.three, r1.drew.three);
-    // Said once a worker: one worker, one line.
-    assert.equal(r1.said, 1);
-    assert.equal(r2.said, 1);
-    // Each begin says how the test's browser drew: the option's test, its own.
-    const begins = calls(j).filter((c) => c.path === '/agent/scope/begin').map((c) => [c.body.name, c.body.random]);
-    const run = [['one', 'seeded'], ['two', 'seeded'], ['again', 'seeded'], ['own › three', 'own']];
-    assert.deepEqual(begins, [...run, ...run]);
+  } finally { await a.close(); }
+});
+
+test('seeded: a replay draws the numbers its recording drew, from the seed keploy answers, not the one its begin sent', async () => {
+  const j = journal();
+  const rec = await fakeAgent(j);
+  let kept = {};
+  // The replay's agent answers each begin with the seed its recording kept.
+  const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+    ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+  try {
+    const r = await drawRun(j, keployEnv(rec.url));
+    kept = r.seeds;
+    for (let i = 0; i < 2; i++) {
+      const p = await drawRun(j, keployEnv(rep.url));
+      for (const n of ['one', 'two', 'again']) {
+        assert.deepEqual(p.drew[n], r.drew[n], n);
+        assert.notEqual(p.seeds[n], kept[n], n);
+      }
+      assert.notDeepEqual(p.drew.three, r.drew.three);
+      assert.deepEqual(p.ends, [['one', 'seeded'], ['two', 'seeded'], ['again', 'seeded'], ['own › three', 'own']]);
+      assert.equal(p.said, 1);
+    }
+    // The draws follow the seed keploy answers, not the test's name: a test
+    // whose entry was renamed (two, answered one's seed) draws as it did.
+    kept = { ...r.seeds, two: r.seeds.one };
+    const renamed = await drawRun(j, keployEnv(rep.url));
+    assert.deepEqual(renamed.drew.two, r.drew.one);
+  } finally { await rep.close(); await rec.close(); }
+});
+
+test('seeded: a retry draws the numbers its first attempt drew, from the seed keploy answers it', async () => {
+  const j = journal();
+  // keploy answers a retry's begin in the same record with the first
+  // attempt's seed.
+  const first = new Map();
+  const a = await fakeAgent(j, (c) => {
+    if (c.path !== '/agent/scope/begin' || !c.body.seed) return undefined;
+    if (!first.has(c.body.name)) first.set(c.body.name, c.body.seed);
+    return { body: { v: 1, status: 'ok', seed: first.get(c.body.name) } };
+  });
+  try {
+    const r = await drawRun(j, keployEnv(a.url), ['retry.spec.ts', '--retries=1'], ['flips-0', 'flips-1']);
+    assert.equal(r.begins.length, 2);
+    assert.notEqual(r.begins[1].seed, r.begins[0].seed);
+    assert.deepEqual(r.drew['flips-0'], expected(r.begins[0].seed, '/draws'));
+    assert.deepEqual(r.drew['flips-1'], r.drew['flips-0']);
+    assert.deepEqual(r.ends, [['flips', 'seeded'], ['flips', 'seeded']]);
+  } finally { await a.close(); }
+});
+
+test('seeded: keploy answers no seed (an older recording, or an older keploy): the browser draws its own, each test says so, and its end says own', async () => {
+  const j = journal();
+  const a = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' ? { body: { v: 1, status: 'ok' } } : undefined));
+  try {
+    const r1 = await drawRun(j, keployEnv(a.url));
+    const r2 = await drawRun(j, keployEnv(a.url));
+    for (const n of ['one', 'two', 'again', 'three']) assert.notDeepEqual(r2.drew[n], r1.drew[n], n);
+    assert.notDeepEqual(r1.drew.one.top, expected(r1.seeds.one, '/draws'));
+    for (const r of [r1, r2]) {
+      assert.equal(r.said, 0);
+      for (const n of ['one', 'two', 'again']) assert.ok(r.tests[n].stdout.split('\n').includes(unseededLine(n)), `${n}: ${r.tests[n].stdout}`);
+      assert.ok(!r.tests['own › three'].stdout.includes('with no seed'), r.tests['own › three'].stdout);
+      assert.deepEqual(r.ends, NAMES.map((n) => [n, 'own']));
+    }
+    // A test with no page says own too: it asked for a seed and got none.
+    const from = j.events.length;
+    await playwright(['basic.spec.ts'], keployEnv(a.url));
+    const ends = j.events.slice(from).filter((e) => e.agent && e.agent.path === '/agent/scope/end').map((e) => e.agent.body.random);
+    assert.deepEqual(ends, ['own', 'own', 'own', 'own']);
+  } finally { await a.close(); }
+});
+
+test('seeded: keploySeedRandom: false for the whole project asks no seed, says nothing, and the browser draws its own', async () => {
+  const j = journal();
+  // An agent that answers a seed even to a begin that asked for none: the
+  // test that opted out still draws the browser's own numbers.
+  const a = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' ? { body: { v: 1, status: 'ok', seed: '0123456789abcdef' } } : undefined));
+  try {
+    const r1 = await drawRun(j, { ...keployEnv(a.url), PW_NOSEED: '1' });
+    const r2 = await drawRun(j, { ...keployEnv(a.url), PW_NOSEED: '1' });
+    for (const n of ['one', 'two', 'again', 'three']) assert.notDeepEqual(r2.drew[n], r1.drew[n], n);
+    for (const r of [r1, r2]) {
+      assert.equal(r.said, 0);
+      assert.equal(r.lines.filter((l) => l.startsWith('keploy:')).length, 0, r.lines.join('\n'));
+      assert.deepEqual(r.begins.map((b) => [b.random, b.seed]), Array(4).fill(['own', undefined]));
+      assert.deepEqual(r.ends, NAMES.map((n) => [n, 'own']));
+    }
   } finally { await a.close(); }
 });
 
@@ -457,15 +578,16 @@ test('KEPLOY_SEED_RANDOM=off, or no keploy: the test browser draws its own rando
   const a = await fakeAgent(j);
   try {
     for (const env of [{ ...keployEnv(a.url), KEPLOY_SEED_RANDOM: 'off' }, { KEPLOY_MOCK_AGENT: undefined, KEPLOY_TEST_PID: undefined }]) {
-      const r1 = await drawRun(env);
-      const r2 = await drawRun(env);
+      const r1 = await drawRun(j, env);
+      const r2 = await drawRun(j, env);
       for (const n of ['one', 'two', 'again', 'three']) assert.notDeepEqual(r2.drew[n], r1.drew[n], n);
-      assert.notDeepEqual(r1.drew.one.top, expected('one', '/draws'));
       assert.equal(r1.said + r2.said, 0);
+      assert.equal([...r1.lines, ...r2.lines].filter((l) => l.startsWith('keploy:')).length, 0);
     }
-    // Under keploy with it off, each begin says the browser drew its own.
-    const begins = calls(j).filter((c) => c.path === '/agent/scope/begin').map((c) => c.body.random);
-    assert.deepEqual(begins, Array(8).fill('own'));
+    // Under keploy with it off, each begin says the browser draws its own
+    // and sends no seed, and each end says it did.
+    assert.deepEqual(calls(j).filter((c) => c.path === '/agent/scope/begin').map((c) => [c.body.random, c.body.seed]), Array(8).fill(['own', undefined]));
+    assert.deepEqual(calls(j).filter((c) => c.path === '/agent/scope/end').map((c) => c.body.random), Array(8).fill('own'));
   } finally { await a.close(); }
 });
 

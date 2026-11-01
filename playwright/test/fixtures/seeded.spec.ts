@@ -16,7 +16,18 @@ async function load(page: Page, query = ''): Promise<{ top: unknown; frame: unkn
   return { top: await page.evaluate(read), frame: await frame.evaluate(read) };
 }
 
-test('one', async ({ page }) => { keep('one', await load(page)); });
+test('one', async ({ page }) => {
+  keep('one', await load(page));
+  // Each seeded function, called with a this that is no Crypto.
+  keep('this', await page.evaluate(() => {
+    const thrown = (f: () => unknown): string => { try { f(); return 'no error'; } catch (e) { return String(e); } };
+    return {
+      grv: thrown(() => crypto.getRandomValues.call({}, new Uint8Array(4))),
+      uuid: thrown(() => crypto.randomUUID.call({})),
+      drew: crypto.getRandomValues(new Uint8Array(4)).some((x) => x !== 0) || crypto.randomUUID().length === 36,
+    };
+  }));
+});
 test('two', async ({ page }) => { keep('two', await load(page)); });
 test('again', async ({ page }) => {
   // The same page loaded again, then with a query: the path and its count

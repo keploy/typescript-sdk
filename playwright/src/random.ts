@@ -2,16 +2,18 @@
 // (stripe.js picks one of two builds from crypto.randomUUID() at each page
 // load) makes other calls each run, and no recording can answer a call it
 // never saw. So under keploy each test's browser draws from a seeded stream
-// instead: the seed is a function of the test's keploy ID, which keploy keeps
-// with the recording, so record and replay draw the same numbers and pick
-// the same side, and two tests draw different ones. Only the test browser's
-// pages change; the app, its server and the browser's workers do not.
+// instead. Each test's begin sends a seed drawn afresh, and keploy answers
+// the seed to draw from: a record keeps the begin's with the test's
+// recording, and a replay answers the recording's. So record and replay
+// draw the same numbers and pick the same side, two tests draw different
+// ones, and a record made again draws new ones (a browser-made ID is not sent
+// twice to a real server). Only the test browser's pages change; the app,
+// its server and the browser's workers do not.
 //
 // On by default; KEPLOY_SEED_RANDOM=off or the fixture option
 // keploySeedRandom: false turns it off.
 
 import crypto from 'node:crypto';
-import type { TestRef } from './agent';
 
 export const ENV_SEED_RANDOM = 'KEPLOY_SEED_RANDOM';
 
@@ -34,18 +36,24 @@ export function seedingFromEnv(env: NodeJS.ProcessEnv): Seeding {
 }
 
 /** The line a worker shows once, at the first test whose browser it seeds. */
-export const SEEDED_LINE = 'keploy: the test browser\'s random numbers (Math.random, crypto.getRandomValues, crypto.randomUUID) are seeded per test, ' +
-  'so a replay draws the numbers its recording drew; Web Workers and Service Workers keep the browser\'s own. ' +
+export const SEEDED_LINE = 'keploy: the test browser\'s random numbers (Math.random, crypto.getRandomValues, crypto.randomUUID) are seeded per test ' +
+  'from a seed keploy keeps with the test\'s recording, so a replay draws the numbers its recording drew; ' +
+  'Web Workers and Service Workers keep the browser\'s own. ' +
   `To turn it off, record and replay with ${ENV_SEED_RANDOM}=off, or set use: { ${OPTION_SEED_RANDOM}: false } in the Playwright config.`;
 
-/** A test's ID as keploy builds it: [project::]file::name. */
-export function testID(ref: TestRef): string {
-  return `${ref.project ? `${ref.project}::` : ''}${ref.file}::${ref.name}`;
+/**
+ * The line a test shows when it asked keploy for a seed and got none, so its
+ * pages draw the browser's own random numbers.
+ */
+export function unseededLine(name: string): string {
+  return `keploy: keploy answered the begin of ${name} with no seed, so its browser draws its own random numbers: ` +
+    'its recording kept none (it was recorded before keploy kept seeds, or with seeding off), or this keploy predates seeds. ' +
+    'Record the test again with seeding on (the default) to seed it.';
 }
 
-/** The test's seed: 128 bits, hex, of its keploy ID. */
-export function seedOf(id: string): string {
-  return crypto.createHash('sha256').update(`keploy-browser-random/v1\n${id}`).digest('hex').slice(0, 32);
+/** A seed drawn afresh for a test's begin: 128 bits, as hex. */
+export function freshSeed(): string {
+  return crypto.randomBytes(16).toString('hex');
 }
 
 // A key of the page's session storage: how many documents of each path the

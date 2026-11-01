@@ -15,9 +15,10 @@ export const DRAWS = '({ random: [Math.random(), Math.random()], bytes: Array.fr
  * null: a document with no session storage (reading it throws).
  */
 export function documentAt(script, path = '/p', storage = new Map()) {
+  // As the browser's: a this that is no Crypto is refused.
   class Crypto {
-    getRandomValues(a) { return webcrypto.getRandomValues(a); }
-    randomUUID() { return webcrypto.randomUUID(); }
+    getRandomValues(a) { if (!(this instanceof Crypto)) throw new TypeError('Illegal invocation'); return webcrypto.getRandomValues(a); }
+    randomUUID() { if (!(this instanceof Crypto)) throw new TypeError('Illegal invocation'); return webcrypto.randomUUID(); }
   }
   const ctx = { location: { origin: 'http://h', pathname: path }, Crypto, crypto: new Crypto() };
   if (storage === null) {
