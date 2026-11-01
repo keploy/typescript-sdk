@@ -135,3 +135,36 @@ test('a call its service worker has in flight', async ({ page, context }) => {
   await page.evaluate(() => { void navigator.serviceWorker.register('/sw.js'); });
   await sent;
 });
+test('a service worker call in flight when the test closes its own context', async ({ page, context }) => {
+  // Closing the context ends its service workers too. Chromium reports no end
+  // for the worker's call, and no page's close drops it (it has no frame).
+  await page.goto(`${base}/page`);
+  const sent = context.waitForEvent('request', (r) => r.url().endsWith('/slow'));
+  await page.evaluate(() => { void navigator.serviceWorker.register('/sw.js'); });
+  await sent;
+  await context.close();
+});
+test('a service worker call in flight while another page of the test closes', async ({ page, context }) => {
+  await page.goto(`${base}/page`);
+  const sent = context.waitForEvent('request', (r) => r.url().endsWith('/slow'));
+  await page.evaluate(() => { void navigator.serviceWorker.register('/sw.js'); });
+  await sent;
+  const other = await context.newPage();
+  await other.goto(`${base}/page?other`);
+  await other.close();
+});
+test('a call in flight across a lowercase attachment download', async ({ page }) => {
+  await page.goto(`${base}/page`);
+  const sent = page.waitForRequest(/\/slow$/);
+  const answered = page.waitForResponse(/\/download-lower$/);
+  const downloaded = page.waitForEvent('download');
+  await page.evaluate(() => { void fetch('/slow'); });
+  await sent;
+  // The common spelling, "attachment", is a download as "Attachment" is.
+  await page.evaluate(() => { location.href = '/download-lower'; });
+  await answered;
+  await downloaded;
+  const routed = page.waitForEvent('framenavigated');
+  await page.evaluate(() => { history.pushState({}, '', '/page?route'); });
+  await routed;
+});

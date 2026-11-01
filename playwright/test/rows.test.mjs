@@ -57,6 +57,7 @@ async function pageServer(j) {
     if (req.url === '/resetcontent') { res.writeHead(205); res.end(); return; }
     // A disposition's type is case-insensitive (RFC 6266): the browser downloads "Attachment" too.
     if (req.url === '/download') { res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': 'Attachment; filename="d.bin"' }); res.end('bytes'); return; }
+    if (req.url === '/download-lower') { res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename="e.bin"' }); res.end('bytes'); return; }
     if (req.url === '/slowdoc') {
       // A document whose last byte comes only once /release is called.
       j.add({ page: 'slowdoc sent' });
@@ -294,11 +295,14 @@ test('an unnamed Playwright project claims with the key ".", and its tests name 
 // Settle rows where the browser cancelled a call: the test passes at once,
 // with no wait step. Chromium ends a removed frame's calls itself; a closed
 // page's it does not, and the package drops them, as it drops every call
-// when the test closes its own context.
+// when the test closes its own context. A service worker's call has no
+// frame, so only the context's close drops it: Chromium ends the worker
+// with its context and reports no end for the call.
 for (const [title, why] of [
   ['a call its removed cross-site frame had in flight', 'its cross-site frame is removed'],
   ['a call its closed page had in flight', 'its page closes'],
   ['a call in flight when the test closes its own context', 'the test closes its own context'],
+  ['a service worker call in flight when the test closes its own context', 'the test closes its own context, which ends its service worker'],
 ]) {
   test(`settle: a call is not waited for once ${why}`, async () => {
     const j = journal();
@@ -318,11 +322,13 @@ for (const [title, why] of [
 // the test times out naming it.
 for (const [title, why, call] of [
   ['a call in flight across a navigation answered 205', 'a navigation answered 205 replaces no document', '/slow'],
-  ['a call in flight across a download', 'a navigation answered with an attachment (a download) replaces no document', '/slow'],
+  ['a call in flight across a download', 'a navigation answered with an attachment (a download, "Attachment") replaces no document', '/slow'],
+  ['a call in flight across a lowercase attachment download', 'a navigation answered with an attachment (a download, "attachment") replaces no document', '/slow'],
   ['a document still loading after its frame commits', 'a navigation\'s own request stays in flight after its document commits', '/slowdoc'],
   ['a call in flight while another page of the test closes', 'another page closing cancels nothing of this page', '/slow'],
   ['a call in flight across a route change after an answered call', 'a route change after an answered call cancels nothing', '/slow'],
   ['a call its service worker has in flight', 'a service worker\'s call, which has no frame, is counted', '/slow'],
+  ['a service worker call in flight while another page of the test closes', 'another page closing cancels nothing of a service worker', '/slow'],
 ]) {
   test(`settle: ${why}, so the call is still waited for`, async () => {
     const j = journal();

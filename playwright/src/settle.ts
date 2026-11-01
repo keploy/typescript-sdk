@@ -49,7 +49,9 @@ export class Inflight {
     };
     context.pages().forEach(watch);
     context.on('page', watch);
-    // Nor for any call when the test closes its own context.
+    // Nor for any call when the test closes its own context, which ends its
+    // service workers too. A service worker's call has no frame, so no
+    // page's close drops it; this is the only rule that does.
     context.on('close', () => this.drop(() => true));
   }
 
