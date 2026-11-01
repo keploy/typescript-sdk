@@ -9,6 +9,8 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SEEDED_LINE, initScript, seedOf, testID } from '../dist/random.js';
+import { DRAWS, documentAt } from './draws.mjs';
 
 const PKG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(PKG, 'node_modules', '@playwright', 'test', 'cli.js');
@@ -112,6 +114,7 @@ async function playwright(specs, env, cwd = PKG) {
         error: (r.errors ?? []).map((e) => e.message ?? '').join('\n'),
         annotations: r.annotations ?? t.annotations ?? [],
         steps: steps.filter((x) => x.test === spec.title).map((x) => x.step),
+        stdout: (r.stdout ?? []).map((x) => x.text ?? Buffer.from(x.buffer ?? '', 'base64').toString()).join(''),
       };
     }
   };
@@ -387,3 +390,89 @@ for (const [title, why, call] of [
     } finally { await p.close(); await a.close(); }
   });
 }
+
+// The seeding rows' page server: /draws draws random numbers in its first
+// script, as it loads, and holds /frame from another host (localhost against
+// 127.0.0.1: a cross-site frame), which draws the same way.
+async function drawsServer() {
+  const page = (body) => `<html><head><script>window.__draws = ${DRAWS};</script></head><body>${body}</body></html>`;
+  const srv = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://x');
+    res.writeHead(200, { 'content-type': 'text/html' });
+    if (u.pathname === '/draws') { res.end(page(`<iframe src="http://localhost:${srv.address().port}/frame"></iframe>`)); return; }
+    if (u.pathname === '/frame') { res.end(page('frame')); return; }
+    res.end('');
+  });
+  // Every address: the frame is asked for at localhost, which may be ::1.
+  await new Promise((r) => srv.listen(0, r));
+  return { url: `http://127.0.0.1:${srv.address().port}`, close: () => new Promise((r) => { srv.closeAllConnections(); srv.close(r); }) };
+}
+
+// One run of seeded.spec.ts: what each test's pages drew, and the run's tests.
+async function drawRun(env) {
+  const d = await drawsServer();
+  try {
+    const { tests, tmp, out } = await playwright(['seeded.spec.ts'], { ...env, DRAWS_BASE: d.url });
+    for (const [k, t] of Object.entries(tests)) assert.equal(t.status, 'passed', `${k}: ${t.error}\n${out}`);
+    const drew = {};
+    for (const n of ['one', 'two', 'again', 'three']) drew[n] = JSON.parse(fs.readFileSync(path.join(tmp, `${n}.json`), 'utf8'));
+    const said = Object.values(tests).map((t) => t.stdout).join('').split('\n').filter((l) => l === SEEDED_LINE).length;
+    return { drew, said };
+  } finally { await d.close(); }
+}
+
+// What a page at path draws first under the seed of the test named name.
+const expected = (name, path, storage) => documentAt(initScript(seedOf(testID(ref('seeded.spec.ts', name)))), path, storage).draws();
+
+test('seeded: each test\'s pages draw the same numbers every run, from their first script and in a cross-site frame; another test draws others', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  try {
+    const r1 = await drawRun(keployEnv(a.url));
+    const r2 = await drawRun(keployEnv(a.url));
+    for (const n of ['one', 'two', 'again']) assert.deepEqual(r2.drew[n], r1.drew[n], n);
+    // The numbers are the test's seed's: the init script ran before the
+    // page's first script, in every frame.
+    for (const n of ['one', 'two']) assert.deepEqual(r1.drew[n], { top: expected(n, '/draws'), frame: expected(n, '/frame') }, n);
+    assert.notDeepEqual(r1.drew.one, r1.drew.two);
+    // A page loaded again draws new numbers; a query is no part of its name.
+    const tab = new Map();
+    const loads = [expected('again', '/draws', tab), expected('again', '/draws', tab), expected('again', '/draws', tab)];
+    assert.deepEqual(r1.drew.again.map((l) => l.top), loads);
+    assert.notDeepEqual(loads[0], loads[1]);
+    // A test that turned it off with the option draws the browser's own.
+    assert.notDeepEqual(r2.drew.three, r1.drew.three);
+    // Said once a worker: one worker, one line.
+    assert.equal(r1.said, 1);
+    assert.equal(r2.said, 1);
+  } finally { await a.close(); }
+});
+
+test('KEPLOY_SEED_RANDOM=off, or no keploy: the test browser draws its own random numbers, and nothing is said', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  try {
+    for (const env of [{ ...keployEnv(a.url), KEPLOY_SEED_RANDOM: 'off' }, { KEPLOY_MOCK_AGENT: undefined, KEPLOY_TEST_PID: undefined }]) {
+      const r1 = await drawRun(env);
+      const r2 = await drawRun(env);
+      for (const n of ['one', 'two', 'again', 'three']) assert.notDeepEqual(r2.drew[n], r1.drew[n], n);
+      assert.notDeepEqual(r1.drew.one.top, expected('one', '/draws'));
+      assert.equal(r1.said + r2.said, 0);
+    }
+  } finally { await a.close(); }
+});
+
+test('KEPLOY_SEED_RANDOM neither on nor off fails every test, naming it, and the worker claims nothing', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  const d = await drawsServer();
+  try {
+    const { tests } = await playwright(['seeded.spec.ts'], { ...keployEnv(a.url), KEPLOY_SEED_RANDOM: 'yes', DRAWS_BASE: d.url });
+    assert.equal(Object.keys(tests).length, 4);
+    for (const [k, t] of Object.entries(tests)) {
+      assert.equal(t.status, 'failed', k);
+      assert.match(t.error, /keploy: KEPLOY_SEED_RANDOM="yes" is neither on nor off; set it to off to give the test browser its own random numbers, or unset it to seed them per test/, k);
+    }
+    assert.deepEqual(calls(j), []);
+  } finally { await d.close(); await a.close(); }
+});
