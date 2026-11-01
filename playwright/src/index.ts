@@ -30,7 +30,12 @@
 //     text;
 //   - given(name, value) tells keploy a value the test made itself (a
 //     session token it signs, a name it stamps with the time), which keploy
-//     follows where the test's calls carry it.
+//     follows where the test's calls carry it;
+//   - each test's browser draws its random numbers (Math.random,
+//     crypto.getRandomValues, crypto.randomUUID) from a stream seeded by the
+//     test's keploy ID, so a replay's pages make the calls the recording's
+//     made; KEPLOY_SEED_RANDOM=off or the option keploySeedRandom: false
+//     turns it off.
 // Any answer of the agent this package cannot trust fails the test.
 
 import { test as base, expect } from '@playwright/test';
@@ -41,6 +46,7 @@ import { ACTION_FAIL, ACTION_SKIP, AgentClient, KeployError } from './agent';
 import type { Outcome, TestRef } from './agent';
 import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
+import { SEEDED_LINE, initScript, seedOf, seedingFromEnv, testID } from './random';
 import { Inflight } from './settle';
 
 export { expect, KeployError };
@@ -58,15 +64,34 @@ let client: AgentClient | null = null;
 let projectDir = '';
 // The test this worker has open, if any.
 let open: TestRef | null = null;
+// Whether the environment leaves the test browser's seeding on.
+let seedingOn = false;
+// Whether this worker has said that it seeds the test browser.
+let saidSeeded = false;
+
+/** @keploy/playwright's options, for a config's or a file's use. */
+export type KeployOptions = {
+  /**
+   * Seed the test browser's random numbers per test under keploy (default
+   * true), so a replay's pages draw what the recording's drew. Set false,
+   * for record and replay alike, to give a project, a file or a test the
+   * browser's own random numbers; KEPLOY_SEED_RANDOM=off does so for the
+   * whole run.
+   */
+  keploySeedRandom: boolean;
+};
 
 type WorkerFixtures = { keployWorker: void };
-type TestFixtures = { keployTest: void };
+type TestFixtures = { keployTest: void } & KeployOptions;
 
 export const test = base.extend<TestFixtures, WorkerFixtures>({
   keployWorker: [async ({}, use, workerInfo) => {
     const j = joining();
     if (j.mode === 'refused') throw new KeployError(j.refusal);
     if (j.mode === 'active') {
+      const s = seedingFromEnv(process.env);
+      if (s.mode === 'refused') throw new KeployError(s.refusal);
+      seedingOn = s.mode === 'seeded';
       const c = new AgentClient(j.url, j.token);
       projectDir = realpath(j.project || process.cwd());
       // The claim's key names the slice of the recording this worker's
@@ -82,10 +107,21 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
     await use();
   }, { scope: 'worker', auto: true }],
 
-  context: async ({ context }, use) => {
+  keploySeedRandom: [true, { option: true }],
+
+  context: async ({ context, keploySeedRandom }, use, testInfo) => {
     if (client === null) {
       await use(context);
       return;
+    }
+    if (seedingOn && keploySeedRandom) {
+      // Before the test's first page: an init script runs in every frame's
+      // document before its own scripts.
+      await context.addInitScript({ content: initScript(seedOf(testID(testRef(testInfo)))) });
+      if (!saidSeeded) {
+        saidSeeded = true;
+        process.stdout.write(`${SEEDED_LINE}\n`);
+      }
     }
     const inflight = new Inflight(context);
     await use(context);
