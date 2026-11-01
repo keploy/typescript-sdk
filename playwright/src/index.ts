@@ -17,7 +17,9 @@
 // keploy, with one worker (keploy's first release runs one test process at a
 // time):
 //   - each worker claims keploy's run before its first test (POST
-//     /agent/instance), under its Playwright project's name;
+//     /agent/instance), under its Playwright project's name, with keploy's
+//     project folder (KEPLOY_MOCK_PROJECT), which its test files are named
+//     from; the current folder only when keploy names none;
 //   - each test begins (POST /agent/scope/begin) before its beforeEach hooks;
 //     a test keploy set aside is skipped with keploy's reason;
 //   - before the test's browser context closes, the test waits until none of
@@ -69,8 +71,11 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       projectDir = realpath(j.project || process.cwd());
       // The claim's key names the slice of the recording this worker's
       // calls outside tests are answered from: one per Playwright project,
-      // whose workers run its tests one after another.
-      await c.claim(workerInfo.project.name || '.', realpath(process.cwd()));
+      // whose workers run its tests one after another. Its folder is the
+      // one the tests are named from, keploy's project folder: keploy files
+      // the tests under it, and a folder above the project (a runner
+      // started from the repository's root) holds no test of the project.
+      await c.claim(workerInfo.project.name || '.', projectDir);
       process.env[ENV_TEST_PID] = String(process.pid);
       client = c;
     }
