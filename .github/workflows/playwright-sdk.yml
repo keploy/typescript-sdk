@@ -1,0 +1,38 @@
+name: "@keploy/playwright"
+
+on:
+  pull_request:
+    paths:
+      - "playwright/**"
+      - ".github/workflows/playwright-sdk.yml"
+  push:
+    branches: [main]
+    paths:
+      - "playwright/**"
+      - ".github/workflows/playwright-sdk.yml"
+  # playwright-publish.yml runs these rows on a release tag before it publishes.
+  workflow_call:
+
+jobs:
+  rows:
+    name: build and rows (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      # One leg failing must not cancel the others: each Node version's
+      # result is its own.
+      fail-fast: false
+      matrix:
+        # Playwright 1.62 (the rows' version) needs Node.js 20 or later, and
+        # so does this package (package.json engines).
+        node: [20, 22, 24]
+    defaults:
+      run:
+        working-directory: playwright
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm test
