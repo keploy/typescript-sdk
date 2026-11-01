@@ -1,7 +1,8 @@
 import { defineConfig } from '@playwright/test';
+import type { KeployOptions } from '../../dist';
 
 // The rows' Playwright project: one worker, no retries, as keploy runs a suite.
-export default defineConfig({
+export default defineConfig<KeployOptions>({
   testDir: '.',
   workers: 1,
   retries: 0,
@@ -9,6 +10,6 @@ export default defineConfig({
   reporter: [['json'], ['./steps-reporter.cjs']],
   outputDir: process.env.PW_OUTPUT_DIR || 'test-results',
   // PW_UNNAMED=1: one unnamed project, Playwright's default when a config
-  // lists none.
-  projects: [{ name: process.env.PW_UNNAMED ? '' : 'p1', use: { headless: true } }],
+  // lists none. PW_NOSEED=1: the project turns seeding off.
+  projects: [{ name: process.env.PW_UNNAMED ? '' : 'p1', use: { headless: true, ...(process.env.PW_NOSEED ? { keploySeedRandom: false } : {}) } }],
 });

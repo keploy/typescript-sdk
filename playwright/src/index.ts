@@ -21,13 +21,15 @@
 //     project folder (KEPLOY_MOCK_PROJECT), which its test files are named
 //     from; the current folder only when keploy names none;
 //   - each test begins (POST /agent/scope/begin) before its beforeEach hooks,
-//     saying whether its browser's random numbers are seeded (random:
-//     "seeded" or "own"); a test keploy set aside is skipped with keploy's
-//     reason;
+//     saying whether its browser's random numbers are to be seeded (random:
+//     "seeded" or "own") and, when they are, with a seed drawn afresh; keploy
+//     answers the seed to draw from; a test keploy set aside is skipped with
+//     keploy's reason;
 //   - before the test's browser context closes, the test waits until none of
 //     its pages' calls is in flight (settle), so its calls end inside it;
 //   - the test ends (POST /agent/scope/end) after its last teardown, with
-//     its outcome; when keploy saw a call with no recorded answer, or a
+//     its outcome and what its context's pages drew their random numbers
+//     from (random); when keploy saw a call with no recorded answer, or a
 //     recorded call the test no longer made, the test fails with keploy's
 //     text;
 //   - given(name, value) tells keploy a value the test made itself (a
@@ -35,7 +37,8 @@
 //     follows where the test's calls carry it;
 //   - each test's browser draws its random numbers (Math.random,
 //     crypto.getRandomValues, crypto.randomUUID) from a stream seeded by the
-//     test's keploy ID, so a replay's pages make the calls the recording's
+//     seed keploy answered its begin with, which a record keeps with the
+//     test's recording, so a replay's pages make the calls the recording's
 //     made; KEPLOY_SEED_RANDOM=off or the option keploySeedRandom: false
 //     turns it off.
 // Any answer of the agent this package cannot trust fails the test.
@@ -45,10 +48,10 @@ import type { TestInfo } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ACTION_FAIL, ACTION_SKIP, AgentClient, KeployError, RANDOM_OWN, RANDOM_SEEDED } from './agent';
-import type { Outcome, TestRef } from './agent';
+import type { Outcome, Random, TestRef } from './agent';
 import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
-import { SEEDED_LINE, initScript, seedOf, seedingFromEnv, testID } from './random';
+import { SEEDED_LINE, freshSeed, initScript, seedingFromEnv, unseededLine } from './random';
 import { Inflight } from './settle';
 
 export { expect, KeployError };
@@ -70,6 +73,33 @@ let open: TestRef | null = null;
 let seedingOn = false;
 // Whether this worker has said that it seeds the test browser.
 let saidSeeded = false;
+
+// How a test's browser draws its random numbers.
+type PageSeeding = {
+  // Whether its begin asked keploy for a seed (seeding on, not opted out).
+  asked: boolean;
+  // The seed keploy answered; '' for none.
+  seed: string;
+  // Whether a page opened in its context fixture's context, seeded
+  // (seededPage) or not (ownPage).
+  seededPage: boolean;
+  ownPage: boolean;
+};
+// The open test's, while one is open.
+let seeding: PageSeeding | null = null;
+
+/**
+ * What the test's end says its browser drew from: seeded when a page of its
+ * context was seeded, own when a page of its context was not, or when it
+ * asked for a seed and keploy answered none. Nothing for a test whose pages
+ * did not come from the context fixture (an API-only test, a context it made
+ * itself): keploy keeps what its begin said.
+ */
+function randomDone(s: PageSeeding): Random | undefined {
+  if (s.seededPage) return RANDOM_SEEDED;
+  if (s.ownPage || (s.asked && s.seed === '')) return RANDOM_OWN;
+  return undefined;
+}
 
 /** @keploy/playwright's options, for a config's or a file's use. */
 export type KeployOptions = {
@@ -111,20 +141,29 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
 
   keploySeedRandom: [true, { option: true }],
 
-  context: async ({ context, keploySeedRandom }, use, testInfo) => {
-    if (client === null) {
+  // After keployTest: its begin's answer holds the seed.
+  context: async ({ context, keployTest }, use) => {
+    void keployTest;
+    const s = seeding;
+    if (client === null || s === null || open === null) {
       await use(context);
       return;
     }
-    if (seedingOn && keploySeedRandom) {
+    if (s.seed !== '') {
       // Before the test's first page: an init script runs in every frame's
       // document before its own scripts.
-      await context.addInitScript({ content: initScript(seedOf(testID(testRef(testInfo)))) });
+      await context.addInitScript({ content: initScript(s.seed) });
       if (!saidSeeded) {
         saidSeeded = true;
         process.stdout.write(`${SEEDED_LINE}\n`);
       }
+    } else if (s.asked) {
+      process.stdout.write(`${unseededLine(open.name)}\n`);
     }
+    const seeded = s.seed !== '';
+    const opened = (): void => { if (seeded) s.seededPage = true; else s.ownPage = true; };
+    if (context.pages().length > 0) opened();
+    context.on('page', opened);
     const inflight = new Inflight(context);
     await use(context);
     if (inflight.size > 0) {
@@ -142,16 +181,20 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       return;
     }
     const ref = testRef(testInfo);
-    const b = await c.begin(ref, seedingOn && keploySeedRandom ? RANDOM_SEEDED : RANDOM_OWN);
+    const asked = seedingOn && keploySeedRandom;
+    const b = await c.begin(ref, asked ? RANDOM_SEEDED : RANDOM_OWN, asked ? freshSeed() : undefined);
     if (b.action === ACTION_SKIP) {
       // The framework's own skip, with keploy's reason; no end follows.
       testInfo.skip(true, keployText(b.reason, 'keploy: set aside (the agent gave no reason)'));
       return;
     }
+    const s: PageSeeding = { asked, seed: asked ? b.seed ?? '' : '', seededPage: false, ownPage: false };
     open = ref;
+    seeding = s;
     await use();
     open = null;
-    const e = await c.end(ref, outcomeOf(testInfo));
+    seeding = null;
+    const e = await c.end(ref, outcomeOf(testInfo), randomDone(s));
     if (e.action === ACTION_FAIL) throw new KeployError(keployText(e.reason, 'keploy: the keploy agent failed this test and gave no reason'));
   }, { auto: true }],
 });
