@@ -44,13 +44,19 @@ async function fakeAgent(j, answer = () => undefined) {
 }
 
 // The settle rows' page server: /slow and the end of /slowdoc are answered
-// only once /release is called.
+// only once /release is called. /seen is answered once /slow has arrived, so
+// a spec that cancels its call waits for the call to reach the server first:
+// the browser's request event comes before that, and a call cancelled before
+// it reaches the server proves nothing.
 async function pageServer(j) {
   let release = null;
   const released = new Promise((r) => { release = r; });
+  let saw = null;
+  const seen = new Promise((r) => { saw = r; });
   const srv = http.createServer((req, res) => {
     if (req.url === '/page') { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><body>page</body></html>'); return; }
     if (req.url === '/release') { release(); res.end('ok'); return; }
+    if (req.url === '/seen') { void seen.then(() => res.end('ok')); return; }
     // A service worker that calls /slow as it installs.
     if (req.url === '/sw.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end("self.addEventListener('install', () => { void fetch('/slow'); });"); return; }
     if (req.url === '/nocontent') { res.writeHead(204); res.end(); return; }
@@ -68,6 +74,7 @@ async function pageServer(j) {
     }
     if (req.url === '/slow') {
       j.add({ page: 'slow sent' });
+      saw();
       res.on('close', () => { if (!res.writableFinished) j.add({ page: 'slow cut' }); });
       res.on('finish', () => j.add({ page: 'slow answered' }));
       void released.then(() => res.end('slow'));

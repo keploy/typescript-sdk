@@ -1,6 +1,10 @@
 import { test } from '../../dist';
 
 const base = process.env.SLOW_BASE ?? '';
+// Resolves once the page server has received /slow. A spec that cancels its
+// call waits for this first: the browser's request event comes before the
+// call reaches the server, and the row asserts that it did.
+const reached = (): Promise<string> => fetch(`${base}/seen`).then((r) => r.text());
 test.afterEach(async () => {
   if (!process.env.NO_RELEASE) await fetch(`${base}/release`);
 });
@@ -15,6 +19,7 @@ test('a call its page cancelled by loading another document', async ({ page }) =
   const sent = page.waitForRequest(/\/slow$/);
   await page.evaluate(() => { void fetch('/slow'); });
   await sent;
+  await reached();
   await page.goto(`${base}/page?next`);
 });
 test('a call in flight across a route change inside the page', async ({ page }) => {
@@ -84,6 +89,7 @@ test('a call its removed cross-site frame had in flight', async ({ page }) => {
   const detached = page.waitForEvent('framedetached');
   await child.evaluate(() => { void fetch('/slow'); });
   await sent;
+  await reached();
   await page.evaluate(() => { document.getElementById('child')?.remove(); });
   await detached;
 });
@@ -94,6 +100,7 @@ test('a call its closed page had in flight', async ({ page, context }) => {
   const sent = other.waitForRequest(/\/slow$/);
   await other.evaluate(() => { void fetch('/slow'); });
   await sent;
+  await reached();
   await other.close();
 });
 test('a document still loading after its frame commits', async ({ page }) => {
@@ -125,6 +132,7 @@ test('a call in flight when the test closes its own context', async ({ page, con
   const sent = page.waitForRequest(/\/slow$/);
   await page.evaluate(() => { void fetch('/slow'); });
   await sent;
+  await reached();
   await context.close();
 });
 test('a call its service worker has in flight', async ({ page, context }) => {
@@ -142,6 +150,7 @@ test('a service worker call in flight when the test closes its own context', asy
   const sent = context.waitForEvent('request', (r) => r.url().endsWith('/slow'));
   await page.evaluate(() => { void navigator.serviceWorker.register('/sw.js'); });
   await sent;
+  await reached();
   await context.close();
 });
 test('a service worker call in flight while another page of the test closes', async ({ page, context }) => {
