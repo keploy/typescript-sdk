@@ -86,14 +86,15 @@ async function pageServer(j) {
   return { url: `http://127.0.0.1:${srv.address().port}`, close: () => new Promise((r) => { srv.closeAllConnections(); srv.close(r); }) };
 }
 
-// Runs one Playwright run of the fixture specs; returns each test's result.
-async function playwright(specs, env) {
+// Runs one Playwright run of the fixture specs, from the folder cwd;
+// returns each test's result.
+async function playwright(specs, env, cwd = PKG) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kpw-'));
   const report = path.join(tmp, 'report.json');
   const stepsFile = path.join(tmp, 'steps.jsonl');
   const childEnv = { ...process.env, PLAYWRIGHT_JSON_OUTPUT_NAME: report, PW_OUTPUT_DIR: path.join(tmp, 'out'), MARKER_DIR: tmp, STEPS_FILE: stepsFile, ...env };
   for (const k of Object.keys(childEnv)) if (childEnv[k] === undefined) delete childEnv[k];
-  const child = spawn(process.execPath, [CLI, 'test', '-c', CONFIG, ...specs], { cwd: PKG, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [CLI, 'test', '-c', CONFIG, ...specs], { cwd, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   child.stdout.on('data', (d) => { out += d; });
   child.stderr.on('data', (d) => { out += d; });
@@ -293,6 +294,42 @@ test('an unnamed Playwright project claims with the key ".", and its tests name 
     const r = { name: 'judged red', file: 'test/fixtures/agent-says.spec.ts' };
     assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
       ['/agent/instance', { key: '.', dir: fs.realpathSync(PKG) }],
+      ['/agent/scope/begin', { ...r, canSkip: true }],
+      ['/agent/scope/end', { ...r, outcome: 'passed' }],
+    ]);
+  } finally { await a.close(); }
+});
+
+// A suite whose runner starts above its keploy project (mock.command
+// "cd .. && npx playwright test", keploy.yml in tests/) names its test files
+// from the project, so it claims with the project's folder too: keploy
+// files the tests under the folder of the claim, and the folder above the
+// project holds none of the project's tests.
+test('a worker started above keploy\'s project claims with the project\'s folder, which its test files are named from', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  try {
+    const { tests, out } = await playwright(['agent-says.spec.ts', '-g', 'judged red'], keployEnv(a.url), path.dirname(PKG));
+    assert.equal(tests['judged red'].status, 'passed', out);
+    const r = ref('agent-says.spec.ts', 'judged red');
+    assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
+      ['/agent/instance', { key: 'p1', dir: fs.realpathSync(PKG) }],
+      ['/agent/scope/begin', { ...r, canSkip: true }],
+      ['/agent/scope/end', { ...r, outcome: 'passed' }],
+    ]);
+  } finally { await a.close(); }
+});
+
+test('when keploy names no project, a worker claims with the current folder, which its test files are named from', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  try {
+    const cwd = path.dirname(PKG);
+    const { tests, out } = await playwright(['agent-says.spec.ts', '-g', 'judged red'], { ...keployEnv(a.url), KEPLOY_MOCK_PROJECT: undefined }, cwd);
+    assert.equal(tests['judged red'].status, 'passed', out);
+    const r = { name: 'judged red', file: `${path.basename(PKG)}/test/fixtures/agent-says.spec.ts`, project: 'p1' };
+    assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
+      ['/agent/instance', { key: 'p1', dir: fs.realpathSync(cwd) }],
       ['/agent/scope/begin', { ...r, canSkip: true }],
       ['/agent/scope/end', { ...r, outcome: 'passed' }],
     ]);
