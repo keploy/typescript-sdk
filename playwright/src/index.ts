@@ -20,8 +20,10 @@
 //     /agent/instance), under its Playwright project's name, with keploy's
 //     project folder (KEPLOY_MOCK_PROJECT), which its test files are named
 //     from; the current folder only when keploy names none;
-//   - each test begins (POST /agent/scope/begin) before its beforeEach hooks;
-//     a test keploy set aside is skipped with keploy's reason;
+//   - each test begins (POST /agent/scope/begin) before its beforeEach hooks,
+//     saying whether its browser's random numbers are seeded (random:
+//     "seeded" or "own"); a test keploy set aside is skipped with keploy's
+//     reason;
 //   - before the test's browser context closes, the test waits until none of
 //     its pages' calls is in flight (settle), so its calls end inside it;
 //   - the test ends (POST /agent/scope/end) after its last teardown, with
@@ -42,7 +44,7 @@ import { test as base, expect } from '@playwright/test';
 import type { TestInfo } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ACTION_FAIL, ACTION_SKIP, AgentClient, KeployError } from './agent';
+import { ACTION_FAIL, ACTION_SKIP, AgentClient, KeployError, RANDOM_OWN, RANDOM_SEEDED } from './agent';
 import type { Outcome, TestRef } from './agent';
 import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
@@ -132,7 +134,7 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
     }
   },
 
-  keployTest: [async ({ keployWorker }, use, testInfo) => {
+  keployTest: [async ({ keployWorker, keploySeedRandom }, use, testInfo) => {
     void keployWorker;
     const c = client;
     if (c === null) {
@@ -140,7 +142,7 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       return;
     }
     const ref = testRef(testInfo);
-    const b = await c.begin(ref);
+    const b = await c.begin(ref, seedingOn && keploySeedRandom ? RANDOM_SEEDED : RANDOM_OWN);
     if (b.action === ACTION_SKIP) {
       // The framework's own skip, with keploy's reason; no end follows.
       testInfo.skip(true, keployText(b.reason, 'keploy: set aside (the agent gave no reason)'));

@@ -51,6 +51,8 @@ With `KEPLOY_MOCK_AGENT` unset or `off`, nothing changes. Only `keploy mock reco
   - for the whole run: `KEPLOY_SEED_RANDOM=off` (or `0`, `false`; unset, `on`, `1` or `true` seed; any other value fails every test, naming the variable);
   - for a project, a file or a test: the option `keploySeedRandom: false`, in the config's or a project's `use`, or with `test.use({ keploySeedRandom: false })`. Its type is `KeployOptions`: `defineConfig<KeployOptions>({ use: { keploySeedRandom: false } })`.
 
+  Each test's begin tells keploy which it was (`random: "seeded"` or `"own"`). When a test's calls still vary between runs, keploy can then say whether its browser was seeded, so the variation comes from the server or a worker, or whether seeding it is left to try.
+
 Any answer from the agent that this package cannot trust fails the test. That covers an agent it cannot reach, an error answer, an unreadable answer, and an answer that does not speak scope protocol v1. Nothing is retried.
 
 ## Limits of this version

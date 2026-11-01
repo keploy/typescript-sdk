@@ -45,10 +45,14 @@ test('the client sends the token and the protocol body, and takes v1 answers', a
     const c = new AgentClient(a.url + '/', 'tok');
     await c.claim('chromium', '/proj');
     await c.begin({ name: 'g › a', file: 'tests/a.spec.ts', project: 'chromium' });
+    await c.begin({ name: 'g › b', file: 'tests/a.spec.ts' }, 'seeded');
+    await c.begin({ name: 'g › c', file: 'tests/a.spec.ts' }, 'own');
     await c.end({ name: 'g › a', file: 'tests/a.spec.ts', project: 'chromium' }, 'passed');
     assert.deepEqual(a.calls.map((x) => [x.path, x.auth, x.body]), [
       ['/agent/instance', 'Bearer tok', { key: 'chromium', dir: '/proj' }],
       ['/agent/scope/begin', 'Bearer tok', { name: 'g › a', file: 'tests/a.spec.ts', project: 'chromium', canSkip: true }],
+      ['/agent/scope/begin', 'Bearer tok', { name: 'g › b', file: 'tests/a.spec.ts', canSkip: true, random: 'seeded' }],
+      ['/agent/scope/begin', 'Bearer tok', { name: 'g › c', file: 'tests/a.spec.ts', canSkip: true, random: 'own' }],
       ['/agent/scope/end', 'Bearer tok', { name: 'g › a', file: 'tests/a.spec.ts', project: 'chromium', outcome: 'passed' }],
     ]);
   } finally { await a.close(); }
