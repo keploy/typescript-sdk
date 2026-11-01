@@ -127,7 +127,7 @@ test('an answer over 1 MiB is an error', async () => {
   } finally { await a.close(); }
 });
 
-test('given: the variable comes back; an agent without the route names the route and the keploy change that adds it, and keploy\'s own 404 shows keploy\'s reason', async () => {
+test('given: the variable comes back; an agent without the route names the route, the keploy version that serves it and the switch, and keploy\'s own 404 shows keploy\'s reason', async () => {
   let a = await agent(() => ({ body: { v: 1, status: 'ok', variable: 'given:session' } }));
   try {
     assert.equal(await new AgentClient(a.url, '').given('session', 'tok-1', 'tests/a.spec.ts:3'), 'given:session');
@@ -135,7 +135,7 @@ test('given: the variable comes back; an agent without the route names the route
   } finally { await a.close(); }
   a = await agent(() => ({ status: 404, body: '404 page not found' }));
   try {
-    await rejects(new AgentClient(a.url, '').given('session', 'tok-1', ''), /^keploy: this keploy agent answered 404 to POST \/agent\/scope\/given, so it cannot take the given value session: given needs a keploy that serves that route, which keploy\/keploy#5016 adds$/);
+    await rejects(new AgentClient(a.url, '').given('session', 'tok-1', ''), /^keploy: this keploy agent answered 404 to POST \/agent\/scope\/given, so it cannot take the given value session: given needs keploy v3\.6\.192 or later \(keploy\/keploy#5016\), or an enterprise release on keploy v3\.6\.192 or later, run with KEPLOY_PROVEN=1; an older keploy, or one run without KEPLOY_PROVEN=1, answers 404 there$/);
   } finally { await a.close(); }
   // A 404 that carries keploy's own refusal is keploy's answer, not a missing route.
   a = await agent(() => ({ status: 404, body: { error: 'no_test', message: 'no test named a is open', remedy: 'begin it first' } }));

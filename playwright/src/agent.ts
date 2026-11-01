@@ -150,10 +150,12 @@ export class AgentClient {
       a = await this.post(PATH_GIVEN, source ? { name, value, source } : { name, value });
     } catch (err) {
       if (err instanceof KeployError && err.status === 404 && err.code === '') {
-        // The route came after the rest of the protocol: begin, end and
+        // The route came after the rest of the protocol (keploy v3.6.192),
+        // and keploy serves it only under KEPLOY_PROVEN=1: begin, end and
         // settle work on an agent without it.
         throw new KeployError(`keploy: this keploy agent answered 404 to POST ${PATH_GIVEN}, so it cannot take the given value ${name}: ` +
-          'given needs a keploy that serves that route, which keploy/keploy#5016 adds', 404);
+          'given needs keploy v3.6.192 or later (keploy/keploy#5016), or an enterprise release on keploy v3.6.192 or later, ' +
+          'run with KEPLOY_PROVEN=1; an older keploy, or one run without KEPLOY_PROVEN=1, answers 404 there', 404);
       }
       throw err;
     }
