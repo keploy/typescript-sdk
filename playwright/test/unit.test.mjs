@@ -1,5 +1,5 @@
-// Unit rows: the agent client, the join rule and the wire names, against a
-// fake agent. No browser.
+// Unit rows: the agent client, the join rule, the wire names and settle's
+// wake, against a fake agent and a fake browser context. No browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -8,6 +8,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { AgentClient, KeployError } from '../dist/agent.js';
 import { decide } from '../dist/join.js';
+import { Inflight } from '../dist/settle.js';
+import { EventEmitter } from 'node:events';
 import { testRef, outcomeOf, sourceOf, keployText } from '../dist/index.js';
 
 // One fake agent answering every call with answer(path, body).
@@ -151,6 +153,61 @@ test('given: the variable comes back; an agent without the route names the route
     try {
       await rejects(new AgentClient(a.url, '').given('session', 'tok-1', ''), /answered the given value session with/);
     } finally { await a.close(); }
+  }
+});
+
+// A fake browser context for Inflight: the events it listens to, and nothing
+// else. A page's frame names its page; a service worker's request has none.
+function fakeContext() {
+  const ctx = new EventEmitter();
+  ctx.pages = () => [];
+  return ctx;
+}
+function fakeRequest(page) {
+  const frame = page ? { page: () => page } : null;
+  return {
+    frame: () => { if (!frame) throw new Error('no frame'); return frame; },
+    isNavigationRequest: () => false,
+    method: () => 'GET',
+    url: () => 'http://localhost/slow',
+  };
+}
+// Lets every resolved promise's callbacks run; no timer.
+async function ticks() {
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+}
+
+test('settle: a cancel that comes while settle already waits wakes it (its page closes; then, for a service worker\'s call, the test closes its context)', async () => {
+  for (const worker of [false, true]) {
+    const c = worker ? 'a page\'s call and a service worker\'s' : 'a page\'s call';
+    const ctx = fakeContext();
+    const inflight = new Inflight(ctx);
+    const page = new EventEmitter();
+    const other = new EventEmitter();
+    ctx.emit('page', page);
+    ctx.emit('page', other);
+    ctx.emit('request', fakeRequest(page));
+    if (worker) ctx.emit('request', fakeRequest(null));
+    let settled = false;
+    inflight.settled().then(() => { settled = true; });
+    await ticks();
+    assert.equal(settled, false, `${c}: settle waits for the call in flight`);
+    // Another page closing cancels none of these calls.
+    other.emit('close');
+    await ticks();
+    assert.equal(settled, false, `${c}: another page's close leaves settle waiting`);
+    page.emit('close');
+    await ticks();
+    if (worker) {
+      // The page's close drops only its own call: the service worker's has
+      // no page, so settle still waits, until the test closes its context.
+      assert.equal(inflight.size, 1, `${c}: the page's close leaves the service worker's call`);
+      assert.equal(settled, false, `${c}: settle still waits for the service worker's call`);
+      ctx.emit('close');
+      await ticks();
+    }
+    assert.equal(inflight.size, 0, `${c}: no call is left in flight`);
+    assert.equal(settled, true, `${c}: settle is woken`);
   }
 });
 
