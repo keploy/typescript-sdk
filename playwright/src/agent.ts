@@ -135,9 +135,14 @@ export class AgentClient {
     return a;
   }
 
-  /** Asks the agent to open a test. */
-  async begin(test: TestRef): Promise<Answer> {
-    const a = await this.post(PATH_BEGIN, { ...test, canSkip: true });
+  /**
+   * Asks the agent to open a test. random says how the test's browser drew
+   * its random numbers, so a finding that the test's calls vary between
+   * runs can say whether seeding them is left to try; an agent from before
+   * it ignores the field.
+   */
+  async begin(test: TestRef, random?: Random): Promise<Answer> {
+    const a = await this.post(PATH_BEGIN, { ...test, canSkip: true, ...(random ? { random } : {}) });
     if (a.status !== 'ok') {
       throw new KeployError(`keploy: the keploy agent answered the begin of ${test.name} with status ${JSON.stringify(a.status ?? '')}`);
     }
@@ -191,6 +196,15 @@ export interface TestRef {
 }
 
 export type Outcome = 'passed' | 'failed' | 'skipped';
+
+/**
+ * How a test's browser drew its random numbers, sent with its begin:
+ * RANDOM_SEEDED from the stream seeded per test, RANDOM_OWN the browser's
+ * own (KEPLOY_SEED_RANDOM=off, or the keploySeedRandom option false).
+ */
+export type Random = typeof RANDOM_SEEDED | typeof RANDOM_OWN;
+export const RANDOM_SEEDED = 'seeded';
+export const RANDOM_OWN = 'own';
 
 async function readBounded(res: Response): Promise<string> {
   if (!res.body) return '';

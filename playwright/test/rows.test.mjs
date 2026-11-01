@@ -153,11 +153,11 @@ test('a worker claims the run, each test begins before its beforeEach and ends w
     // b fails, so Playwright runs c and d in a new worker, which claims again.
     assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
       ['/agent/instance', claim],
-      ['/agent/scope/begin', { ...r('a'), canSkip: true }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('a'), outcome: 'passed' }],
-      ['/agent/scope/begin', { ...r('b'), canSkip: true }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('b'), outcome: 'failed' }],
+      ['/agent/scope/begin', { ...r('a'), canSkip: true, random: 'seeded' }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('a'), outcome: 'passed' }],
+      ['/agent/scope/begin', { ...r('b'), canSkip: true, random: 'seeded' }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('b'), outcome: 'failed' }],
       ['/agent/instance', claim],
-      ['/agent/scope/begin', { ...r('c'), canSkip: true }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('c'), outcome: 'skipped' }],
-      ['/agent/scope/begin', { ...r('d'), canSkip: true }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('d'), outcome: 'passed' }],
+      ['/agent/scope/begin', { ...r('c'), canSkip: true, random: 'seeded' }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('c'), outcome: 'skipped' }],
+      ['/agent/scope/begin', { ...r('d'), canSkip: true, random: 'seeded' }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('d'), outcome: 'passed' }],
     ]);
     assert.ok(calls(j).every((c) => c.auth === 'Bearer tok'));
     // KEPLOY_TEST_PID named the claiming worker (test a checks it).
@@ -297,7 +297,7 @@ test('an unnamed Playwright project claims with the key ".", and its tests name 
     const r = { name: 'judged red', file: 'test/fixtures/agent-says.spec.ts' };
     assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
       ['/agent/instance', { key: '.', dir: fs.realpathSync(PKG) }],
-      ['/agent/scope/begin', { ...r, canSkip: true }],
+      ['/agent/scope/begin', { ...r, canSkip: true, random: 'seeded' }],
       ['/agent/scope/end', { ...r, outcome: 'passed' }],
     ]);
   } finally { await a.close(); }
@@ -317,7 +317,7 @@ test('a worker started above keploy\'s project claims with the project\'s folder
     const r = ref('agent-says.spec.ts', 'judged red');
     assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
       ['/agent/instance', { key: 'p1', dir: fs.realpathSync(PKG) }],
-      ['/agent/scope/begin', { ...r, canSkip: true }],
+      ['/agent/scope/begin', { ...r, canSkip: true, random: 'seeded' }],
       ['/agent/scope/end', { ...r, outcome: 'passed' }],
     ]);
   } finally { await a.close(); }
@@ -333,7 +333,7 @@ test('when keploy names no project, a worker claims with the current folder, whi
     const r = { name: 'judged red', file: `${path.basename(PKG)}/test/fixtures/agent-says.spec.ts`, project: 'p1' };
     assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
       ['/agent/instance', { key: 'p1', dir: fs.realpathSync(cwd) }],
-      ['/agent/scope/begin', { ...r, canSkip: true }],
+      ['/agent/scope/begin', { ...r, canSkip: true, random: 'seeded' }],
       ['/agent/scope/end', { ...r, outcome: 'passed' }],
     ]);
   } finally { await a.close(); }
@@ -445,6 +445,10 @@ test('seeded: each test\'s pages draw the same numbers every run, from their fir
     // Said once a worker: one worker, one line.
     assert.equal(r1.said, 1);
     assert.equal(r2.said, 1);
+    // Each begin says how the test's browser drew: the option's test, its own.
+    const begins = calls(j).filter((c) => c.path === '/agent/scope/begin').map((c) => [c.body.name, c.body.random]);
+    const run = [['one', 'seeded'], ['two', 'seeded'], ['again', 'seeded'], ['own › three', 'own']];
+    assert.deepEqual(begins, [...run, ...run]);
   } finally { await a.close(); }
 });
 
@@ -459,6 +463,9 @@ test('KEPLOY_SEED_RANDOM=off, or no keploy: the test browser draws its own rando
       assert.notDeepEqual(r1.drew.one.top, expected('one', '/draws'));
       assert.equal(r1.said + r2.said, 0);
     }
+    // Under keploy with it off, each begin says the browser drew its own.
+    const begins = calls(j).filter((c) => c.path === '/agent/scope/begin').map((c) => c.body.random);
+    assert.deepEqual(begins, Array(8).fill('own'));
   } finally { await a.close(); }
 });
 
