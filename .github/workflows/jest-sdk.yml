@@ -31,8 +31,8 @@ jobs:
       run:
         working-directory: jest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: ${{ matrix.node }}
       - run: npm ci
@@ -60,8 +60,8 @@ jobs:
       KEPLOY_VERSION: "3.8.106"
       KEPLOY_SHA256: "2c4c9bcf0a703b65827d1cee5ca88fe9d7856844a08cac368b42b83345fef3ce"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
       - name: install keploy ${{ env.KEPLOY_VERSION }}
