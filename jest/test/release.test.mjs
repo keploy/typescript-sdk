@@ -21,9 +21,11 @@ test('a tag naming another version is refused, and names the right tag', () => {
   assert.match(refusal('', '1.2.3'), /the tag \(none\) does not name/);
 });
 
-test('a prerelease version is refused, even with its own tag', () => {
+test('a version that is not x.y.z is refused, even with its own tag', () => {
   assert.match(refusal('jest-v1.2.3-rc.1', '1.2.3-rc.1'), /is not a release \(x\.y\.z\)/);
   assert.match(refusal('jest-v1.2', '1.2'), /is not a release/);
+  // Four numbers end in x.y.z and start with it: the check matches the whole version.
+  assert.match(refusal('jest-v1.2.3.4', '1.2.3.4'), /is not a release/);
 });
 
 test('the script reads package.json and exits 1 with the reason on a wrong tag', () => {
