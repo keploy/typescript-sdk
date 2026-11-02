@@ -88,3 +88,19 @@ test('the wrapped environment sees every event first, before any call of keploy\
   // The sandbox's environment names the claimer.
   assert.equal(e.global.process.env.KEPLOY_TEST_PID, String(process.pid));
 });
+
+test('the process decides once whether it joins: a test file set up after the claim is judged, whatever KEPLOY_MOCK_AGENT says by then', async () => {
+  await env();
+  const was = process.env.KEPLOY_MOCK_AGENT;
+  process.env.KEPLOY_MOCK_AGENT = 'off';
+  try {
+    const e = await env();
+    calls.length = 0;
+    const t = { name: 'later file', parent: root, errors: [] };
+    await e.handleTestEvent({ name: 'test_start', test: t }, {});
+    await e.handleTestEvent({ name: 'test_done', test: t }, {});
+    assert.deepEqual(calls, ['begin a.test.js::later file', 'end a.test.js::later file passed']);
+  } finally {
+    process.env.KEPLOY_MOCK_AGENT = was;
+  }
+});

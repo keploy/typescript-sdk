@@ -173,6 +173,9 @@ test('a title begun twice in one file (a repeated title, a jest.retryTimes retry
   assert.deepEqual(r.journal, [`claim . ${FIX}`, 'begin refusals/repeat.test.js::same', 'body same 1', 'end refusals/repeat.test.js::same passed']);
   const results = JSON.stringify(r.tests);
   assert.match(results, /same in refusals\/repeat\.test\.js would begin a second time/);
+  // The refusal is the test's one failure: Jest starting the refused test
+  // adds no second one.
+  assert.doesNotMatch(results, /did not begin/);
   r = await jest(['refusals/retry.test.js']);
   assert.deepEqual(r.journal, [`claim . ${FIX}`, 'begin refusals/retry.test.js::flaky', 'body flaky 1', 'end refusals/retry.test.js::flaky failed']);
   assert.equal(r.tests.flaky.status, 'failed');
@@ -186,12 +189,26 @@ test('a test.concurrent test fails before its body ever runs; the file\'s other 
   assert.match(r.tests['at once'].failure, /at once is a test\.concurrent test, and keploy judges one test at a time/);
   assert.equal(r.tests['group nested at once'].status, 'failed');
   assert.match(r.tests['group nested at once'].failure, /group › nested at once is a test\.concurrent test/);
+  assert.doesNotMatch(JSON.stringify(r.tests), /did not begin/);
   assert.equal(r.tests.serial.status, 'passed');
 });
 
-test('a process a test starts with the sandbox\'s environment is named a member (KEPLOY_TEST_PID is the claimer)', async () => {
+test('a process a test starts is named a member (KEPLOY_TEST_PID is the claimer), with the sandbox\'s environment or Node\'s default one', async () => {
   const r = await jest(['child/spawn.test.js']);
   assert.ok(r.journal.includes(`child marker ${r.pid}`), `${r.journal.join('\n')}\njest pid ${r.pid}`);
+  assert.ok(r.journal.includes(`default child marker ${r.pid}`), `${r.journal.join('\n')}\njest pid ${r.pid}`);
+});
+
+test('the project folder is named by its real path: through a symlink to it, the claim and the file names are the same', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kj-link-'));
+  const link = path.join(tmp, 'project');
+  fs.symlinkSync(FIX, link);
+  try {
+    const r = await jest(['second.test.js'], { env: { KEPLOY_MOCK_PROJECT: link } });
+    assert.deepEqual(r.journal, [`claim . ${FIX}`, 'begin second.test.js::second file', 'body second file', 'end second.test.js::second file passed']);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('a Jest that runs inside the process KEPLOY_TEST_PID names is a member: inert', async () => {
