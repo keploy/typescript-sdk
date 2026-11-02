@@ -79,6 +79,9 @@ Any answer from the agent that this package cannot trust fails the test. That co
   - `crypto.subtle`'s keys.
 
   A page whose own draws vary in number before another script draws (a draw per timer tick) still shifts that function's stream within the document.
+
+  In the test process one stream serves all of a test's `Math.random` draws, its own and those of the code it calls (Playwright's multipart form boundary among them), so a draw made a varying number of times (a retry loop's jitter) shifts the draws after it.
+- The test process's clock is not seeded: it is keploy's run clock. A replayed test begins at its recorded begin, or later where the replay is behind, and its clock runs from there. So a value the test makes from the time during the test (`Date.now()`, `new Date()`) is off its recording's by as much as the replay ran faster or slower to that read, while a mocked dependency answers with the recording's: a name stamped with the time in milliseconds differs, and a test that checks it against the dependency's answer fails or is set aside.
 - Seeding cannot place these documents, so they draw the browser's own numbers and are named (above):
   - a popup opened with noopener, as a link with `target="_blank"` opens one, or opened other than by `window.open` (a form, or a link with `rel="opener"`, that targets a new window);
   - a popup at another origin than its opener's page, or whose opener's page has loaded another document by the time the popup's begins;
