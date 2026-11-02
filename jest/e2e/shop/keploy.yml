@@ -1,0 +1,5 @@
+# The keploy project of the e2e suite: the set's name and CI's test command,
+# one Jest process (-i): keploy judges one test at a time.
+mock:
+  name: shop
+  command: npx jest -i

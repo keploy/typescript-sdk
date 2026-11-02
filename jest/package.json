@@ -1,0 +1,36 @@
+{
+  "name": "@keploy/jest",
+  "version": "0.1.0",
+  "description": "Join a Jest suite to keploy's Universal Mocker: keploy mock record and keploy mock replay judge each test.",
+  "license": "Apache-2.0",
+  "author": "Keploy <dev@keploy.io>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/keploy/typescript-sdk.git",
+    "directory": "jest"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "peerDependencies": {
+    "jest": ">=29.0.0",
+    "jest-environment-node": ">=29.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.1",
+    "jest": "30.5.2",
+    "jest-environment-node": "30.5.2",
+    "jest-jasmine2": "30.5.2",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

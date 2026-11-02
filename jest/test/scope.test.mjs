@@ -1,0 +1,124 @@
+// Rows for the paths a real Jest run reaches only when Jest's rule for which
+// tests run differs from the one this package reads at test_start, and for
+// the environment it wraps: jest-circus's events, driven by hand against a
+// fake agent. One agent for the file: the claim is once per process.
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+
+// The testRunner Jest gives an environment by default: jest-circus's runner,
+// resolved to its file.
+const CIRCUS = createRequire(import.meta.url).resolve('jest-circus/runner');
+
+const calls = [];
+const srv = http.createServer((req, res) => {
+  let body = '';
+  req.on('data', (d) => { body += d; });
+  req.on('end', () => {
+    const b = JSON.parse(body);
+    calls.push(req.url === '/agent/instance' ? `claim ${b.key}` : `${req.url.slice('/agent/scope/'.length)} ${b.file}::${b.name}${b.outcome ? ` ${b.outcome}` : ''}`);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(req.url === '/agent/instance' ? { v: 1, instance: 'run', timeFile: '' } : { v: 1, status: 'ok' }));
+  });
+});
+const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'kj-scope-')));
+const file = path.join(dir, 'a.test.js');
+let withKeploy;
+
+before(async () => {
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  fs.writeFileSync(file, '');
+  process.env.KEPLOY_MOCK_AGENT = `http://127.0.0.1:${srv.address().port}`;
+  process.env.KEPLOY_MOCK_PROJECT = dir;
+  delete process.env.KEPLOY_TEST_PID;
+  ({ withKeploy } = await import('../dist/index.js'));
+});
+after(async () => {
+  srv.closeAllConnections();
+  await new Promise((r) => srv.close(r));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// The environment it wraps, which records the events it saw.
+class Base {
+  constructor() { this.global = { process: { env: {} } }; this.seen = []; }
+  async setup() {}
+  async teardown() {}
+  handleTestEvent(event) { this.seen.push(`${event.name} ${calls.length}`); }
+}
+
+async function env() {
+  const E = withKeploy(Base);
+  const e = new E({ globalConfig: {}, projectConfig: { testRunner: CIRCUS } }, { testPath: file });
+  await e.setup();
+  return e;
+}
+const root = { name: 'ROOT_DESCRIBE_BLOCK' };
+
+test('a test begun that Jest then skips ends as skipped', async () => {
+  const e = await env();
+  calls.length = 0;
+  const t = { name: 'drifts', parent: root, errors: [] };
+  await e.handleTestEvent({ name: 'test_start', test: t }, {});
+  await e.handleTestEvent({ name: 'test_skip', test: t }, {});
+  await e.handleTestEvent({ name: 'test_done', test: t }, {});
+  assert.deepEqual(calls, ['begin a.test.js::drifts', 'end a.test.js::drifts skipped']);
+  assert.deepEqual(t.errors, []);
+});
+
+test('a test Jest starts that was not begun fails, and does not end', async () => {
+  const e = await env();
+  calls.length = 0;
+  const t = { name: 'unbegun', parent: root, mode: 'skip', errors: [] };
+  await e.handleTestEvent({ name: 'test_start', test: t }, {});
+  await e.handleTestEvent({ name: 'test_started', test: t }, {});
+  await e.handleTestEvent({ name: 'test_done', test: t }, {});
+  assert.deepEqual(calls, []);
+  assert.equal(t.errors.length, 1);
+  assert.match(t.errors[0].message, /^keploy: Jest runs unbegun, which @keploy\/jest did not begin/);
+});
+
+test('the wrapped environment sees every event first, before any call of keploy\'s for it', async () => {
+  const e = await env();
+  calls.length = 0;
+  const t = { name: 'wrapped', parent: root, errors: [] };
+  await e.handleTestEvent({ name: 'test_start', test: t }, {});
+  await e.handleTestEvent({ name: 'test_done', test: t }, {});
+  assert.deepEqual(e.seen, ['test_start 0', 'test_done 1']);
+  assert.deepEqual(calls, ['begin a.test.js::wrapped', 'end a.test.js::wrapped passed']);
+  // The sandbox's environment names the claimer.
+  assert.equal(e.global.process.env.KEPLOY_TEST_PID, String(process.pid));
+});
+
+test('the process decides once whether it joins: a test file set up after the claim is judged, whatever KEPLOY_MOCK_AGENT says by then', async () => {
+  await env();
+  const was = process.env.KEPLOY_MOCK_AGENT;
+  process.env.KEPLOY_MOCK_AGENT = 'off';
+  try {
+    const e = await env();
+    calls.length = 0;
+    const t = { name: 'later file', parent: root, errors: [] };
+    await e.handleTestEvent({ name: 'test_start', test: t }, {});
+    await e.handleTestEvent({ name: 'test_done', test: t }, {});
+    assert.deepEqual(calls, ['begin a.test.js::later file', 'end a.test.js::later file passed']);
+  } finally {
+    process.env.KEPLOY_MOCK_AGENT = was;
+  }
+});
+
+test('a project whose testRunner is not jest-circus fails its test file\'s setup, naming the setting and the fix', async () => {
+  const E = withKeploy(Base);
+  for (const testRunner of [undefined, path.join(dir, 'runner.js')]) {
+    const e = new E({ globalConfig: {}, projectConfig: { testRunner } }, { testPath: file });
+    await assert.rejects(e.setup(), (err) => {
+      assert.match(err.message, new RegExp(`^keploy: this Jest project's testRunner is ${String(testRunner).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}, and @keploy/jest needs jest-circus, Jest's default test runner: ` +
+        'only jest-circus tells a test environment where each test starts and ends, so under another runner every test would run unjudged\\. ' +
+        'Remove testRunner from the Jest config, or set it to jest-circus/runner$'));
+      return true;
+    });
+  }
+});

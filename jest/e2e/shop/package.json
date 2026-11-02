@@ -1,0 +1,12 @@
+{
+  "name": "keploy-jest-e2e-shop",
+  "private": true,
+  "description": "The e2e lane's suite: a small service whose Jest tests call a provider, run under keploy mock record and replay.",
+  "scripts": {
+    "test": "jest -i"
+  },
+  "devDependencies": {
+    "jest": "30.5.2",
+    "jest-environment-node": "30.5.2"
+  }
+}

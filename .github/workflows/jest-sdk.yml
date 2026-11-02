@@ -1,0 +1,72 @@
+name: "@keploy/jest"
+
+on:
+  pull_request:
+    paths:
+      - "jest/**"
+      - ".github/workflows/jest-sdk.yml"
+  push:
+    branches: [main]
+    paths:
+      - "jest/**"
+      - ".github/workflows/jest-sdk.yml"
+  # jest-publish.yml runs these rows and the e2e lane on a release tag before
+  # it publishes.
+  workflow_call:
+
+jobs:
+  rows:
+    name: build and rows (Node ${{ matrix.node }}, Jest ${{ matrix.jest }})
+    runs-on: ubuntu-latest
+    strategy:
+      # One leg failing must not cancel the others: each leg's result is its
+      # own.
+      fail-fast: false
+      matrix:
+        # This package needs Node.js 20 or later (package.json engines), and
+        # supports jest-circus from Jest 29 (peerDependencies).
+        node: [20, 22, 24]
+        jest: [29, 30]
+    defaults:
+      run:
+        working-directory: jest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+      # The lockfile pins Jest 30; the Jest 29 leg swaps in the oldest Jest
+      # this package supports (jest-jasmine2 too: a row runs under it, the
+      # runner this package refuses).
+      - if: matrix.jest == 29
+        run: npm install --no-save jest@29 jest-environment-node@29 jest-jasmine2@29
+      - run: npm test
+
+  e2e:
+    # e2e/lane.sh: this commit's package, packed and installed into a small
+    # Jest suite, run under keploy mock record with its provider up, then
+    # keploy mock replay with the provider stopped; a test whose call has no
+    # recorded answer, and one that no longer makes its recorded call, fail
+    # with keploy's text; a quarantined test is skipped with keploy's reason.
+    name: e2e (keploy mock record and replay)
+    runs-on: ubuntu-latest
+    # The lane takes a few minutes, npm installs included: a run past 15 is a hang.
+    timeout-minutes: 15
+    env:
+      # keploy's enterprise build, which judges each test under
+      # KEPLOY_PROVEN=1. Pinned, and checked against its digest, so that a
+      # new keploy release cannot change this job's result unseen.
+      KEPLOY_VERSION: "3.8.106"
+      KEPLOY_SHA256: "2c4c9bcf0a703b65827d1cee5ca88fe9d7856844a08cac368b42b83345fef3ce"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+      - name: install keploy ${{ env.KEPLOY_VERSION }}
+        run: |
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/keploy" "https://keploy.io/ent/dl/$KEPLOY_VERSION/enterprise_linux_amd64"
+          echo "$KEPLOY_SHA256  $RUNNER_TEMP/keploy" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/keploy"
+      - run: KEPLOY_BIN="$RUNNER_TEMP/keploy" bash jest/e2e/lane.sh
