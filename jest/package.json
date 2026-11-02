@@ -27,6 +27,7 @@
     "@types/node": "22.19.1",
     "jest": "30.5.2",
     "jest-environment-node": "30.5.2",
+    "jest-jasmine2": "30.5.2",
     "typescript": "5.9.3"
   },
   "engines": {

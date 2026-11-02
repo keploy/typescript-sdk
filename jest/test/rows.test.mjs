@@ -74,6 +74,9 @@ async function jest(files, { answer, env = {}, agent = true, args = [] } = {}) {
 
 const statuses = (r) => Object.fromEntries(Object.entries(r.tests).map(([k, v]) => [k, v.status]));
 
+// The number of times re matches s.
+const count = (s, re) => (s.match(new RegExp(re.source, 'g')) ?? []).length;
+
 test('without keploy the environment is Node\'s: no call, every test as Jest runs it', async () => {
   const r = await jest(['basic.test.js'], { agent: false });
   assert.deepEqual(r.journal, [
@@ -187,10 +190,46 @@ test('a test.concurrent test fails before its body ever runs; the file\'s other 
   assert.deepEqual(r.journal, [`claim . ${FIX}`, 'begin refusals/concurrent.test.js::serial', 'body serial', 'end refusals/concurrent.test.js::serial passed']);
   assert.equal(r.tests['at once'].status, 'failed');
   assert.match(r.tests['at once'].failure, /at once is a test\.concurrent test, and keploy judges one test at a time/);
+  assert.equal(count(r.tests['at once'].failure, /at once is a test\.concurrent test/), 1, r.tests['at once'].failure);
   assert.equal(r.tests['group nested at once'].status, 'failed');
   assert.match(r.tests['group nested at once'].failure, /group › nested at once is a test\.concurrent test/);
   assert.doesNotMatch(JSON.stringify(r.tests), /did not begin/);
   assert.equal(r.tests.serial.status, 'passed');
+});
+
+test('a refused test stays refused on every retry of jest.retryTimes: each run fails with the reason, none runs unjudged', async () => {
+  // Begun once, failed, then retried twice: both retries are refused, and
+  // neither runs its body.
+  let r = await jest(['refusals/retry-twice.test.js']);
+  assert.deepEqual(r.journal, [`claim . ${FIX}`, 'begin refusals/retry-twice.test.js::flaky', 'body flaky 1', 'end refusals/retry-twice.test.js::flaky failed']);
+  assert.equal(r.tests.flaky.status, 'failed');
+  assert.match(r.tests.flaky.failure, /flaky in refusals\/retry-twice\.test\.js would begin a second time.*jest\.retryTimes/);
+  // A begin the agent failed: the retry fails with the same reason, and runs
+  // no beforeEach and no body.
+  r = await jest(['refusals/retry-unbegun.test.js'], { answer: (c) => (c.path === '/agent/scope/begin' ? { status: 500, body: 'boom' } : undefined) });
+  assert.deepEqual(r.journal, [`claim . ${FIX}`, 'begin refusals/retry-unbegun.test.js::steady']);
+  assert.equal(r.tests.steady.status, 'failed');
+  assert.match(r.tests.steady.failure, /the keploy agent answered 500 Internal Server Error to \/agent\/scope\/begin: "boom"/);
+  // A repeated title: the second test's retry is refused too.
+  r = await jest(['refusals/repeat-retry.test.js']);
+  assert.deepEqual(r.journal, [`claim . ${FIX}`, 'begin refusals/repeat-retry.test.js::same', 'body same 1', 'end refusals/repeat-retry.test.js::same passed']);
+  assert.match(JSON.stringify(r.tests), /same in refusals\/repeat-retry\.test\.js would begin a second time/);
+  // A test.concurrent test fails before it runs, so Jest does not retry it;
+  // its refusal is its one failure.
+  r = await jest(['refusals/concurrent-retry.test.js']);
+  assert.deepEqual(r.journal, [`claim . ${FIX}`]);
+  assert.equal(r.tests['at once'].status, 'failed');
+  assert.equal(count(r.tests['at once'].failure, /at once is a test\.concurrent test/), 1, r.tests['at once'].failure);
+});
+
+test('a project whose testRunner is not jest-circus (jest-jasmine2) fails every test file, claims nothing and begins nothing', async () => {
+  const r = await jest(['basic.test.js', 'second.test.js'], { args: ['--testRunner', 'jest-jasmine2'] });
+  assert.deepEqual(r.journal, []);
+  assert.deepEqual(r.tests, {});
+  for (const f of ['basic.test.js', 'second.test.js']) {
+    assert.equal(r.suites[f].status, 'failed');
+    assert.match(r.suites[f].message, /keploy: this Jest project's testRunner is \S*jest-jasmine2\S*, and @keploy\/jest needs jest-circus, Jest's default test runner: .* Remove testRunner from the Jest config, or set it to jest-circus\/runner/);
+  }
 });
 
 test('a process a test starts is named a member (KEPLOY_TEST_PID is the claimer), with the sandbox\'s environment or Node\'s default one', async () => {

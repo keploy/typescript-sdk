@@ -8,6 +8,11 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { createRequire } from 'node:module';
+
+// The testRunner Jest gives an environment by default: jest-circus's runner,
+// resolved to its file.
+const CIRCUS = createRequire(import.meta.url).resolve('jest-circus/runner');
 
 const calls = [];
 const srv = http.createServer((req, res) => {
@@ -48,7 +53,7 @@ class Base {
 
 async function env() {
   const E = withKeploy(Base);
-  const e = new E({ globalConfig: {}, projectConfig: {} }, { testPath: file });
+  const e = new E({ globalConfig: {}, projectConfig: { testRunner: CIRCUS } }, { testPath: file });
   await e.setup();
   return e;
 }
@@ -102,5 +107,18 @@ test('the process decides once whether it joins: a test file set up after the cl
     assert.deepEqual(calls, ['begin a.test.js::later file', 'end a.test.js::later file passed']);
   } finally {
     process.env.KEPLOY_MOCK_AGENT = was;
+  }
+});
+
+test('a project whose testRunner is not jest-circus fails its test file\'s setup, naming the setting and the fix', async () => {
+  const E = withKeploy(Base);
+  for (const testRunner of [undefined, path.join(dir, 'runner.js')]) {
+    const e = new E({ globalConfig: {}, projectConfig: { testRunner } }, { testPath: file });
+    await assert.rejects(e.setup(), (err) => {
+      assert.match(err.message, new RegExp(`^keploy: this Jest project's testRunner is ${String(testRunner).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}, and @keploy/jest needs jest-circus, Jest's default test runner: ` +
+        'only jest-circus tells a test environment where each test starts and ends, so under another runner every test would run unjudged\\. ' +
+        'Remove testRunner from the Jest config, or set it to jest-circus/runner$'));
+      return true;
+    });
   }
 });

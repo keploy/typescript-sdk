@@ -6,11 +6,16 @@ This package tells keploy where each test begins and ends. Through it, keploy sk
 
 ## Use
 
+The package is not published yet: build and pack it from this folder, then install the tarball it writes:
+
 ```sh
-npm install --save-dev @keploy/jest
+# in this folder
+npm ci && npm run build && npm pack          # writes keploy-jest-0.1.0.tgz
+# in your project
+npm install --save-dev /path/to/keploy-jest-0.1.0.tgz
 ```
 
-It needs Node.js 20 or later and Jest 29 or later (jest-circus, Jest's default runner). Its rows run on Node.js 20, 22 and 24, each with Jest 29 and Jest 30. Its e2e lane (`e2e/lane.sh`) installs the packed package into a small suite and runs it under keploy 3.8.106: recorded with its provider up, replayed with the provider stopped.
+It needs Node.js 20 or later and Jest 29 or later with jest-circus, Jest's default test runner. Under another `testRunner` (`jest-jasmine2`), every test file fails with keploy's reason before any test runs: only jest-circus tells a test environment where each test starts and ends. Its rows run on Node.js 20, 22 and 24, each with Jest 29 and Jest 30. Its e2e lane (`e2e/lane.sh`) installs the packed package into a small suite and runs it under keploy 3.8.106: recorded with its provider up, replayed with the provider stopped.
 
 It is a Jest test environment. Set it in the Jest config:
 
@@ -66,11 +71,11 @@ Any answer from the agent that this package cannot trust fails the test it belon
 
 ## Refused: tests keploy cannot judge one at a time
 
-Each of these fails with its reason, and none runs unjudged:
+Each of these fails with its reason, on every run `jest.retryTimes` gives it, and none runs unjudged:
 
 - A `test.concurrent` test. Its body would start before its turn, outside its window. It fails before its body runs; declare it with `test`.
 - A title that repeats in one test file. keploy names a test by its file and titles, so a second test with the same name fails without beginning.
-- A retry of `jest.retryTimes`. The retry would begin the same test a second time; it fails instead. keploy sets aside a test it cannot prove, with its reason, and fails a test whose calls changed, and a retry changes neither.
+- A retry of `jest.retryTimes`. The retry would begin the same test a second time; it fails instead. A test refused for any reason (one of these, or an agent's answer this package cannot trust at its begin) stays refused on each retry: jest-circus clears a test's errors before it retries it, so the refusal is given again, and the retry runs no hook and no body. keploy sets aside a test it cannot prove, with its reason, and fails a test whose calls changed, and a retry changes neither.
 
 ## Limits of this version
 

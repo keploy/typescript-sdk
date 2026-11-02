@@ -34,9 +34,10 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: npm ci
       # The lockfile pins Jest 30; the Jest 29 leg swaps in the oldest Jest
-      # this package supports.
+      # this package supports (jest-jasmine2 too: a row runs under it, the
+      # runner this package refuses).
       - if: matrix.jest == 29
-        run: npm install --no-save jest@29 jest-environment-node@29
+        run: npm install --no-save jest@29 jest-environment-node@29 jest-jasmine2@29
       - run: npm test
 
   e2e:

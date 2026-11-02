@@ -37,7 +37,10 @@
 // Any answer of the agent this package cannot trust fails the test it
 // belongs to (or, for the claim, the test file). A test keploy cannot judge
 // one at a time (test.concurrent, a title repeated in one file, a retry of
-// jest.retryTimes) fails with the reason; none runs unjudged.
+// jest.retryTimes) fails with the reason, on every run jest.retryTimes gives
+// it; none runs unjudged. A project whose testRunner is not jest-circus
+// fails every test file: only jest-circus tells an environment where each
+// test starts and ends.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -155,15 +158,21 @@ class FileScope {
   private readonly open = new Map<CircusTest, TestRef>();
   // Every test ID begun in this file: a second begin of one fails.
   private readonly begun = new Set<string>();
-  // Tests this package failed before they ran: never begun.
-  private readonly refused = new Set<CircusTest>();
+  // Tests this package failed before they ran, with the refusal: never
+  // begun, on any run of the test.
+  private readonly refused = new Map<CircusTest, unknown>();
 
-  constructor(private readonly testPath: string, private readonly project: string) {}
+  constructor(private readonly testPath: string, private readonly project: string, private readonly testRunner: unknown) {}
 
   async setup(sandboxEnv: NodeJS.ProcessEnv | undefined): Promise<void> {
     const j = joining();
     if (j.mode === 'inert') return;
     if (j.mode === 'refused') throw new KeployError(j.refusal);
+    if (!isCircus(this.testRunner)) {
+      throw new KeployError(`keploy: this Jest project's testRunner is ${String(this.testRunner)}, and @keploy/jest needs jest-circus, ` +
+        'Jest\'s default test runner: only jest-circus tells a test environment where each test starts and ends, so under another runner ' +
+        'every test would run unjudged. Remove testRunner from the Jest config, or set it to jest-circus/runner');
+    }
     const c = await claim(j, this.project || '.');
     this.client = c.client;
     this.dir = c.dir;
@@ -187,7 +196,16 @@ class FileScope {
         }
         return;
       case 'test_start': {
-        if (!t || this.refused.has(t) || !jestRuns(t, state)) return;
+        if (!t) return;
+        if (this.refused.has(t)) {
+          // jest-circus empties a test's errors before each retry of
+          // jest.retryTimes: the refusal goes back, so the retry fails with
+          // it too and runs no hook and no body.
+          const err = this.refused.get(t);
+          if (!t.errors.includes(err)) t.errors.push(err);
+          return;
+        }
+        if (!jestRuns(t, state)) return;
         const ref = testRef(t, this.testPath, this.dir, this.project);
         const id = `${ref.project ?? ''}::${ref.file}::${ref.name}`;
         if (this.begun.has(id)) {
@@ -249,8 +267,34 @@ class FileScope {
   }
 
   private refuse(t: CircusTest, err: unknown): void {
-    this.refused.add(t);
+    this.refused.set(t, err);
     t.errors.push(err);
+  }
+}
+
+/**
+ * Whether a Jest project's testRunner (Jest resolves it to a file's path)
+ * is jest-circus's: the nearest package.json with a name, from the file up,
+ * names jest-circus.
+ */
+export function isCircus(testRunner: unknown): boolean {
+  if (typeof testRunner !== 'string') return false;
+  for (let d = path.dirname(path.resolve(testRunner)); ; d = path.dirname(d)) {
+    const name = packageName(path.join(d, 'package.json'));
+    if (name !== undefined) return name === 'jest-circus';
+    if (path.dirname(d) === d) return false;
+  }
+}
+
+// The name a package.json gives, or undefined when there is none there (no
+// file, no readable JSON, no name: a folder's package.json that only sets
+// "type" names no package).
+function packageName(file: string): string | undefined {
+  try {
+    const name = JSON.parse(fs.readFileSync(file, 'utf8')).name;
+    return typeof name === 'string' ? name : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -286,7 +330,7 @@ export function withKeploy<T extends EnvironmentClass>(Base: T): T {
       super(...args);
       // Jest 29 and later construct an environment with ({globalConfig,
       // projectConfig}, {console, docblockPragmas, testPath}).
-      this.keploy = new FileScope(String(args[1]?.testPath ?? ''), displayNameOf(args[0]?.projectConfig));
+      this.keploy = new FileScope(String(args[1]?.testPath ?? ''), displayNameOf(args[0]?.projectConfig), args[0]?.projectConfig?.testRunner);
     }
 
     async setup(): Promise<void> {

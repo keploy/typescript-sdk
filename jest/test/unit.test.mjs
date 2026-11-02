@@ -8,7 +8,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { AgentClient, KeployError } from '../dist/agent.js';
 import { decide } from '../dist/join.js';
-import { jestRuns, testRef, outcomeOf, keployText } from '../dist/index.js';
+import { createRequire } from 'node:module';
+import { jestRuns, testRef, outcomeOf, keployText, isCircus } from '../dist/index.js';
 
 
 // One fake agent answering every call with answer(path, body).
@@ -207,4 +208,30 @@ test('testRef: the file relative to the project, the titles joined by › from t
 test('outcomeOf: failed when the test holds an error, else passed', () => {
   assert.equal(outcomeOf({ errors: [] }), 'passed');
   assert.equal(outcomeOf({ errors: [new Error('x')] }), 'failed');
+});
+
+test('isCircus: the testRunner\'s nearest named package.json names jest-circus', () => {
+  // Jest's default, resolved as Jest resolves it.
+  assert.equal(isCircus(createRequire(import.meta.url).resolve('jest-circus/runner')), true);
+  assert.equal(isCircus(undefined), false);
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'kj-circus-')));
+  const put = (f, text) => { fs.mkdirSync(path.dirname(path.join(dir, f)), { recursive: true }); fs.writeFileSync(path.join(dir, f), text); };
+  try {
+    // A package.json with no name (one that sets "type"), or none that
+    // reads, names no package: the walk goes on up.
+    put('circus/package.json', '{"name":"jest-circus"}');
+    put('circus/build/package.json', '{"type":"commonjs"}');
+    put('circus/build/runner.js', '');
+    put('circus/lib/package.json', '{');
+    put('circus/lib/runner.js', '');
+    assert.equal(isCircus(path.join(dir, 'circus/build/runner.js')), true);
+    assert.equal(isCircus(path.join(dir, 'circus/lib/runner.js')), true);
+    // A folder named jest-circus inside another package is that package.
+    put('other/package.json', '{"name":"my-runner"}');
+    put('other/jest-circus/runner.js', '');
+    assert.equal(isCircus(path.join(dir, 'other/jest-circus/runner.js')), false);
+    // No package.json up to the root.
+    put('none/runner.js', '');
+    assert.equal(isCircus(path.join(dir, 'none/runner.js')), false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
