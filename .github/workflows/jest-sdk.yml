@@ -10,6 +10,9 @@ on:
     paths:
       - "jest/**"
       - ".github/workflows/jest-sdk.yml"
+  # jest-publish.yml runs these rows and the e2e lane on a release tag before
+  # it publishes.
+  workflow_call:
 
 jobs:
   rows:

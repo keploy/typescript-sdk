@@ -82,3 +82,10 @@ Each of these fails with its reason, on every run `jest.retryTimes` gives it, an
 - Calls that `beforeAll`/`afterAll` hooks make outside every test are answered from the process's claim.
 - A skip's reason reaches the console, not Jest's report: Jest's results have no field for it.
 - A test's begin is decided at Jest's `test_start` event, by Jest's own rule for which tests run (skip, todo, `.only`, `-t`). A Jest whose rule differs would start a test this package did not begin; that test fails with `keploy: Jest runs <titles>, which @keploy/jest did not begin ...` instead of running unjudged.
+
+## Releasing
+
+1. In a pull request, set `"version": "X.Y.Z"` in `jest/package.json`. The pull request's publish dry run checks the package.
+2. Once it is merged, push the tag `jest-vX.Y.Z` on that commit of `main`: `git tag jest-vX.Y.Z <sha> && git push origin jest-vX.Y.Z`. The tag runs the rows and the e2e lane, then publishes to npm (`.github/workflows/jest-publish.yml`) with the repository secret `NPM_TOKEN`, an npm token that may publish to the `@keploy` scope.
+
+Push the tag as a plain git tag. Never create a GitHub release for it: a published GitHub release also starts any workflow of this repository that runs on releases, such as the root `@keploy/sdk` release workflow (keploy/typescript-sdk#117), which would try to publish that package under the tag's name and fail.
