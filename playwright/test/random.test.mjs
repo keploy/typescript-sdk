@@ -94,6 +94,71 @@ test('seatRandom puts the stream in Math.random\'s place and the process\'s own 
   Math.random = own;
 });
 
+test('while seated, a draw made as a stack trace is prepared is the process\'s own and moves no draw of the stream; Error.prepareStackTrace is put back as it was', () => {
+  const E = Error;
+  const before = Object.getOwnPropertyDescriptor(E, 'prepareStackTrace');
+  const realRandom = Math.random;
+  const back = () => {
+    Math.random = realRandom;
+    if (before === undefined) delete E.prepareStackTrace; else Object.defineProperty(E, 'prepareStackTrace', before);
+  };
+  try {
+    // The process's own Math.random, and a formatter set before seating
+    // that draws, as source-map's sort does while it parses a file's map.
+    Math.random = () => 0.5;
+    const inside = [];
+    const fmt = (e, s) => { inside.push(Math.random()); return `F:${s.length}`; };
+    Object.defineProperty(E, 'prepareStackTrace', { value: fmt, writable: true, enumerable: false, configurable: true });
+    const r = processRandom(S1);
+    const unseat = seatRandom(processRandom(S1));
+    try {
+      const a = Math.random();
+      assert.match(new Error('x').stack, /^F:\d+$/);
+      // Read twice, the same function; not enumerable, as it was.
+      const old = E.prepareStackTrace;
+      assert.equal(E.prepareStackTrace, old);
+      assert.equal(Object.getOwnPropertyDescriptor(E, 'prepareStackTrace').enumerable, false);
+      // A formatter set for a moment, as Playwright's location read does,
+      // and one that calls the formatter it found before drawing itself.
+      E.prepareStackTrace = (e, s) => { inside.push(Math.random()); return s; };
+      const o = {};
+      Error.captureStackTrace(o);
+      assert.ok(Array.isArray(o.stack));
+      E.prepareStackTrace = (e, s) => { const t = old(e, s); inside.push(Math.random()); return t; };
+      assert.match(new Error('y').stack, /^F:\d+$/);
+      E.prepareStackTrace = old;
+      const b = Math.random();
+      assert.deepEqual([a, b], [r(), r()]);
+      assert.deepEqual(inside, [0.5, 0.5, 0.5, 0.5]);
+    } finally { unseat(); }
+    // The formatter last set, unwrapped, as its own property was.
+    assert.equal(E.prepareStackTrace, fmt);
+    assert.deepEqual(Object.getOwnPropertyDescriptor(E, 'prepareStackTrace'), { value: fmt, writable: true, enumerable: false, configurable: true });
+    assert.equal(Math.random(), 0.5);
+
+    // No formatter: none while seated, a stack still made, and none after.
+    delete E.prepareStackTrace;
+    const unseat2 = seatRandom(processRandom(S1));
+    try {
+      assert.equal(E.prepareStackTrace, undefined);
+      assert.equal(typeof new Error('z').stack, 'string');
+    } finally { unseat2(); }
+    assert.equal(Object.getOwnPropertyDescriptor(E, 'prepareStackTrace'), undefined);
+    // One set while seated stays set after, as an assignment leaves it.
+    const unseat3 = seatRandom(processRandom(S1));
+    try { E.prepareStackTrace = fmt; } finally { unseat3(); }
+    assert.deepEqual(Object.getOwnPropertyDescriptor(E, 'prepareStackTrace'), { value: fmt, writable: true, enumerable: true, configurable: true });
+
+    // A test that defines the property itself keeps its definition.
+    const mine = (e, s) => s.length;
+    const unseat4 = seatRandom(processRandom(S1));
+    try {
+      Object.defineProperty(E, 'prepareStackTrace', { value: mine, writable: false, enumerable: false, configurable: true });
+    } finally { unseat4(); }
+    assert.deepEqual(Object.getOwnPropertyDescriptor(E, 'prepareStackTrace'), { value: mine, writable: false, enumerable: false, configurable: true });
+  } finally { back(); }
+});
+
 test('a seeded document draws the same numbers for the same seed and path, others for another seed or path', () => {
   const s1 = initScript(S1);
   const a = documentAt(s1, '/p').draws();

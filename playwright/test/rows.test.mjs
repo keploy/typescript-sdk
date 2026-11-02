@@ -761,3 +761,94 @@ test('the test process draws its own Math.random when keploy answers no seed, ea
     }
   } finally { await rec.close(); await none.close(); }
 });
+
+// One run of process-order.spec.ts (spec args after the file, as --grep):
+// what each test drew, each test's status, the lines its tests said, and the
+// seed each begin sent.
+const ORDER = ['first', 'second', 'third'];
+async function orderRun(j, env, args = []) {
+  const from = j.events.length;
+  const { tests, tmp, out } = await playwright(['process-order.spec.ts', ...args], env);
+  const drew = {};
+  for (const n of ORDER) {
+    const f = path.join(tmp, `${n}.json`);
+    drew[n] = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : null;
+  }
+  const status = Object.fromEntries(Object.entries(tests).map(([k, t]) => [k, t.status]));
+  const lines = Object.values(tests).map((t) => t.stdout).join('').split('\n').filter((l) => l.startsWith('keploy:')).sort();
+  const seeds = Object.fromEntries(calls({ events: j.events.slice(from) }).filter((c) => c.path === '/agent/scope/begin').map((c) => [c.body.name, c.body.seed]));
+  return { drew, status, lines, seeds, out };
+}
+
+for (const helper of ['step', 'stack']) {
+  test(`seeded: a test's draws in the test process do not depend on which tests its worker ran before it, when its helper file's source map is parsed in it (${helper === 'step' ? 'test.step' : 'an Error\'s stack'}): replayed alone, after keploy set an earlier test aside, or after its record's first test failed, it draws what its recording drew`, async () => {
+    const j = journal();
+    const rec = await fakeAgent(j);
+    let kept = {};
+    // A replay answers each begin the recording's seed, and sets aside the
+    // tests named in skip, as keploy does a quarantined one.
+    let skip = [];
+    const rep = await fakeAgent(j, (c) => {
+      if (c.path !== '/agent/scope/begin') return undefined;
+      if (skip.includes(c.body.name)) return { body: { v: 1, status: 'ok', action: 'skip', reason: 'flaky/request_changed: the body changed' } };
+      return { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } };
+    });
+    const env = (url, x = {}) => ({ ...keployEnv(url), HELPER: helper, ...x });
+    const same = (p, r, names) => Object.fromEntries(names.map((n) => [n, JSON.stringify(p.drew[n]) === JSON.stringify(r.drew[n]) ? 'same' : 'other']));
+    try {
+      const r = await orderRun(j, env(rec.url));
+      assert.deepEqual(r.status, { first: 'passed', second: 'passed', third: 'passed' }, r.out);
+      // Each test's two draws are its seed's stream's first two: the
+      // first test, which parsed the helper's map, too.
+      for (const n of ORDER) {
+        const next = processRandom(r.seeds[n]);
+        assert.deepEqual(r.drew[n], [next(), next()], n);
+      }
+      // Seeded, with no test opting out: the seeding line once, nothing else.
+      assert.deepEqual(r.lines, [SEEDED_LINE], r.out);
+      kept = r.seeds;
+      const alone = await orderRun(j, env(rep.url), ['--grep', 'third']);
+      assert.deepEqual(alone.status, { third: 'passed' }, alone.out);
+      assert.deepEqual(same(alone, r, ['third']), { third: 'same' });
+      skip = ['first'];
+      const aside = await orderRun(j, env(rep.url));
+      assert.deepEqual(aside.status, { first: 'skipped', second: 'passed', third: 'passed' }, aside.out);
+      assert.deepEqual(same(aside, r, ['second', 'third']), { second: 'same', third: 'same' });
+      skip = [];
+      // A record whose first test fails runs the rest in a new worker; its
+      // replay, where the first passes, runs all three in one.
+      const rf = await orderRun(j, env(rec.url, { FAIL_FIRST: '1' }));
+      assert.deepEqual(rf.status, { first: 'failed', second: 'passed', third: 'passed' }, rf.out);
+      kept = rf.seeds;
+      const pf = await orderRun(j, env(rep.url));
+      assert.deepEqual(pf.status, { first: 'passed', second: 'passed', third: 'passed' }, pf.out);
+      assert.deepEqual(same(pf, rf, ['second', 'third']), { second: 'same', third: 'same' });
+    } finally { await rep.close(); await rec.close(); }
+  });
+}
+
+test('the test process draws its own Math.random when keploy answers no seed and no test opts out: each test says so, and nothing else is said', async () => {
+  const j = journal();
+  const none = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' ? { body: { v: 1, status: 'ok' } } : undefined));
+  try {
+    const r1 = await orderRun(j, { ...keployEnv(none.url), HELPER: 'step' });
+    const r2 = await orderRun(j, { ...keployEnv(none.url), HELPER: 'step' });
+    for (const n of ORDER) assert.notDeepEqual(r2.drew[n], r1.drew[n], n);
+    for (const r of [r1, r2]) assert.deepEqual(r.lines, ORDER.map((n) => unseededLine(n)).sort(), r.out);
+  } finally { await none.close(); }
+});
+
+test('seeded: after a test that throws, and after one that times out, the worker draws its own Math.random again', async () => {
+  const j = journal();
+  const rec = await fakeAgent(j);
+  try {
+    const { tests, tmp, out } = await playwright(['process-ends.spec.ts'], keployEnv(rec.url));
+    assert.deepEqual(Object.fromEntries(Object.entries(tests).map(([k, t]) => [k, t.status])), { throws: 'failed', 'times out': 'timedOut' }, out);
+    for (const n of ['after throws', 'after times out']) {
+      assert.deepEqual(JSON.parse(fs.readFileSync(path.join(tmp, `${n}.json`), 'utf8')), { own: true }, n);
+    }
+    // Both were seeded: each began with a seed.
+    const begins = calls(j).filter((c) => c.path === '/agent/scope/begin').map((c) => c.body);
+    assert.deepEqual(begins.map((b) => [b.name, b.random, /^[0-9a-f]{32}$/.test(b.seed)]), [['throws', 'seeded', true], ['times out', 'seeded', true]]);
+  } finally { await rec.close(); }
+});

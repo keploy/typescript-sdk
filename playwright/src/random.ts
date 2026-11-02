@@ -110,12 +110,63 @@ export function processRandom(seed: string): () => number {
  * Puts draw in Math.random's place in this process until the returned
  * function puts the process's own back. That one puts it back only while
  * Math.random is still draw: a test that put its own stub there keeps it.
+ *
+ * A draw made while a stack trace is prepared is not the test's, so it is
+ * the process's own. Playwright maps each stack frame through its file's
+ * source map (source-map-support's Error.prepareStackTrace, and the one it
+ * sets for a moment to read where test.step or test was called), and
+ * source-map parses a file's map the first time one of its frames is
+ * mapped, sorting it with pivots from Math.random. A worker parses each
+ * file once, in the first test whose stack reaches it (a helper file's
+ * test.step, an expect, an Error's stack read), so those draws would make
+ * a test's numbers depend on which tests its worker ran before it: a replay
+ * of one test alone, or one after keploy set an earlier test aside, would
+ * draw other numbers than its recording. Every stack trace is prepared
+ * through Error.prepareStackTrace, so while seated that property holds the
+ * function last set there wrapped, and reading it gives the wrapper (one
+ * for each function, so two reads are the same); setting a wrapper sets
+ * its function. Putting back gives Error.prepareStackTrace its own
+ * property again, holding the function last set: a test that defined the
+ * property itself keeps its definition.
  */
 export function seatRandom(draw: () => number): () => void {
   const own = Math.random;
-  const seeded = { random(): number { return draw(); } }.random;
+  // How many stack traces are being prepared now, one inside another.
+  let preparing = 0;
+  const seeded = { random(): number { return preparing > 0 ? own() : draw(); } }.random;
+  const E = Error as { prepareStackTrace?: unknown };
+  const was = Object.getOwnPropertyDescriptor(E, 'prepareStackTrace');
+  let set: unknown = E.prepareStackTrace;
+  const wrapperOf = new WeakMap<object, unknown>();
+  const wrapped = new WeakMap<object, unknown>();
+  const get = (): unknown => {
+    if (typeof set !== 'function') return set;
+    let w = wrapperOf.get(set);
+    if (w === undefined) {
+      const f = set;
+      w = { prepareStackTrace(this: unknown, ...args: unknown[]): unknown {
+        preparing++;
+        try {
+          return Reflect.apply(f, this, args);
+        } finally {
+          preparing--;
+        }
+      } }.prepareStackTrace;
+      wrapperOf.set(f, w);
+      wrapped.set(w as object, f);
+    }
+    return w;
+  };
+  const put = (v: unknown): void => { set = typeof v === 'function' && wrapped.has(v) ? wrapped.get(v) : v; };
+  Object.defineProperty(E, 'prepareStackTrace', { get, set: put, enumerable: was?.enumerable ?? true, configurable: true });
   Math.random = seeded;
-  return () => { if (Math.random === seeded) Math.random = own; };
+  return () => {
+    if (Math.random === seeded) Math.random = own;
+    if (Object.getOwnPropertyDescriptor(E, 'prepareStackTrace')?.get !== get) return;
+    if (was === undefined) delete E.prepareStackTrace;
+    else Object.defineProperty(E, 'prepareStackTrace', was);
+    if (E.prepareStackTrace !== set) E.prepareStackTrace = set;
+  };
 }
 
 // A key of the page's session storage: how many documents of each path the
