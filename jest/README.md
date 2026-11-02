@@ -10,7 +10,7 @@ This package tells keploy where each test begins and ends. Through it, keploy sk
 npm install --save-dev @keploy/jest
 ```
 
-It needs Node.js 20 or later and Jest 29 or later (jest-circus, Jest's default runner). Its rows run on Node.js 20, 22 and 24, each with Jest 29 and Jest 30.
+It needs Node.js 20 or later and Jest 29 or later (jest-circus, Jest's default runner). Its rows run on Node.js 20, 22 and 24, each with Jest 29 and Jest 30. Its e2e lane (`e2e/lane.sh`) installs the packed package into a small suite and runs it under keploy 3.8.106: recorded with its provider up, replayed with the provider stopped.
 
 It is a Jest test environment. Set it in the Jest config:
 
@@ -29,12 +29,23 @@ const { withKeploy } = require('@keploy/jest');
 module.exports = withKeploy(require('jest-environment-jsdom').TestEnvironment);
 ```
 
-Run the suite under keploy with `KEPLOY_PROVEN=1` and in one process (`-i`, Jest's `--runInBand`):
+keploy needs the project's `keploy.yml` to name the recording and CI's test command; without `mock.command`, keploy refuses the run with `no keploy project here: set mock.command ...`:
+
+```yaml
+# keploy.yml
+mock:
+  name: shop             # the recording: keploy/shop/
+  command: npx jest -i   # CI's test command
+```
+
+Run the suite under keploy with `KEPLOY_PROVEN=1` and in one process (`-i`, Jest's `--runInBand`). `--local` keeps the recording on disk, in `keploy/<name>/`:
 
 ```sh
-KEPLOY_PROVEN=1 keploy mock record -c "npx jest -i"
-KEPLOY_PROVEN=1 keploy mock replay -c "npx jest -i"
+KEPLOY_PROVEN=1 keploy mock record --local -c "npx jest -i"
+KEPLOY_PROVEN=1 keploy mock replay --local -c "npx jest -i"
 ```
+
+`keploy mock record` runs the command against the real dependencies, then replays it twice to judge each test before it keeps the recording. `keploy mock replay` answers every call from the recording.
 
 `KEPLOY_PROVEN=1` is keploy's switch for its proven model. keploy speaks this package's wire, scope protocol v1 (the claim, begin and end), only under it. Without it, keploy answers the claim with a plain 404, and every test file fails with `keploy: this keploy agent answered 404 to POST /agent/instance, so this Jest process cannot claim keploy's run: ...`, which names the switch.
 
