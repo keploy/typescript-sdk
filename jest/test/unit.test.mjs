@@ -226,6 +226,10 @@ test('isCircus: the testRunner\'s nearest named package.json names jest-circus',
     put('circus/lib/runner.js', '');
     assert.equal(isCircus(path.join(dir, 'circus/build/runner.js')), true);
     assert.equal(isCircus(path.join(dir, 'circus/lib/runner.js')), true);
+    // Nor does a name that is not a string.
+    put('circus/odd/package.json', '{"name":5}');
+    put('circus/odd/runner.js', '');
+    assert.equal(isCircus(path.join(dir, 'circus/odd/runner.js')), true);
     // A folder named jest-circus inside another package is that package.
     put('other/package.json', '{"name":"my-runner"}');
     put('other/jest-circus/runner.js', '');
