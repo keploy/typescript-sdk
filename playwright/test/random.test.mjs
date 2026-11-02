@@ -2,7 +2,7 @@
 // init script run in a Node vm context in place of a page. No browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ENV_SEED_RANDOM, LOADS_KEY, SEEDED_LINE, freshSeed, initScript, seedingFromEnv, unseededLine } from '../dist/random.js';
+import { DOC_KEY, ENV_SEED_RANDOM, LOADS_KEY, PAGE_KEY, SEEDED_LINE, freshSeed, initScript, pageScript, seedingFromEnv, unplacedLine, unseededLine } from '../dist/random.js';
 import { SEED } from '../dist/agent.js';
 import { documentAt } from './draws.mjs';
 
@@ -29,11 +29,14 @@ test('seeding is on unless KEPLOY_SEED_RANDOM turns it off; another value is ref
 test('the lines say what is seeded, what is not, where the seed lives, and how to turn it off or on', () => {
   assert.equal(SEEDED_LINE, 'keploy: the test browser\'s random numbers (Math.random, crypto.getRandomValues, crypto.randomUUID) are seeded per test ' +
     'from a seed keploy keeps with the test\'s recording, so a replay draws the numbers its recording drew; ' +
-    'Web Workers and Service Workers keep the browser\'s own. ' +
+    'Web Workers and Service Workers keep the browser\'s own, and so does a page the app opens that keploy cannot place (each one is named). ' +
     'To turn it off, record and replay with KEPLOY_SEED_RANDOM=off, or set use: { keploySeedRandom: false } in the Playwright config.');
   assert.equal(unseededLine('g › t'), 'keploy: keploy answered the begin of g › t with no seed, so its browser draws its own random numbers: ' +
-    'its recording kept none (it was recorded before keploy kept seeds, or with seeding off), or this keploy predates seeds. ' +
-    'Record the test again with seeding on (the default) to seed it.');
+    'its recording kept none (it was recorded before keploy kept seeds, or with seeding off: record the test again with seeding on, the default, to seed it), ' +
+    'or the test was pulled from a Keploy branch, which keeps no seed yet, or this keploy predates seeds.');
+  assert.equal(unplacedLine('g › t', 'http://h/p'), 'keploy: in g › t, the document at http://h/p drew the browser\'s own random numbers, so its draws may differ at replay: ' +
+    'it is in a page the app opened that keploy cannot place in the test\'s order (a popup opened with noopener, as a link with target=_blank opens one, ' +
+    'or at another origin than its opener\'s page, or after that page moved on; or a frame of another origin in one).');
 });
 
 test('a begin\'s seed is drawn afresh each time: 128 bits of hex, a seed keploy keeps', () => {
@@ -64,6 +67,49 @@ test('a seeded document draws the same numbers for the same seed and path, other
   assert.equal(a.bytes.length, 8);
   // Unseeded draws differ every time.
   assert.notDeepEqual(documentAt('', '/p').draws(), documentAt('', '/p').draws());
+});
+
+test('each page the test opened draws its own numbers at one path, the same ones each run; its place is named in every document after the seeding script', () => {
+  const s = initScript(S1);
+  const first = documentAt(s, '/p', new Map(), 't0').draws();
+  const second = documentAt(s, '/p', new Map(), 't1').draws();
+  // Two tabs of one test, each in a fresh session storage, at one path: a
+  // browser-made tab ID or idempotency key is not sent twice.
+  assert.notEqual(second.uuid, first.uuid);
+  assert.notDeepEqual(second, first);
+  // Each page draws the same numbers each run (record and replay).
+  assert.deepEqual(documentAt(s, '/p', new Map(), 't0').draws(), first);
+  assert.deepEqual(documentAt(s, '/p', new Map(), 't1').draws(), second);
+  // The page's name is read at the first draw, so the page script, which
+  // the browser runs after the context's, still names it; the window shows
+  // neither the name nor the seeding's state to the page's own scripts.
+  const d = documentAt(s, '/p', new Map(), 't1');
+  assert.deepEqual(JSON.parse(d.run(`JSON.stringify([Object.keys(globalThis).filter((k) => k.startsWith('__keploy')), globalThis[${JSON.stringify(PAGE_KEY)}], typeof globalThis[${JSON.stringify(DOC_KEY)}]])`)),
+    [[], 't1', 'object']);
+  assert.match(pageScript('t3'), /"t3"/);
+});
+
+test('a document no page names and no opener places draws the browser\'s own numbers, never another page\'s, and tells the fixture once, at its first draw', () => {
+  const told = [];
+  const s = initScript(S1, '__report');
+  const d = documentAt(s, '/p', new Map(), null, { report: '__report', told });
+  // Nothing is told before a draw, and the report function is taken off the
+  // window as the document begins.
+  assert.deepEqual(told, []);
+  assert.equal(d.run('typeof globalThis.__report'), 'undefined');
+  const a = d.draws();
+  assert.deepEqual(told, ['http://h/p']);
+  const b = d.draws();
+  assert.deepEqual(told, ['http://h/p']);
+  assert.notDeepEqual(b, a);
+  // Not the draws of a page the test opened, at that path or any.
+  assert.notDeepEqual(documentAt(s, '/p', new Map(), null).draws(), documentAt(s, '/p', new Map(), null).draws());
+  assert.notDeepEqual(a, documentAt(s, '/p', new Map(), 't0').draws());
+  assert.match(a.uuid, UUID_V4);
+  assert.equal(a.bytes.length, 8);
+  for (const r of a.random) assert.ok(r >= 0 && r < 1, String(r));
+  // With no function to tell, it still draws its own.
+  assert.notDeepEqual(documentAt(initScript(S1), '/p', new Map(), null).draws(), documentAt(initScript(S1), '/p', new Map(), null).draws());
 });
 
 test('a document loaded again in the same tab draws new numbers, the same ones each run', () => {
