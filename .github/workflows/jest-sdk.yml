@@ -1,0 +1,40 @@
+name: "@keploy/jest"
+
+on:
+  pull_request:
+    paths:
+      - "jest/**"
+      - ".github/workflows/jest-sdk.yml"
+  push:
+    branches: [main]
+    paths:
+      - "jest/**"
+      - ".github/workflows/jest-sdk.yml"
+
+jobs:
+  rows:
+    name: build and rows (Node ${{ matrix.node }}, Jest ${{ matrix.jest }})
+    runs-on: ubuntu-latest
+    strategy:
+      # One leg failing must not cancel the others: each leg's result is its
+      # own.
+      fail-fast: false
+      matrix:
+        # This package needs Node.js 20 or later (package.json engines), and
+        # supports jest-circus from Jest 29 (peerDependencies).
+        node: [20, 22, 24]
+        jest: [29, 30]
+    defaults:
+      run:
+        working-directory: jest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+      # The lockfile pins Jest 30; the Jest 29 leg swaps in the oldest Jest
+      # this package supports.
+      - if: matrix.jest == 29
+        run: npm install --no-save jest@29 jest-environment-node@29
+      - run: npm test
