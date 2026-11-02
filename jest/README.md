@@ -67,7 +67,7 @@ With `KEPLOY_MOCK_AGENT` unset or `off`, nothing changes: the environment is the
 - **Skip.** When keploy has set a test aside, Jest skips it before any of its hooks, and keploy's reason is printed on stderr: `keploy: <reason> [skipped <file> › <titles>]`. Jest shows no reason for a skipped test, so the line is the reason.
 - **End.** The test ends (`POST /agent/scope/end`) after its last `afterEach` hook, with its own outcome. When keploy saw a call with no recorded answer, or a recorded call the test no longer made, the test fails with keploy's text.
 
-Any answer from the agent that this package cannot trust fails the test it belongs to; for the claim, every test file fails. That covers an agent it cannot reach, an error answer, an unreadable answer, and an answer that does not speak scope protocol v1. Nothing is retried. A test whose begin failed runs none of its `beforeEach` hooks and its body, and does not end.
+Any answer from the agent that this package cannot trust fails the test it belongs to; for the claim, every test file fails. That covers an agent it cannot reach, an error answer, an unreadable answer, and an answer that does not speak scope protocol v1. Nothing is retried. A test whose begin failed runs no `beforeEach` hook and no body, and does not end; its `afterEach` hooks still run, outside any test.
 
 ## Refused: tests keploy cannot judge one at a time
 
@@ -75,7 +75,7 @@ Each of these fails with its reason, on every run `jest.retryTimes` gives it, an
 
 - A `test.concurrent` test. Its body would start before its turn, outside its window. It fails before its body runs; declare it with `test`.
 - A title that repeats in one test file. keploy names a test by its file and titles, so a second test with the same name fails without beginning.
-- A retry of `jest.retryTimes`. The retry would begin the same test a second time; it fails instead. A test refused for any reason (one of these, or an agent's answer this package cannot trust at its begin) stays refused on each retry: jest-circus clears a test's errors before it retries it, so the refusal is given again, and the retry runs no hook and no body. keploy sets aside a test it cannot prove, with its reason, and fails a test whose calls changed, and a retry changes neither.
+- A retry of `jest.retryTimes`. The retry would begin the same test a second time; it fails instead. A test refused for any reason (one of these, or an agent's answer this package cannot trust at its begin) stays refused on each retry: jest-circus clears a test's errors before it retries it, so the refusal is given again, and the retry runs no `beforeEach` hook and no body. Its `afterEach` hooks still run on each try, outside any test (jest-circus runs them even for a failed test). keploy sets aside a test it cannot prove, with its reason, and fails a test whose calls changed, and a retry changes neither.
 
 ## Limits of this version
 

@@ -200,7 +200,9 @@ class FileScope {
         if (this.refused.has(t)) {
           // jest-circus empties a test's errors before each retry of
           // jest.retryTimes: the refusal goes back, so the retry fails with
-          // it too and runs no hook and no body.
+          // it too and runs no beforeEach and no body. Its afterEach hooks
+          // still run (jest-circus runs them for a failed test), outside any
+          // test.
           const err = this.refused.get(t);
           if (!t.errors.includes(err)) t.errors.push(err);
           return;

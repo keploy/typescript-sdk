@@ -205,9 +205,10 @@ test('a refused test stays refused on every retry of jest.retryTimes: each run f
   assert.equal(r.tests.flaky.status, 'failed');
   assert.match(r.tests.flaky.failure, /flaky in refusals\/retry-twice\.test\.js would begin a second time.*jest\.retryTimes/);
   // A begin the agent failed: the retry fails with the same reason, and runs
-  // no beforeEach and no body.
+  // no beforeEach and no body. Its afterEach hooks still run on each try,
+  // outside any test: no second begin and no end.
   r = await jest(['refusals/retry-unbegun.test.js'], { answer: (c) => (c.path === '/agent/scope/begin' ? { status: 500, body: 'boom' } : undefined) });
-  assert.deepEqual(r.journal, [`claim . ${FIX}`, 'begin refusals/retry-unbegun.test.js::steady']);
+  assert.deepEqual(r.journal, [`claim . ${FIX}`, 'begin refusals/retry-unbegun.test.js::steady', 'afterEach steady', 'afterEach steady']);
   assert.equal(r.tests.steady.status, 'failed');
   assert.match(r.tests.steady.failure, /the keploy agent answered 500 Internal Server Error to \/agent\/scope\/begin: "boom"/);
   // A repeated title: the second test's retry is refused too.
