@@ -44,7 +44,8 @@ export const SEEDED_LINE = 'keploy: each test\'s random numbers are seeded from 
   'in the test browser Math.random, crypto.getRandomValues and crypto.randomUUID, and in the test process Math.random, from the test\'s begin to its end ' +
   '(its beforeEach and afterEach hooks too). ' +
   'Web Workers and Service Workers keep the browser\'s own, and so does a page the app opens that keploy cannot place (each one is named); ' +
-  'the test process keeps its own crypto, and its own Math.random outside every test (beforeAll, afterAll, a worker fixture, a file as it loads). ' +
+  'the test process keeps its own crypto, and its own Math.random outside every test (beforeAll, afterAll, a file as it loads) ' +
+  'and while a worker fixture registered with this package\'s test.extend or test.use is set up. ' +
   `To turn it off, record and replay with ${ENV_SEED_RANDOM}=off, or set use: { ${OPTION_SEED_RANDOM}: false } in the Playwright config.`;
 
 /**
@@ -133,7 +134,10 @@ export function seatRandom(draw: () => number): () => void {
   const own = Math.random;
   // How many stack traces are being prepared now, one inside another.
   let preparing = 0;
-  const seeded = { random(): number { return preparing > 0 ? own() : draw(); } }.random;
+  // What setAside holds for this seat: worker fixtures being set up.
+  const aside = new Set<object>();
+  asideNow = aside;
+  const seeded = { random(): number { return preparing > 0 || aside.size > 0 ? own() : draw(); } }.random;
   const E = Error as { prepareStackTrace?: unknown };
   const was = Object.getOwnPropertyDescriptor(E, 'prepareStackTrace');
   let set: unknown = E.prepareStackTrace;
@@ -167,6 +171,28 @@ export function seatRandom(draw: () => number): () => void {
     else Object.defineProperty(E, 'prepareStackTrace', was);
     if (E.prepareStackTrace !== set) E.prepareStackTrace = set;
   };
+}
+
+// The set the seat in place now (or the last one) takes setAside's holds
+// from: each seat makes its own, so a hold never outlives its seat.
+let asideNow = new Set<object>();
+
+/**
+ * Gives the process's own Math.random back, under the seat in place, until
+ * the returned function is called (once or more): what runs meanwhile is the
+ * worker's, not the test's. A worker fixture is set up in the first test that
+ * asks for it, after that test's seat is in place, so its draws (a test
+ * account made once for the worker's tests) would come from that test's
+ * stream and shift the test's own draws: a replay in which another test is
+ * the first to ask for it (one test alone, or after keploy set an earlier
+ * test aside) would draw other numbers than its recording. With no seat in
+ * place it holds nothing.
+ */
+export function setAside(): () => void {
+  const held = asideNow;
+  const hold = {};
+  held.add(hold);
+  return () => { held.delete(hold); };
 }
 
 // A key of the page's session storage: how many documents of each path the

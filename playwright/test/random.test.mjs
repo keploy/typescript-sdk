@@ -3,7 +3,7 @@
 // a page. No browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DOC_KEY, ENV_SEED_RANDOM, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, freshSeed, initScript, pageScript, processRandom, seatRandom, seedingFromEnv, unplacedLine, unseededLine } from '../dist/random.js';
+import { DOC_KEY, ENV_SEED_RANDOM, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, freshSeed, initScript, pageScript, processRandom, seatRandom, seedingFromEnv, setAside, unplacedLine, unseededLine } from '../dist/random.js';
 import { SEED } from '../dist/agent.js';
 import { documentAt } from './draws.mjs';
 
@@ -32,7 +32,8 @@ test('the lines say what is seeded, what is not, where the seed lives, and how t
     'in the test browser Math.random, crypto.getRandomValues and crypto.randomUUID, and in the test process Math.random, from the test\'s begin to its end ' +
     '(its beforeEach and afterEach hooks too). ' +
     'Web Workers and Service Workers keep the browser\'s own, and so does a page the app opens that keploy cannot place (each one is named); ' +
-    'the test process keeps its own crypto, and its own Math.random outside every test (beforeAll, afterAll, a worker fixture, a file as it loads). ' +
+    'the test process keeps its own crypto, and its own Math.random outside every test (beforeAll, afterAll, a file as it loads) ' +
+    'and while a worker fixture registered with this package\'s test.extend or test.use is set up. ' +
     'To turn it off, record and replay with KEPLOY_SEED_RANDOM=off, or set use: { keploySeedRandom: false } in the Playwright config.');
   assert.equal(OFF_LINE, 'keploy: random numbers are not seeded (KEPLOY_SEED_RANDOM=off, or keploySeedRandom: false), ' +
     'so the test process and the test browser draw their own each run: data a test makes from them (a name, an email, an ID) differs from its recording\'s ' +
@@ -156,7 +157,55 @@ test('while seated, a draw made as a stack trace is prepared is the process\'s o
       Object.defineProperty(E, 'prepareStackTrace', { value: mine, writable: false, enumerable: false, configurable: true });
     } finally { unseat4(); }
     assert.deepEqual(Object.getOwnPropertyDescriptor(E, 'prepareStackTrace'), { value: mine, writable: false, enumerable: false, configurable: true });
+    // And the process's own Math.random is back after it.
+    assert.equal(Math.random(), 0.5);
+
+    // A formatter that throws (as source-map-support's does on a map it
+    // cannot read) leaves the stream's draws to the test after it.
+    delete E.prepareStackTrace;
+    const r5 = processRandom(S2);
+    const unseat5 = seatRandom(processRandom(S2));
+    try {
+      E.prepareStackTrace = () => { throw new Error('unreadable map'); };
+      assert.throws(() => new Error('w').stack, /unreadable map/);
+      E.prepareStackTrace = undefined;
+      assert.equal(Math.random(), r5());
+    } finally { unseat5(); }
   } finally { back(); }
+});
+
+test('setAside gives the process\'s own Math.random back under the seat until each hold is let go, once or more; a hold taken before the seat, or under an earlier one, holds nothing', () => {
+  const realRandom = Math.random;
+  // The process's own.
+  Math.random = () => 0.5;
+  try {
+    const r = processRandom(S1);
+    const early = setAside();
+    const unseat = seatRandom(processRandom(S1));
+    try {
+      assert.equal(Math.random(), r());
+      const a = setAside();
+      const b = setAside();
+      assert.equal(Math.random(), 0.5);
+      a(); a();
+      assert.equal(Math.random(), 0.5);
+      b();
+      early();
+      // No draw of the stream was taken while held.
+      assert.equal(Math.random(), r());
+    } finally { unseat(); }
+    const unseat1 = seatRandom(processRandom(S1));
+    const late = setAside();
+    unseat1();
+    const r2 = processRandom(S2);
+    const unseat2 = seatRandom(processRandom(S2));
+    try {
+      assert.equal(Math.random(), r2());
+      late();
+      assert.equal(Math.random(), r2());
+    } finally { unseat2(); }
+    assert.equal(Math.random(), 0.5);
+  } finally { Math.random = realRandom; }
 });
 
 test('a seeded document draws the same numbers for the same seed and path, others for another seed or path', () => {

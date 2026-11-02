@@ -116,6 +116,7 @@ async function playwright(specs, env, cwd = PKG) {
         error: (r.errors ?? []).map((e) => e.message ?? '').join('\n'),
         annotations: r.annotations ?? t.annotations ?? [],
         steps: steps.filter((x) => x.test === spec.title).map((x) => x.step),
+        at: Object.fromEntries(steps.filter((x) => x.test === spec.title).map((x) => [x.step, x.at])),
         stdout: (r.stdout ?? []).map((x) => x.text ?? Buffer.from(x.buffer ?? '', 'base64').toString()).join(''),
       };
     }
@@ -826,6 +827,75 @@ for (const helper of ['step', 'stack']) {
     } finally { await rep.close(); await rec.close(); }
   });
 }
+
+// One run of process-worker.spec.ts, as orderRun runs process-order's.
+async function workerRun(j, env, args = []) {
+  const from = j.events.length;
+  const { tests, tmp, out } = await playwright(['process-worker.spec.ts', ...args], env);
+  const drew = {};
+  for (const n of [...ORDER, 'broken', 'pst']) {
+    const f = path.join(tmp, `${n}.json`);
+    drew[n] = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : null;
+  }
+  const status = Object.fromEntries(Object.entries(tests).map(([k, t]) => [k, t.status]));
+  const seeds = Object.fromEntries(calls({ events: j.events.slice(from) }).filter((c) => c.path === '/agent/scope/begin').map((c) => [c.body.name, c.body.seed]));
+  return { drew, status, seeds, tests, out };
+}
+
+test('seeded: a worker fixture set up in the first test that asks for it draws the worker\'s own Math.random, so a test draws what its recording drew when replayed alone or after keploy set an earlier test aside; a test fixture draws from its test\'s stream', async () => {
+  const j = journal();
+  const rec = await fakeAgent(j);
+  let kept = {};
+  let skip = [];
+  const rep = await fakeAgent(j, (c) => {
+    if (c.path !== '/agent/scope/begin') return undefined;
+    if (skip.includes(c.body.name)) return { body: { v: 1, status: 'ok', action: 'skip', reason: 'flaky/request_changed: the body changed' } };
+    return { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } };
+  });
+  const same = (p, r, names) => Object.fromEntries(names.map((n) => [n, JSON.stringify(p.drew[n]) === JSON.stringify(r.drew[n]) ? 'same' : 'other']));
+  try {
+    for (const how of ['extend', 'use']) {
+      const env = (url) => ({ ...keployEnv(url), USE_ACCOUNT: how === 'use' ? '1' : undefined });
+      const r = await workerRun(j, env(rec.url));
+      assert.deepEqual(r.status, { first: 'passed', second: 'passed', third: 'passed' }, r.out);
+      // Each test's draws are its stream's first ones: the first test's
+      // lead (a test fixture) first, then its body's; account (set up in
+      // the first test) and team (in the third) take none of them.
+      const firsts = (n, k) => { const next = processRandom(r.seeds[n]); return Array.from({ length: k }, () => next()); };
+      const [l, a, b] = firsts('first', 3);
+      assert.deepEqual(r.drew.first, [`lead-${l}`, a, b], how);
+      assert.deepEqual(r.drew.second, firsts('second', 2), how);
+      // A plain value and an option are given as they were written.
+      assert.deepEqual(r.drew.third, [...firsts('third', 2), 'a', 'x'], how);
+      // Playwright names each fixture at the line that registered it, in the
+      // spec, not in this package.
+      // So it is through use with no formatter set and a stack trace limit
+      // of 0; extend and use leave Error.prepareStackTrace and the limit as
+      // they found them.
+      const line = how === 'use' ? 28 : 15;
+      assert.equal(r.tests.first.at['Fixture "account"'], `process-worker.spec.ts:${line}`, how);
+      assert.equal(r.tests.third.at['Fixture "team"'], 'process-worker.spec.ts:15', how);
+      assert.deepEqual(r.drew.pst, { extend: { same: true, limit: true }, ...(how === 'use' ? { use: { absent: true, limit: true } } : {}) }, how);
+      if (how === 'use') continue;
+      kept = r.seeds;
+      for (const n of ['second', 'third']) {
+        const alone = await workerRun(j, env(rep.url), ['--grep', n]);
+        assert.deepEqual(alone.status, { [n]: 'passed' }, alone.out);
+        assert.deepEqual(same(alone, r, [n]), { [n]: 'same' });
+      }
+      skip = ['first'];
+      const aside = await workerRun(j, env(rep.url));
+      assert.deepEqual(aside.status, { first: 'skipped', second: 'passed', third: 'passed' }, aside.out);
+      assert.deepEqual(same(aside, r, ['second', 'third']), { second: 'same', third: 'same' });
+      skip = [];
+    }
+    // A worker fixture that fails before use() leaves the rest of its test
+    // (its afterEach) drawing the test's stream.
+    const bk = await workerRun(j, { ...keployEnv(rec.url), BROKEN: '1' }, ['--grep', 'broken']);
+    assert.deepEqual(bk.status, { broken: 'failed' }, bk.out);
+    assert.deepEqual(bk.drew.broken, [processRandom(bk.seeds.broken)()]);
+  } finally { await rep.close(); await rec.close(); }
+});
 
 test('the test process draws its own Math.random when keploy answers no seed and no test opts out: each test says so, and nothing else is said', async () => {
   const j = journal();
