@@ -40,8 +40,11 @@
 //     seed keploy answered its begin with, which a record keeps with the
 //     test's recording, so a replay's pages make the calls the recording's
 //     made; each page draws its own, named by its place in the test's
-//     order; KEPLOY_SEED_RANDOM=off or the option keploySeedRandom: false
-//     turns it off.
+//     order; the test process draws Math.random from that seed too, from
+//     the test's begin to its end, so data the test makes there (a name
+//     stamped with Math.random()) is the recording's; KEPLOY_SEED_RANDOM=off
+//     or the option keploySeedRandom: false turns it off, and the worker
+//     says once what that costs.
 // Any answer of the agent this package cannot trust fails the test.
 
 import { test as base, expect } from '@playwright/test';
@@ -52,7 +55,7 @@ import { ACTION_FAIL, ACTION_SKIP, AgentClient, KeployError, RANDOM_OWN, RANDOM_
 import type { Outcome, Random, TestRef } from './agent';
 import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
-import { SEEDED_LINE, freshSeed, initScript, pageScript, seedingFromEnv, unplacedLine, unseededLine } from './random';
+import { OFF_LINE, SEEDED_LINE, freshSeed, initScript, pageScript, processRandom, seatRandom, seedingFromEnv, unplacedLine, unseededLine } from './random';
 import { Inflight } from './settle';
 
 export { expect, KeployError };
@@ -72,8 +75,10 @@ let projectDir = '';
 let open: TestRef | null = null;
 // Whether the environment leaves the test browser's seeding on.
 let seedingOn = false;
-// Whether this worker has said that it seeds the test browser.
+// Whether this worker has said that it seeds each test's random numbers.
 let saidSeeded = false;
+// Whether this worker has said what a test with seeding off costs.
+let saidOff = false;
 // How many contexts this worker seeded: each one's report function has its
 // own name.
 let reports = 0;
@@ -133,11 +138,11 @@ function randomDone(s: PageSeeding): Random | undefined {
 /** @keploy/playwright's options, for a config's or a file's use. */
 export type KeployOptions = {
   /**
-   * Seed the test browser's random numbers per test under keploy (default
-   * true), so a replay's pages draw what the recording's drew. Set false,
-   * for record and replay alike, to give a project, a file or a test the
-   * browser's own random numbers; KEPLOY_SEED_RANDOM=off does so for the
-   * whole run.
+   * Seed the test browser's random numbers and the test process's
+   * Math.random per test under keploy (default true), so a replay draws
+   * what the recording drew. Set false, for record and replay alike, to give
+   * a project, a file or a test their own random numbers;
+   * KEPLOY_SEED_RANDOM=off does so for the whole run.
    */
   keploySeedRandom: boolean;
 };
@@ -196,12 +201,6 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       // document before its own scripts.
       await context.addInitScript({ content: initScript(s.seed, report) });
       restore = placePages(context);
-      if (!saidSeeded) {
-        saidSeeded = true;
-        process.stdout.write(`${SEEDED_LINE}\n`);
-      }
-    } else if (s.asked) {
-      process.stdout.write(`${unseededLine(name)}\n`);
     }
     const seeded = s.seed !== '';
     const opened = (): void => { if (seeded) s.seededPage = true; else s.ownPage = true; };
@@ -236,9 +235,27 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       return;
     }
     const s: PageSeeding = { asked, seed: asked ? b.seed ?? '' : '', seededPage: false, ownPage: false };
+    if (s.seed !== '') {
+      if (!saidSeeded) {
+        saidSeeded = true;
+        process.stdout.write(`${SEEDED_LINE}\n`);
+      }
+    } else if (asked) {
+      process.stdout.write(`${unseededLine(ref.name)}\n`);
+    } else if (!saidOff) {
+      saidOff = true;
+      process.stdout.write(`${OFF_LINE}\n`);
+    }
     open = ref;
     seeding = s;
-    await use();
+    // The test process draws Math.random from the test's seed from here, its
+    // beforeEach hooks included, until its afterEach hooks and fixtures end.
+    const unseat = s.seed !== '' ? seatRandom(processRandom(s.seed)) : null;
+    try {
+      await use();
+    } finally {
+      unseat?.();
+    }
     open = null;
     seeding = null;
     const e = await c.end(ref, outcomeOf(testInfo), randomDone(s));
