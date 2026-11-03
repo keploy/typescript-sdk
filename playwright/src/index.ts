@@ -39,19 +39,20 @@
 //     crypto.getRandomValues, crypto.randomUUID) from a stream seeded by the
 //     seed keploy answered its begin with, which a record keeps with the
 //     test's recording, so a replay's pages make the calls the recording's
-//     made; KEPLOY_SEED_RANDOM=off or the option keploySeedRandom: false
+//     made; each page draws its own, named by its place in the test's
+//     order; KEPLOY_SEED_RANDOM=off or the option keploySeedRandom: false
 //     turns it off.
 // Any answer of the agent this package cannot trust fails the test.
 
 import { test as base, expect } from '@playwright/test';
-import type { TestInfo } from '@playwright/test';
+import type { BrowserContext, Page, TestInfo } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ACTION_FAIL, ACTION_SKIP, AgentClient, KeployError, RANDOM_OWN, RANDOM_SEEDED } from './agent';
 import type { Outcome, Random, TestRef } from './agent';
 import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
-import { SEEDED_LINE, freshSeed, initScript, seedingFromEnv, unseededLine } from './random';
+import { SEEDED_LINE, freshSeed, initScript, pageScript, seedingFromEnv, unplacedLine, unseededLine } from './random';
 import { Inflight } from './settle';
 
 export { expect, KeployError };
@@ -73,6 +74,34 @@ let open: TestRef | null = null;
 let seedingOn = false;
 // Whether this worker has said that it seeds the test browser.
 let saidSeeded = false;
+// How many contexts this worker seeded: each one's report function has its
+// own name.
+let reports = 0;
+
+/**
+ * Names each page the test opens in context (context.newPage(), the page
+ * fixture's among them) by its place in the order the test opened them, in
+ * every document of the page, before newPage returns: two tabs of a test
+ * draw their own numbers, the same ones at replay. A popup is placed by its
+ * opener's document in the page itself (initScript). Returns what undoes it.
+ */
+function placePages(context: BrowserContext): () => void {
+  const had = Object.prototype.hasOwnProperty.call(context, 'newPage');
+  const newPage = context.newPage;
+  let made = 0;
+  context.newPage = async function placed(this: BrowserContext): Promise<Page> {
+    // Its place is taken when the test asks for it, not when the page
+    // comes: two pages asked for at once keep the order the test asked in.
+    const id = `t${made++}`;
+    const p = await newPage.call(context);
+    await p.addInitScript({ content: pageScript(id) });
+    return p;
+  };
+  return () => {
+    if (had) context.newPage = newPage;
+    else delete (context as { newPage?: unknown }).newPage;
+  };
+}
 
 // How a test's browser draws its random numbers.
 type PageSeeding = {
@@ -149,23 +178,41 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       await use(context);
       return;
     }
+    const name = open.name;
+    let restore = (): void => {};
     if (s.seed !== '') {
+      // A document the seeding cannot place draws the browser's own numbers
+      // and says so here, once for each address in the test.
+      const report = `__keploy_random_unplaced_${++reports}`;
+      const told = new Set<string>();
+      await context.exposeBinding(report, (_source, at: unknown) => {
+        // The page's own text: one line, of a sane length.
+        const a = (typeof at === 'string' ? at : String(at)).replace(/[\u0000-\u001f\u007f]/g, '?').slice(0, 512);
+        if (told.has(a)) return;
+        told.add(a);
+        process.stdout.write(`${unplacedLine(name, a)}\n`);
+      });
       // Before the test's first page: an init script runs in every frame's
       // document before its own scripts.
-      await context.addInitScript({ content: initScript(s.seed) });
+      await context.addInitScript({ content: initScript(s.seed, report) });
+      restore = placePages(context);
       if (!saidSeeded) {
         saidSeeded = true;
         process.stdout.write(`${SEEDED_LINE}\n`);
       }
     } else if (s.asked) {
-      process.stdout.write(`${unseededLine(open.name)}\n`);
+      process.stdout.write(`${unseededLine(name)}\n`);
     }
     const seeded = s.seed !== '';
     const opened = (): void => { if (seeded) s.seededPage = true; else s.ownPage = true; };
     if (context.pages().length > 0) opened();
     context.on('page', opened);
     const inflight = new Inflight(context);
-    await use(context);
+    try {
+      await use(context);
+    } finally {
+      restore();
+    }
     if (inflight.size > 0) {
       const calls = inflight.describe();
       const shown = calls.slice(0, 5).join(', ') + (calls.length > 5 ? `, and ${calls.length - 5} more` : '');

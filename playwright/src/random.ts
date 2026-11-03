@@ -7,7 +7,8 @@
 // recording, and a replay answers the recording's. So record and replay
 // draw the same numbers and pick the same side, two tests draw different
 // ones, and a record made again draws new ones (a browser-made ID is not sent
-// twice to a real server). Only the test browser's pages change; the app,
+// twice to a real server). Each page of a test draws its own numbers, so two
+// tabs do not make one ID. Only the test browser's pages change; the app,
 // its server and the browser's workers do not.
 //
 // On by default; KEPLOY_SEED_RANDOM=off or the fixture option
@@ -38,7 +39,7 @@ export function seedingFromEnv(env: NodeJS.ProcessEnv): Seeding {
 /** The line a worker shows once, at the first test whose browser it seeds. */
 export const SEEDED_LINE = 'keploy: the test browser\'s random numbers (Math.random, crypto.getRandomValues, crypto.randomUUID) are seeded per test ' +
   'from a seed keploy keeps with the test\'s recording, so a replay draws the numbers its recording drew; ' +
-  'Web Workers and Service Workers keep the browser\'s own. ' +
+  'Web Workers and Service Workers keep the browser\'s own, and so does a page the app opens that keploy cannot place (each one is named). ' +
   `To turn it off, record and replay with ${ENV_SEED_RANDOM}=off, or set use: { ${OPTION_SEED_RANDOM}: false } in the Playwright config.`;
 
 /**
@@ -47,8 +48,19 @@ export const SEEDED_LINE = 'keploy: the test browser\'s random numbers (Math.ran
  */
 export function unseededLine(name: string): string {
   return `keploy: keploy answered the begin of ${name} with no seed, so its browser draws its own random numbers: ` +
-    'its recording kept none (it was recorded before keploy kept seeds, or with seeding off), or this keploy predates seeds. ' +
-    'Record the test again with seeding on (the default) to seed it.';
+    'its recording kept none (it was recorded before keploy kept seeds, or with seeding off: record the test again with seeding on, the default, to seed it), ' +
+    'or the test was pulled from a Keploy branch, which keeps no seed yet, or this keploy predates seeds.';
+}
+
+/**
+ * The line a test shows, once for each address, when a document of its
+ * seeded context drew the browser's own random numbers because the seeding
+ * could not place it among the test's pages (initScript).
+ */
+export function unplacedLine(name: string, at: string): string {
+  return `keploy: in ${name}, the document at ${at} drew the browser's own random numbers, so its draws may differ at replay: ` +
+    'it is in a page the app opened that keploy cannot place in the test\'s order (a popup opened with noopener, as a link with target=_blank opens one, ' +
+    'or at another origin than its opener\'s page, or after that page moved on; or a frame of another origin in one).';
 }
 
 /** A seed drawn afresh for a test's begin: 128 bits, as hex. */
@@ -58,24 +70,64 @@ export function freshSeed(): string {
 
 // A key of the page's session storage: how many documents of each path the
 // tab has loaded from the document's origin, so that a document loaded again
-// in the same test (a reload, a second visit) draws new numbers, as it would
+// in the same tab (a reload, a second visit) draws new numbers, as it would
 // unseeded, and still the same ones each run.
 export const LOADS_KEY = '__keploy_random_loads';
+
+// The window property, not enumerable, that names the page a document is
+// in: set by pageScript in every document of a page the test opened.
+export const PAGE_KEY = '__keploy_random_page';
+
+// The window property, not enumerable, that holds a document's place for the
+// windows it opens and the frames it holds.
+export const DOC_KEY = '__keploy_random_doc';
+
+/**
+ * The init script that names the page a test opened (context.newPage(), the
+ * page fixture's among them) in each of its documents and frames: its place
+ * among the pages the test opened in its context, in the order the test
+ * opened them. The fixture adds it to the page before newPage returns, so it
+ * runs in the page's first document.
+ */
+export function pageScript(id: string): string {
+  return `Object.defineProperty(globalThis, ${JSON.stringify(PAGE_KEY)}, { value: ${JSON.stringify(id)}, enumerable: false, writable: false, configurable: true });\n`;
+}
 
 /**
  * The init script that seeds a document: one stream for each of
  * Math.random, crypto.getRandomValues and crypto.randomUUID, from the seed,
- * the document's path and how many documents of that path its origin loaded
- * in the tab before. The path alone names the document: a replay may serve
- * the app at another host or port than its record did, and a query often
- * carries a time. So two frames of different origins at the same path draw
- * the same numbers. A stream for each function keeps one's draws from
+ * the document's page, its path, and how many documents of that path its
+ * origin loaded in the tab before.
+ *
+ * The page keeps two tabs of a test from drawing the same numbers (a
+ * browser-made tab ID or idempotency key reaches a real server in a record),
+ * and is the same at replay:
+ *   - a page the test opened is named by pageScript: its place in the order
+ *     the test opened its pages;
+ *   - a popup is the window its opener's document opened with window.open,
+ *     in the order that document opened them, read when the popup's
+ *     document begins (or, for a document that took over its window's
+ *     first about:blank and so ran no init script, at its first draw); it
+ *     needs an opener of its own origin;
+ *   - a frame of a popup is its parent document's, of the same origin.
+ * A document with no place (a popup opened with noopener, as a link with
+ * target=_blank opens one, or of another origin than its opener's page, or
+ * after its opener's page moved on; a frame of another origin in one) draws
+ * the browser's own numbers, never another page's, and says so through
+ * report, the name of a function the fixture exposed ('' for none), at its
+ * first draw.
+ *
+ * The path alone names the document in its page: a replay may serve the app
+ * at another host or port than its record did, and a query often carries a
+ * time. So two frames of different origins at the same path in one page
+ * draw the same numbers. A stream for each function keeps one's draws from
  * shifting another's: a timer's Math.random does not move the next
  * crypto.randomUUID.
  */
-export function initScript(seed: string): string {
+export function initScript(seed: string, report = ''): string {
   return `(() => {
   const seed = ${JSON.stringify(seed)};
+  const g = globalThis;
   const imul = Math.imul;
   // cyrb128: a string's 128-bit hash, a stream's four words.
   const hash = (s) => {
@@ -110,22 +162,97 @@ export function initScript(seed: string): string {
     for (let i = 0; i < 15; i++) next();
     return next;
   };
-  let place = '';
-  try { place = location.pathname; } catch (e) { place = ''; }
-  let loads = 0;
+  // The fixture's function that hears of a document with no place, taken
+  // off the window so the page does not see it.
+  let tell = null;
+  ${report === '' ? '' : `try { const f = g[${JSON.stringify(report)}]; if (typeof f === 'function') tell = f; delete g[${JSON.stringify(report)}]; } catch (e) { tell = null; }`}
+  // A document's state: its path, how many documents of that path its
+  // origin loaded in the tab before, the place its opener or parent gives
+  // it, the windows it opened, and its streams. Made as the document begins;
+  // made again at the next draw when the window has a new document that ran
+  // no init script: a popup's first document of its opener's origin takes
+  // over the window of its first about:blank.
+  const begin = (doc) => {
+    let place = '';
+    try { place = location.pathname; } catch (e) { place = ''; }
+    let loads = 0;
+    try {
+      const store = sessionStorage;
+      let seen = {};
+      try { seen = JSON.parse(store.getItem(${JSON.stringify(LOADS_KEY)}) || '{}') || {}; } catch (e) { seen = {}; }
+      if (typeof seen !== 'object' || Array.isArray(seen)) seen = {};
+      loads = typeof seen[place] === 'number' ? seen[place] : 0;
+      seen[place] = loads + 1;
+      store.setItem(${JSON.stringify(LOADS_KEY)}, JSON.stringify(seen));
+    } catch (e) {
+      // No session storage here (a sandboxed frame, an opaque origin): every
+      // document of this path in the page draws the same numbers.
+    }
+    // Read as the document begins: an opener or a parent may move on later.
+    let given = null;
+    try {
+      const top = g.top;
+      if (top === g || top === undefined || top === null) {
+        const o = g.opener;
+        if (o) {
+          const d = o[${JSON.stringify(DOC_KEY)}];
+          const i = d ? d.opened().indexOf(g) : -1;
+          const k = i >= 0 ? d.key() : null;
+          if (k !== null) given = k + 'w' + i;
+        }
+      } else {
+        const d = g.parent[${JSON.stringify(DOC_KEY)}];
+        if (d) given = d.page();
+      }
+    } catch (e) {
+      // An opener or a parent of another origin.
+      given = null;
+    }
+    return { doc, place, loads, given, page: undefined, opened: [], streams: null };
+  };
+  const docNow = () => { try { return document; } catch (e) { return null; } };
+  let state = begin(docNow());
+  const now = () => {
+    const doc = docNow();
+    if (state.doc !== doc) state = begin(doc);
+    return state;
+  };
+  // The document's page, named when first asked: the page script runs
+  // after this one, before the page's own scripts.
+  const pageOf = () => {
+    const s = now();
+    if (s.page === undefined) {
+      let p = null;
+      try { const v = g[${JSON.stringify(PAGE_KEY)}]; if (typeof v === 'string') p = v; } catch (e) { p = null; }
+      s.page = p !== null ? p : s.given;
+    }
+    return s.page;
+  };
+  const key = () => { const p = pageOf(); const s = now(); return p === null ? null : seed + '\\n' + p + '\\n' + s.place + '\\n' + s.loads + '\\n'; };
   try {
-    const store = sessionStorage;
-    let seen = {};
-    try { seen = JSON.parse(store.getItem(${JSON.stringify(LOADS_KEY)}) || '{}') || {}; } catch (e) { seen = {}; }
-    if (typeof seen !== 'object' || Array.isArray(seen)) seen = {};
-    loads = typeof seen[place] === 'number' ? seen[place] : 0;
-    seen[place] = loads + 1;
-    store.setItem(${JSON.stringify(LOADS_KEY)}, JSON.stringify(seen));
+    Object.defineProperty(g, ${JSON.stringify(DOC_KEY)}, { value: Object.freeze({ key, page: pageOf, opened: () => now().opened }), enumerable: false, writable: false, configurable: true });
   } catch (e) {
-    // No session storage here (a sandboxed frame, an opaque origin): every
-    // document of this address draws the same numbers.
+    // A window that takes no property: nothing it opens or holds has a place.
   }
-  const key = seed + '\\n' + place + '\\n' + loads + '\\n';
+  // The document's stream for name, made at its first draw; null when it
+  // has no place, so it draws the browser's own numbers, and says so once.
+  const from = (name) => {
+    const s = now();
+    if (s.streams === null) {
+      const k = key();
+      s.streams = k === null ? false : {
+        random: stream(k + 'Math.random'),
+        grv: stream(k + 'crypto.getRandomValues'),
+        uuid: stream(k + 'crypto.randomUUID'),
+      };
+      if (s.streams === false && tell !== null) {
+        let at = '';
+        try { at = location.origin + location.pathname; } catch (e) { at = s.place; }
+        try { const r = tell(at); if (r && typeof r.catch === 'function') r.catch(() => {}); } catch (e) {}
+      }
+    }
+    return s.streams === false ? null : s.streams[name];
+  };
   const define = (o, name, value) => {
     const d = Object.getOwnPropertyDescriptor(o, name);
     Object.defineProperty(o, name, { value, writable: d ? d.writable : true, enumerable: d ? d.enumerable : false, configurable: true });
@@ -136,26 +263,39 @@ export function initScript(seed: string): string {
       for (let j = 0; j < 4 && i + j < u.length; j++) { u[i + j] = w & 255; w >>>= 8; }
     }
   };
-  const rnd = stream(key + 'Math.random');
+  const realOpen = g.open;
+  if (typeof realOpen === 'function') {
+    define(g, 'open', { open() {
+      const w = realOpen.apply(this, arguments);
+      try { const opened = now().opened; if (w && opened.indexOf(w) < 0) opened.push(w); } catch (e) {}
+      return w;
+    } }.open);
+  }
+  const realRandom = Math.random;
   // 53 bits, as the browser's own Math.random gives.
-  define(Math, 'random', { random() { return ((rnd() >>> 5) * 67108864 + (rnd() >>> 6)) / 9007199254740992; } }.random);
+  define(Math, 'random', { random() {
+    const rnd = from('random');
+    if (rnd === null) return realRandom();
+    return ((rnd() >>> 5) * 67108864 + (rnd() >>> 6)) / 9007199254740992;
+  } }.random);
   const C = typeof Crypto === 'function' ? Crypto.prototype : null;
   if (C && typeof C.getRandomValues === 'function') {
     const real = C.getRandomValues;
-    const grv = stream(key + 'crypto.getRandomValues');
     define(C, 'getRandomValues', { getRandomValues(array) {
       // The browser's own call first: it refuses what the browser refuses
       // (a float array, more than 65536 bytes, a this that is no Crypto).
       const out = real.call(this, array);
-      fill(grv, new Uint8Array(out.buffer, out.byteOffset, out.byteLength));
+      const grv = from('grv');
+      if (grv !== null) fill(grv, new Uint8Array(out.buffer, out.byteOffset, out.byteLength));
       return out;
     } }.getRandomValues);
   }
   if (C && typeof C.randomUUID === 'function') {
     const realUUID = C.randomUUID;
-    const uuid = stream(key + 'crypto.randomUUID');
     define(C, 'randomUUID', { randomUUID() {
-      realUUID.call(this);
+      const own = realUUID.call(this);
+      const uuid = from('uuid');
+      if (uuid === null) return own;
       const b = new Uint8Array(16);
       fill(uuid, b);
       b[6] = (b[6] & 15) | 64;

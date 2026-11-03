@@ -9,7 +9,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SEEDED_LINE, initScript, unseededLine } from '../dist/random.js';
+import { LOADS_KEY, SEEDED_LINE, initScript, unplacedLine, unseededLine } from '../dist/random.js';
 import { DRAWS, documentAt } from './draws.mjs';
 
 const PKG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -412,6 +412,8 @@ async function drawsServer() {
     res.writeHead(200, { 'content-type': 'text/html' });
     if (u.pathname === '/draws') { res.end(page(`<iframe src="http://localhost:${srv.address().port}/frame"></iframe>`)); return; }
     if (u.pathname === '/frame') { res.end(page('frame')); return; }
+    // /nest holds /frame of its own origin.
+    if (u.pathname === '/nest') { res.end(page('<iframe src="/frame"></iframe>')); return; }
     res.end('');
   });
   // Every address: the frame is asked for at localhost, which may be ::1.
@@ -440,8 +442,9 @@ async function drawRun(j, env, specs = ['seeded.spec.ts'], names = ['one', 'two'
   } finally { await d.close(); }
 }
 
-// What a page at path draws first under seed.
-const expected = (seed, path, storage) => documentAt(initScript(seed), path, storage).draws();
+// What a document at path draws first under seed, in the page the fixture
+// named page (t0: the test's first).
+const expected = (seed, path, storage, page = 't0') => documentAt(initScript(seed), path, storage, page).draws();
 const NAMES = ['one', 'two', 'again', 'own › three'];
 
 test('seeded: a record seeds each test\'s pages from the fresh seed its begin sent, from their first script and in a cross-site frame; another test, or the record made again, draws others', async () => {
@@ -510,6 +513,85 @@ test('seeded: a replay draws the numbers its recording drew, from the seed keplo
     kept = { ...r.seeds, two: r.seeds.one };
     const renamed = await drawRun(j, keployEnv(rep.url));
     assert.deepEqual(renamed.drew.two, r.drew.one);
+  } finally { await rep.close(); await rec.close(); }
+});
+
+test('seeded: each page of a test draws its own numbers at one path, a popup placed by its opener too, the same ones at replay; a document keploy cannot place draws its own and is named', async () => {
+  const j = journal();
+  const rec = await fakeAgent(j);
+  let kept = {};
+  const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+    ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+  const names = ['tabs', 'atonce', 'nest', 'popnest', 'noopener'];
+  // The unplaced lines a test printed, with the run's port as <port>.
+  const unplaced = (r, n) => r.tests[n].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${n}, `)).map((l) => l.replace(/:\d+\//, ':<port>/'));
+  try {
+    const r = await drawRun(j, keployEnv(rec.url), ['tabs.spec.ts'], names);
+    const seed = r.seeds.tabs;
+    const t = r.drew.tabs;
+    // Two tabs of the test at one path: each its own numbers, the tab's
+    // place in the order the test opened them naming it, in its cross-site
+    // frame too.
+    assert.notEqual(t.second.top.uuid, t.first.top.uuid);
+    assert.deepEqual(t.first, { top: expected(seed, '/draws'), frame: expected(seed, '/frame') });
+    assert.deepEqual(t.second, { top: expected(seed, '/draws', undefined, 't1'), frame: expected(seed, '/frame', undefined, 't1') });
+    // Two popups the first tab opened at one moment: each the window its
+    // opener's document opened, in that order, from the opener's copied
+    // session storage (its /draws loaded once).
+    const opener = `${seed}\nt0\n/draws\n0\n`;
+    for (const [w, i] of [['one', 0], ['two', 1]]) {
+      assert.deepEqual(t[w].top, expected(seed, '/draws', new Map([[LOADS_KEY, '{"/draws":1}']]), `${opener}w${i}`), w);
+    }
+    const uuids = [t.first, t.second, t.one, t.two].map((d) => d.top.uuid);
+    assert.equal(new Set(uuids).size, 4, uuids.join(' '));
+    // A popup's cross-site frame has no place: the browser's own numbers,
+    // named once for the test.
+    assert.notDeepEqual(t.one.frame, t.two.frame);
+    assert.deepEqual(unplaced(r, 'tabs'), [unplacedLine('tabs', 'http://localhost:<port>/frame')]);
+    // Asked for at once, the pages keep the order the test asked in, not
+    // the order they loaded in.
+    const at = r.drew.atonce;
+    assert.deepEqual(at.a.top, expected(r.seeds.atonce, '/draws'));
+    assert.deepEqual(at.b.top, expected(r.seeds.atonce, '/draws', undefined, 't1'));
+    assert.deepEqual(unplaced(r, 'atonce'), []);
+    // A frame of the page's own origin, whose document may take over the
+    // window of its first about:blank, is seeded in the page's place too.
+    assert.deepEqual(r.drew.nest, { top: expected(r.seeds.nest, '/nest'), frame: expected(r.seeds.nest, '/frame') });
+    assert.deepEqual(unplaced(r, 'nest'), []);
+    // So is one in a popup, in the popup's place: the popup's document and
+    // its frame both took over their windows' first about:blank.
+    const pop = `${r.seeds.popnest}\nt0\n/draws\n0\nw0`;
+    assert.deepEqual(r.drew.popnest, {
+      top: expected(r.seeds.popnest, '/nest', new Map([[LOADS_KEY, '{"/draws":1}']]), pop),
+      frame: expected(r.seeds.popnest, '/frame', undefined, pop),
+    });
+    assert.deepEqual(unplaced(r, 'popnest'), []);
+    // A popup opened with noopener has no opener to place it: its own
+    // numbers, never its opener's, and both its documents named.
+    const n = r.drew.noopener;
+    assert.deepEqual(n.first.top, expected(r.seeds.noopener, '/draws'));
+    assert.notDeepEqual(n.popup.top, n.first.top);
+    // (Sorted: the frame's renderer may tell first.)
+    assert.deepEqual(unplaced(r, 'noopener').sort(), [unplacedLine('noopener', 'http://127.0.0.1:<port>/draws'), unplacedLine('noopener', 'http://localhost:<port>/frame')].sort());
+    assert.deepEqual(r.ends, names.map((x) => [x, 'seeded']));
+    // A replay answers the recording's seeds: each tab and popup draws what
+    // it drew in the recording; what had no place draws anew, named again.
+    kept = r.seeds;
+    for (let i = 0; i < 2; i++) {
+      const p = await drawRun(j, keployEnv(rep.url), ['tabs.spec.ts'], names);
+      for (const w of ['first', 'second']) assert.deepEqual(p.drew.tabs[w], t[w], w);
+      for (const w of ['one', 'two']) {
+        assert.deepEqual(p.drew.tabs[w].top, t[w].top, w);
+        assert.notDeepEqual(p.drew.tabs[w].frame, t[w].frame, w);
+      }
+      assert.deepEqual(p.drew.atonce, at);
+      assert.deepEqual(p.drew.nest, r.drew.nest);
+      assert.deepEqual(p.drew.popnest, r.drew.popnest);
+      assert.deepEqual(p.drew.noopener.first, n.first);
+      assert.notDeepEqual(p.drew.noopener.popup.top, n.popup.top);
+      for (const x of names) assert.deepEqual(unplaced(p, x).sort(), unplaced(r, x).sort(), x);
+      assert.deepEqual(p.ends, names.map((x) => [x, 'seeded']));
+    }
   } finally { await rep.close(); await rec.close(); }
 });
 
