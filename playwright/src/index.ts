@@ -14,12 +14,14 @@
 //   import { test, expect } from '@keploy/playwright';
 //
 // Without keploy (KEPLOY_MOCK_AGENT unset or "off") nothing changes. Under
-// keploy, with one worker (keploy's first release runs one test process at a
-// time):
+// keploy:
 //   - each worker claims keploy's run before its first test (POST
 //     /agent/instance), under its Playwright project's name, with keploy's
 //     project folder (KEPLOY_MOCK_PROJECT), which its test files are named
-//     from; the current folder only when keploy names none;
+//     from (the current folder only when keploy names none), as one of the
+//     workers Playwright runs at once (its resolved workers setting): keploy
+//     takes each worker as a test worker of its own, by the processes that
+//     make its calls, or refuses the count before any test runs;
 //   - each test begins (POST /agent/scope/begin) before its beforeEach hooks;
 //     a test keploy set aside is skipped with keploy's reason;
 //   - before the test's browser context closes, the test waits until none of
@@ -75,7 +77,7 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       // one the tests are named from, keploy's project folder: keploy files
       // the tests under it, and a folder above the project (a runner
       // started from the repository's root) holds no test of the project.
-      await c.claim(workerInfo.project.name || '.', projectDir);
+      await c.claim(workerInfo.project.name || '.', projectDir, workerInfo.config.workers);
       process.env[ENV_TEST_PID] = String(process.pid);
       client = c;
     }

@@ -1,9 +1,10 @@
 import { defineConfig } from '@playwright/test';
 
-// The rows' Playwright project: one worker, no retries, as keploy runs a suite.
+// The rows' Playwright project: one worker (PW_WORKERS sets more), no
+// retries, as keploy runs a suite.
 export default defineConfig({
   testDir: '.',
-  workers: 1,
+  workers: Number(process.env.PW_WORKERS || 1),
   retries: 0,
   timeout: Number(process.env.PW_TIMEOUT || 30000),
   reporter: [['json'], ['./steps-reporter.cjs']],

@@ -146,7 +146,7 @@ test('a worker claims the run, each test begins before its beforeEach and ends w
       { 'g › a': 'passed', 'g › b': 'failed', 'g › c': 'skipped', 'g › d': 'failed' });
     const r = (n) => ref('basic.spec.ts', `g › ${n}`);
     const given = { name: 'seed', value: 'seed-value-1', source: 'test/fixtures/basic.spec.ts:7' };
-    const claim = { key: 'p1', dir: fs.realpathSync(PKG) };
+    const claim = { key: 'p1', dir: fs.realpathSync(PKG), workers: 1 };
     // b fails, so Playwright runs c and d in a new worker, which claims again.
     assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
       ['/agent/instance', claim],
@@ -199,6 +199,63 @@ test('a refused claim fails every test of the worker, and no test begins', async
       assert.match(t.error, /keploy: process 2 asked to run tests while process 1 still runs them \(run one test process at a time\)/);
     }
     assert.ok(calls(j).every((c) => c.path === '/agent/instance'));
+  } finally { await a.close(); }
+});
+
+// Each worker claims as one of the workers Playwright runs at once, its
+// resolved workers setting (the config's, or --workers on the command line):
+// the agent takes each as a test worker of its own, or refuses the count.
+test('each worker claims as one of the run\'s workers, from the config or --workers', async () => {
+  const j = journal();
+  const a = await fakeAgent(j, (c) => (c.path === '/agent/instance' ? { body: { v: 1, instance: '1', timeFile: '' } } : undefined));
+  try {
+    let { tests } = await playwright(['agent-says.spec.ts'], { ...keployEnv(a.url), PW_WORKERS: '2' });
+    assert.ok(Object.values(tests).every((t) => t.status === 'passed'));
+    assert.deepEqual(calls(j).filter((c) => c.path === '/agent/instance').map((c) => c.body), [{ key: 'p1', dir: fs.realpathSync(PKG), workers: 2 }]);
+    j.events.length = 0;
+    ({ tests } = await playwright(['agent-says.spec.ts', '--workers=3'], { ...keployEnv(a.url), PW_WORKERS: '2' }));
+    assert.ok(Object.values(tests).every((t) => t.status === 'passed'));
+    assert.deepEqual(calls(j).filter((c) => c.path === '/agent/instance').map((c) => c.body), [{ key: 'p1', dir: fs.realpathSync(PKG), workers: 3 }]);
+  } finally { await a.close(); }
+});
+
+// An agent that refuses the count fails every test of the worker with its
+// words and where the count came from; a keploy agent that predates test
+// workers takes a worker of several as the run's only test process, and the
+// worker refuses the run itself, tells the agent, and no test begins.
+test('a refused worker count, or an agent that predates test workers, fails every test with the fix, and no test begins', async () => {
+  const say = "Playwright runs up to 2 workers at once (its workers setting), each a test worker of keploy's run";
+  let j = journal();
+  let a = await fakeAgent(j, (c) => (c.path === '/agent/instance'
+    ? { status: 422, body: { error: 'too_many_workers', message: 'process 9 declared 2 test workers, but this keploy runs one test worker at a time', remedy: 'run one worker' } }
+    : undefined));
+  try {
+    const { tests } = await playwright(['agent-says.spec.ts'], { ...keployEnv(a.url), PW_WORKERS: '2' });
+    for (const t of Object.values(tests)) {
+      assert.equal(t.status, 'failed');
+      assert.ok(t.error.includes(`keploy: process 9 declared 2 test workers, but this keploy runs one test worker at a time (run one worker); ${say}`), t.error);
+    }
+    assert.ok(calls(j).every((c) => c.path === '/agent/instance'));
+  } finally { await a.close(); }
+  j = journal();
+  a = await fakeAgent(j);
+  try {
+    const { tests } = await playwright(['agent-says.spec.ts'], { ...keployEnv(a.url), PW_WORKERS: '2' });
+    const refusal = { code: 'one_test_process_at_a_time', message: `this keploy runs one test process at a time, and ${say}`, remedy: 'run one worker (npx playwright test --workers=1), or use a keploy that runs test workers at once' };
+    for (const t of Object.values(tests)) {
+      assert.equal(t.status, 'failed');
+      assert.ok(t.error.includes(`keploy: ${refusal.message} (${refusal.remedy})`), t.error);
+    }
+    // Playwright starts a worker again after its tests fail, and each one
+    // claims, refuses and tells the agent: never a begin.
+    const pairs = calls(j).map((c) => [c.path, c.body]);
+    assert.ok(pairs.length >= 2 && pairs.length % 2 === 0, JSON.stringify(pairs));
+    for (let i = 0; i < pairs.length; i += 2) {
+      assert.deepEqual(pairs.slice(i, i + 2), [
+        ['/agent/instance', { key: 'p1', dir: fs.realpathSync(PKG), workers: 2 }],
+        ['/agent/refusal', refusal],
+      ]);
+    }
   } finally { await a.close(); }
 });
 
@@ -293,7 +350,7 @@ test('an unnamed Playwright project claims with the key ".", and its tests name 
     assert.equal(tests['judged red'].status, 'passed', out);
     const r = { name: 'judged red', file: 'test/fixtures/agent-says.spec.ts' };
     assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
-      ['/agent/instance', { key: '.', dir: fs.realpathSync(PKG) }],
+      ['/agent/instance', { key: '.', dir: fs.realpathSync(PKG), workers: 1 }],
       ['/agent/scope/begin', { ...r, canSkip: true }],
       ['/agent/scope/end', { ...r, outcome: 'passed' }],
     ]);
@@ -313,7 +370,7 @@ test('a worker started above keploy\'s project claims with the project\'s folder
     assert.equal(tests['judged red'].status, 'passed', out);
     const r = ref('agent-says.spec.ts', 'judged red');
     assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
-      ['/agent/instance', { key: 'p1', dir: fs.realpathSync(PKG) }],
+      ['/agent/instance', { key: 'p1', dir: fs.realpathSync(PKG), workers: 1 }],
       ['/agent/scope/begin', { ...r, canSkip: true }],
       ['/agent/scope/end', { ...r, outcome: 'passed' }],
     ]);
@@ -329,7 +386,7 @@ test('when keploy names no project, a worker claims with the current folder, whi
     assert.equal(tests['judged red'].status, 'passed', out);
     const r = { name: 'judged red', file: `${path.basename(PKG)}/test/fixtures/agent-says.spec.ts`, project: 'p1' };
     assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
-      ['/agent/instance', { key: 'p1', dir: fs.realpathSync(cwd) }],
+      ['/agent/instance', { key: 'p1', dir: fs.realpathSync(cwd), workers: 1 }],
       ['/agent/scope/begin', { ...r, canSkip: true }],
       ['/agent/scope/end', { ...r, outcome: 'passed' }],
     ]);

@@ -43,11 +43,11 @@ test('the client sends the token and the protocol body, and takes v1 answers', a
   const a = await agent(({ path: p }) => ({ body: p === '/agent/instance' ? { v: 1, instance: 'run', timeFile: '/tmp/k/t' } : { v: 1, status: 'ok' } }));
   try {
     const c = new AgentClient(a.url + '/', 'tok');
-    await c.claim('chromium', '/proj');
+    await c.claim('chromium', '/proj', 1);
     await c.begin({ name: 'g › a', file: 'tests/a.spec.ts', project: 'chromium' });
     await c.end({ name: 'g › a', file: 'tests/a.spec.ts', project: 'chromium' }, 'passed');
     assert.deepEqual(a.calls.map((x) => [x.path, x.auth, x.body]), [
-      ['/agent/instance', 'Bearer tok', { key: 'chromium', dir: '/proj' }],
+      ['/agent/instance', 'Bearer tok', { key: 'chromium', dir: '/proj', workers: 1 }],
       ['/agent/scope/begin', 'Bearer tok', { name: 'g › a', file: 'tests/a.spec.ts', project: 'chromium', canSkip: true }],
       ['/agent/scope/end', 'Bearer tok', { name: 'g › a', file: 'tests/a.spec.ts', project: 'chromium', outcome: 'passed' }],
     ]);
@@ -112,24 +112,99 @@ test('an end takes only fail as its action', async () => {
 test('a claim without an instance is refused', async () => {
   const a = await agent(() => ({ body: { v: 1 } }));
   try {
-    await rejects(new AgentClient(a.url, '').claim('p', '/d'), /without an instance/);
+    await rejects(new AgentClient(a.url, '').claim('p', '/d', 1), /without an instance/);
+  } finally { await a.close(); }
+});
+
+// The claim names how many workers Playwright runs at once. The agent takes
+// each as a test worker of its own (an instance of its own), or refuses the
+// count whole; its refusal is told where the count came from. A count that is
+// not one or more claims nothing.
+test('a claim names the run\'s worker count, and a refusal of it says where the count came from', async () => {
+  const say = "Playwright runs up to 3 workers at once (its workers setting), each a test worker of keploy's run";
+  let a = await agent(() => ({ body: { v: 1, instance: '2', timeFile: '' } }));
+  try {
+    const got = await new AgentClient(a.url, '').claim('p', '/d', 3);
+    assert.equal(got.instance, '2');
+    assert.deepEqual(a.calls.map((x) => [x.path, x.body]), [['/agent/instance', { key: 'p', dir: '/d', workers: 3 }]]);
+  } finally { await a.close(); }
+  const tooMany = { status: 422, body: { error: 'too_many_workers', message: 'process 7 declared 3 test workers, but this keploy runs one test worker at a time', remedy: 'run one worker' } };
+  a = await agent(() => tooMany);
+  try {
+    await assert.rejects(new AgentClient(a.url, '').claim('p', '/d', 3), (err) => {
+      assert.ok(err instanceof KeployError);
+      assert.equal(err.message, `keploy: process 7 declared 3 test workers, but this keploy runs one test worker at a time (run one worker); ${say}`);
+      assert.equal(err.code, 'too_many_workers');
+      assert.equal(err.status, 422);
+      return true;
+    });
+    // One worker's refusal is the agent's words alone.
+    await rejects(new AgentClient(a.url, '').claim('p', '/d', 1), /^keploy: process 7 declared 3 test workers, but this keploy runs one test worker at a time \(run one worker\)$/);
+  } finally { await a.close(); }
+  // An answer that is no refusal of the agent's names no count.
+  a = await agent(() => ({ status: 500, body: 'boom' }));
+  try {
+    await rejects(new AgentClient(a.url, '').claim('p', '/d', 3), /^keploy: the keploy agent answered 500 Internal Server Error to \/agent\/instance: "boom"$/);
+  } finally { await a.close(); }
+  a = await agent(() => ({ body: { v: 1, instance: '1', timeFile: '' } }));
+  try {
+    for (const n of [0, -1, 1.5, Number.NaN, undefined]) {
+      await rejects(new AgentClient(a.url, '').claim('p', '/d', n), /^keploy: Playwright named .* as its workers setting, not a count of 1 or more, so this worker cannot claim keploy's run as one of them$/);
+    }
+    assert.deepEqual(a.calls, []);
+  } finally { await a.close(); }
+});
+
+// A keploy agent that predates test workers reads no count and answers a
+// claim as the run's only test process (instance "run"): it would refuse the
+// next worker while this one runs, so the outcome would hang on how
+// Playwright schedules its workers. The worker refuses the run with the fix,
+// and tells the agent, so the run's verdict names it.
+test('a worker of several that an agent took as the run\'s only test process refuses the run and tells the agent', async () => {
+  const text = "keploy: this keploy runs one test process at a time, and Playwright runs up to 2 workers at once (its workers setting), each a test worker of keploy's run (run one worker (npx playwright test --workers=1), or use a keploy that runs test workers at once)";
+  const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  let a = await agent(({ path: p }) => ({ body: p === '/agent/instance' ? { v: 1, instance: 'run', timeFile: '' } : { v: 1, status: 'ok' } }));
+  try {
+    await assert.rejects(new AgentClient(a.url, '').claim('p', '/d', 2), (err) => {
+      assert.ok(err instanceof KeployError);
+      assert.equal(err.message, text);
+      assert.equal(err.code, 'one_test_process_at_a_time');
+      return true;
+    });
+    assert.deepEqual(a.calls.map((x) => [x.path, x.body]), [
+      ['/agent/instance', { key: 'p', dir: '/d', workers: 2 }],
+      ['/agent/refusal', { code: 'one_test_process_at_a_time', message: "this keploy runs one test process at a time, and Playwright runs up to 2 workers at once (its workers setting), each a test worker of keploy's run", remedy: 'run one worker (npx playwright test --workers=1), or use a keploy that runs test workers at once' }],
+    ]);
+    // One worker that the agent takes as the run's only one claims as before.
+    a.calls.length = 0;
+    assert.equal((await new AgentClient(a.url, '').claim('p', '/d', 1)).instance, 'run');
+    assert.deepEqual(a.calls.map((x) => x.path), ['/agent/instance']);
+  } finally { await a.close(); }
+  // An agent that cannot be told: the failure says so.
+  a = await agent(({ path: p }) => (p === '/agent/instance' ? { body: { v: 1, instance: 'run', timeFile: '' } } : { status: 404, body: '404 page not found' }));
+  try {
+    await rejects(new AgentClient(a.url, '').claim('p', '/d', 2), new RegExp(`^${esc(text)} \\(keploy's agent was not told, so keploy's verdict cannot name it: the keploy agent answered 404 Not Found to /agent/refusal: "404 page not found"\\)$`));
+  } finally { await a.close(); }
+  a = await agent(({ path: p }) => ({ body: p === '/agent/instance' ? { v: 1, instance: 'run', timeFile: '' } : { v: 1, status: 'later' } }));
+  try {
+    await rejects(new AgentClient(a.url, '').claim('p', '/d', 2), new RegExp(`^${esc(text)} \\(keploy's agent was not told, so keploy's verdict cannot name it: it answered the refusal one_test_process_at_a_time with status "later"\\)$`));
   } finally { await a.close(); }
 });
 
 test('a claim answered with a plain 404 names the route and the switch keploy speaks the protocol under; keploy\'s own 404 shows keploy\'s reason', async () => {
   let a = await agent(() => ({ status: 404, body: '404 page not found' }));
   try {
-    await rejects(new AgentClient(a.url, '').claim('p', '/d'), /^keploy: this keploy agent answered 404 to POST \/agent\/instance, so this worker cannot claim keploy's run: keploy speaks @keploy\/playwright's wire, scope protocol v1, only when it runs with KEPLOY_PROVEN=1 \(KEPLOY_PROVEN=1 keploy mock record\|replay -c "npx playwright test --workers=1 --retries=0"\); a keploy run without KEPLOY_PROVEN=1, or one from before scope protocol v1, answers 404 there$/);
+    await rejects(new AgentClient(a.url, '').claim('p', '/d', 1), /^keploy: this keploy agent answered 404 to POST \/agent\/instance, so this worker cannot claim keploy's run: keploy speaks @keploy\/playwright's wire, scope protocol v1, only when it runs with KEPLOY_PROVEN=1 \(KEPLOY_PROVEN=1 keploy mock record\|replay -c "npx playwright test --workers=1 --retries=0"\); a keploy run without KEPLOY_PROVEN=1, or one from before scope protocol v1, answers 404 there$/);
   } finally { await a.close(); }
   // A 404 that carries keploy's own refusal is keploy's answer, not a missing route.
   a = await agent(() => ({ status: 404, body: { error: 'no_instance', message: 'no run to claim', remedy: 'start keploy mock record' } }));
   try {
-    await rejects(new AgentClient(a.url, '').claim('p', '/d'), /^keploy: no run to claim \(start keploy mock record\)$/);
+    await rejects(new AgentClient(a.url, '').claim('p', '/d', 1), /^keploy: no run to claim \(start keploy mock record\)$/);
   } finally { await a.close(); }
   // Any other plain answer keeps the generic text.
   a = await agent(() => ({ status: 500, body: 'boom' }));
   try {
-    await rejects(new AgentClient(a.url, '').claim('p', '/d'), /^keploy: the keploy agent answered 500 Internal Server Error to \/agent\/instance: "boom"$/);
+    await rejects(new AgentClient(a.url, '').claim('p', '/d', 1), /^keploy: the keploy agent answered 500 Internal Server Error to \/agent\/instance: "boom"$/);
   } finally { await a.close(); }
 });
 

@@ -1,6 +1,6 @@
 // The client of keploy's agent: scope protocol v1, the same wire go-sdk's
 // keploytest speaks (POST /agent/instance, /agent/scope/begin,
-// /agent/scope/end, /agent/scope/given).
+// /agent/scope/end, /agent/scope/given, /agent/refusal).
 //
 // Every answer of the agent carries the protocol version as "v"; an answer
 // without it, or with another version, is an error, so this package on an
@@ -14,6 +14,13 @@ export const PATH_INSTANCE = '/agent/instance';
 export const PATH_BEGIN = '/agent/scope/begin';
 export const PATH_END = '/agent/scope/end';
 export const PATH_GIVEN = '/agent/scope/given';
+export const PATH_REFUSAL = '/agent/refusal';
+
+// The claim's answer for a test process that runs alone: the instance is the
+// run itself.
+export const INSTANCE_RUN = 'run';
+// The refusal of a second test process while another one runs.
+export const CODE_ONE_TEST_PROCESS = 'one_test_process_at_a_time';
 
 export const ACTION_SKIP = 'skip';
 export const ACTION_FAIL = 'fail';
@@ -50,6 +57,22 @@ export class KeployError extends Error {
 export function quoted(text: string): string {
   const s = text.trim();
   return s.length > MAX_QUOTED ? `${JSON.stringify(s.slice(0, MAX_QUOTED))}...` : JSON.stringify(s);
+}
+
+/** What this package refused and tells keploy (POST /agent/refusal). */
+export interface Refusal {
+  code: string;
+  message: string;
+  remedy?: string;
+}
+
+/**
+ * Where a claim's worker count comes from, as a refusal names it: how many
+ * workers Playwright runs at once (its resolved workers setting), each
+ * claiming keploy's run for itself.
+ */
+export function workersSaid(workers: number): string {
+  return `Playwright runs up to ${workers} workers at once (its workers setting), each a test worker of keploy's run`;
 }
 
 /** Talks to one keploy agent. */
@@ -106,11 +129,19 @@ export class AgentClient {
     return a as Answer;
   }
 
-  /** Claims keploy's run for this test process (a Playwright worker). */
-  async claim(key: string, dir: string): Promise<Answer> {
+  /**
+   * Claims keploy's run for this test process (a Playwright worker), as one
+   * of workers test workers: the agent takes each worker as a test worker of
+   * its own, or refuses the count whole (too_many_workers) before any test
+   * runs, never by how the workers happen to overlap.
+   */
+  async claim(key: string, dir: string, workers: number): Promise<Answer> {
+    if (!Number.isInteger(workers) || workers < 1) {
+      throw new KeployError(`keploy: Playwright named ${JSON.stringify(workers)} as its workers setting, not a count of 1 or more, so this worker cannot claim keploy's run as one of them`);
+    }
     let a: Answer;
     try {
-      a = await this.post(PATH_INSTANCE, { key, dir });
+      a = await this.post(PATH_INSTANCE, { key, dir, workers });
     } catch (err) {
       if (err instanceof KeployError && err.status === 404 && err.code === '') {
         // keploy speaks scope protocol v1 only under its proven switch. With
@@ -123,16 +154,51 @@ export class AgentClient {
           '(KEPLOY_PROVEN=1 keploy mock record|replay -c "npx playwright test --workers=1 --retries=0"); ' +
           'a keploy run without KEPLOY_PROVEN=1, or one from before scope protocol v1, answers 404 there', 404);
       }
+      if (err instanceof KeployError && err.code !== '' && workers > 1) {
+        // The agent's refusal names the count; say where it came from,
+        // which the test command may not spell out.
+        throw new KeployError(`${err.message}; ${workersSaid(workers)}`, err.status, err.code);
+      }
       throw err;
     }
     if (!a.instance) {
       throw new KeployError('keploy: the keploy agent answered the claim of this test process without an instance');
+    }
+    if (workers > 1 && a.instance === INSTANCE_RUN) {
+      // A keploy agent that predates test workers reads no count, and took
+      // this worker as the run's only test process: it would refuse the next
+      // worker Playwright starts while this one runs, so the run's outcome
+      // would hang on how Playwright schedules them.
+      await this.refuse({
+        code: CODE_ONE_TEST_PROCESS,
+        message: `this keploy runs one test process at a time, and ${workersSaid(workers)}`,
+        remedy: 'run one worker (npx playwright test --workers=1), or use a keploy that runs test workers at once',
+      });
     }
     // a.timeFile names the run's clock when keploy moves it. Node and the
     // browser read the clock through libc, which keploy's preload (inherited
     // from the test command) moves; unlike a Go test binary, which reads it
     // without libc, a Playwright worker needs no launcher to follow it.
     return a;
+  }
+
+  /**
+   * Tells the agent what this worker refused, so the run's verdict names it,
+   * and fails with it: every test of the worker fails with the fix. When the
+   * agent cannot be told, the failure says so.
+   */
+  async refuse(r: Refusal): Promise<never> {
+    const text = `keploy: ${r.message}${r.remedy ? ` (${r.remedy})` : ''}`;
+    let a: Answer;
+    try {
+      a = await this.post(PATH_REFUSAL, r);
+    } catch (err) {
+      throw new KeployError(`${text} (keploy's agent was not told, so keploy's verdict cannot name it: ${causeOf(err).replace(/^keploy: /, '')})`, 0, r.code);
+    }
+    if (a.status !== 'ok') {
+      throw new KeployError(`${text} (keploy's agent was not told, so keploy's verdict cannot name it: it answered the refusal ${r.code} with status ${JSON.stringify(a.status ?? '')})`, 0, r.code);
+    }
+    throw new KeployError(text, 0, r.code);
   }
 
   /** Asks the agent to open a test. */
