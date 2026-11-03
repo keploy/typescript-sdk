@@ -9,6 +9,9 @@ import { pageScript } from '../dist/random.js';
 // The draws the rows' pages make at load (test/fixtures/seeded.spec.ts's
 // page server sends the same expression).
 export const DRAWS = '({ random: [Math.random(), Math.random()], bytes: Array.from(crypto.getRandomValues(new Uint8Array(8))), uuid: crypto.randomUUID() })';
+// The same without crypto.randomUUID, for about:blank, which is no secure
+// context (test/fixtures/first.spec.ts draws it).
+export const BLANK_DRAWS = '({ random: [Math.random(), Math.random()], bytes: Array.from(crypto.getRandomValues(new Uint8Array(8))) })';
 
 /**
  * A document at path whose init script is script. storage is the tab's

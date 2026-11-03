@@ -10,7 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LOADS_KEY, SEEDED_LINE, initScript, unplacedLine, unseededLine } from '../dist/random.js';
-import { DRAWS, documentAt } from './draws.mjs';
+import { BLANK_DRAWS, DRAWS, documentAt } from './draws.mjs';
 
 const PKG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(PKG, 'node_modules', '@playwright', 'test', 'cli.js');
@@ -414,6 +414,8 @@ async function drawsServer() {
     if (u.pathname === '/frame') { res.end(page('frame')); return; }
     // /nest holds /frame of its own origin.
     if (u.pathname === '/nest') { res.end(page('<iframe src="/frame"></iframe>')); return; }
+    // /long/... is a page at an address of any length.
+    if (u.pathname.startsWith('/long/')) { res.end(page('')); return; }
     res.end('');
   });
   // Every address: the frame is asked for at localhost, which may be ::1.
@@ -592,6 +594,43 @@ test('seeded: each page of a test draws its own numbers at one path, a popup pla
       for (const x of names) assert.deepEqual(unplaced(p, x).sort(), unplaced(r, x).sort(), x);
       assert.deepEqual(p.ends, names.map((x) => [x, 'seeded']));
     }
+  } finally { await rep.close(); await rec.close(); }
+});
+
+test('seeded: a page\'s first document, before its first goto and as setContent writes it, draws in the page\'s place, the same at replay; an address keploy cannot place is shown cut to 512 characters', async () => {
+  const j = journal();
+  const rec = await fakeAgent(j);
+  let kept = {};
+  const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+    ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+  const names = ['blank', 'longpath'];
+  const unplaced = (r, n) => r.tests[n].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${n}, `));
+  try {
+    const r = await drawRun(j, keployEnv(rec.url), ['first.spec.ts'], names);
+    // The page fixture's page and one context.newPage() made, each in its
+    // place, in its one document: the page's draw before the first goto, then
+    // its own script in what setContent wrote; the other's script in what
+    // setContent wrote as soon as newPage returned, then a draw.
+    const draws = (id) => {
+      const d = documentAt(initScript(r.seeds.blank), 'blank', undefined, id);
+      return [0, 1].map(() => JSON.parse(JSON.stringify(d.run(BLANK_DRAWS))));
+    };
+    const [first, set] = draws('t0');
+    assert.deepEqual(r.drew.blank.page, { url: 'about:blank', first, set });
+    const [oset, after] = draws('t1');
+    assert.deepEqual(r.drew.blank.other, { url: 'about:blank', set: oset, after });
+    assert.notDeepEqual(first, oset);
+    assert.deepEqual(unplaced(r, 'blank'), []);
+    // A noopener popup at an overlong address: named once, its address cut.
+    const long = r.drew.longpath.url;
+    assert.ok(long.length > 600, long);
+    assert.deepEqual(unplaced(r, 'longpath'), [unplacedLine('longpath', long.slice(0, 512))]);
+    assert.deepEqual(r.ends, names.map((x) => [x, 'seeded']));
+    kept = r.seeds;
+    const p = await drawRun(j, keployEnv(rep.url), ['first.spec.ts'], names);
+    assert.deepEqual(p.drew.blank, r.drew.blank);
+    assert.deepEqual(unplaced(p, 'blank'), []);
+    assert.deepEqual(unplaced(p, 'longpath'), [unplacedLine('longpath', p.drew.longpath.url.slice(0, 512))]);
   } finally { await rep.close(); await rec.close(); }
 });
 

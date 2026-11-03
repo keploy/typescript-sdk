@@ -52,7 +52,7 @@ import { ACTION_FAIL, ACTION_SKIP, AgentClient, KeployError, RANDOM_OWN, RANDOM_
 import type { Outcome, Random, TestRef } from './agent';
 import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
-import { SEEDED_LINE, freshSeed, initScript, pageScript, seedingFromEnv, unplacedLine, unseededLine } from './random';
+import { SEEDED_LINE, freshSeed, initScript, pageAddress, pageScript, seedingFromEnv, unplacedLine, unseededLine } from './random';
 import { Inflight } from './settle';
 
 export { expect, KeployError };
@@ -81,9 +81,10 @@ let reports = 0;
 /**
  * Names each page the test opens in context (context.newPage(), the page
  * fixture's among them) by its place in the order the test opened them, in
- * every document of the page, before newPage returns: two tabs of a test
- * draw their own numbers, the same ones at replay. A popup is placed by its
- * opener's document in the page itself (initScript). Returns what undoes it.
+ * every document of the page, its first about:blank included, before
+ * newPage returns: two tabs of a test draw their own numbers, the same ones
+ * at replay. A popup is placed by its opener's document in the page itself
+ * (initScript). Returns what undoes it.
  */
 function placePages(context: BrowserContext): () => void {
   const had = Object.prototype.hasOwnProperty.call(context, 'newPage');
@@ -94,7 +95,10 @@ function placePages(context: BrowserContext): () => void {
     // comes: two pages asked for at once keep the order the test asked in.
     const id = `t${made++}`;
     const p = await newPage.call(context);
+    // The documents the page loads, and the one it has: an init script
+    // does not run in a document that already exists.
     await p.addInitScript({ content: pageScript(id) });
+    await p.evaluate(pageScript(id));
     return p;
   };
   return () => {
@@ -186,8 +190,7 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       const report = `__keploy_random_unplaced_${++reports}`;
       const told = new Set<string>();
       await context.exposeBinding(report, (_source, at: unknown) => {
-        // The page's own text: one line, of a sane length.
-        const a = (typeof at === 'string' ? at : String(at)).replace(/[\u0000-\u001f\u007f]/g, '?').slice(0, 512);
+        const a = pageAddress(at);
         if (told.has(a)) return;
         told.add(a);
         process.stdout.write(`${unplacedLine(name, a)}\n`);

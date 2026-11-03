@@ -49,7 +49,15 @@ export const SEEDED_LINE = 'keploy: the test browser\'s random numbers (Math.ran
 export function unseededLine(name: string): string {
   return `keploy: keploy answered the begin of ${name} with no seed, so its browser draws its own random numbers: ` +
     'its recording kept none (it was recorded before keploy kept seeds, or with seeding off: record the test again with seeding on, the default, to seed it), ' +
-    'or the test was pulled from a Keploy branch, which keeps no seed yet, or this keploy predates seeds.';
+    'or the test was pulled from a Keploy branch, which keeps no seed, or this keploy predates seeds.';
+}
+
+/**
+ * An address a page sent, as the run's output shows it: one line (each
+ * control character a ?), of at most 512 characters.
+ */
+export function pageAddress(at: unknown): string {
+  return String(at).replace(/[\u0000-\u001f\u007f]/g, '?').slice(0, 512);
 }
 
 /**
@@ -86,8 +94,10 @@ export const DOC_KEY = '__keploy_random_doc';
  * The init script that names the page a test opened (context.newPage(), the
  * page fixture's among them) in each of its documents and frames: its place
  * among the pages the test opened in its context, in the order the test
- * opened them. The fixture adds it to the page before newPage returns, so it
- * runs in the page's first document.
+ * opened them. Before newPage returns, the fixture adds it to the page, for
+ * each document the page loads, and runs it in the page's first document
+ * (its about:blank, which setContent writes into): initScript reads the
+ * name at the document's first draw.
  */
 export function pageScript(id: string): string {
   return `Object.defineProperty(globalThis, ${JSON.stringify(PAGE_KEY)}, { value: ${JSON.stringify(id)}, enumerable: false, writable: false, configurable: true });\n`;

@@ -2,7 +2,7 @@
 // init script run in a Node vm context in place of a page. No browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DOC_KEY, ENV_SEED_RANDOM, LOADS_KEY, PAGE_KEY, SEEDED_LINE, freshSeed, initScript, pageScript, seedingFromEnv, unplacedLine, unseededLine } from '../dist/random.js';
+import { DOC_KEY, ENV_SEED_RANDOM, LOADS_KEY, PAGE_KEY, SEEDED_LINE, freshSeed, initScript, pageAddress, pageScript, seedingFromEnv, unplacedLine, unseededLine } from '../dist/random.js';
 import { SEED } from '../dist/agent.js';
 import { documentAt } from './draws.mjs';
 
@@ -33,10 +33,17 @@ test('the lines say what is seeded, what is not, where the seed lives, and how t
     'To turn it off, record and replay with KEPLOY_SEED_RANDOM=off, or set use: { keploySeedRandom: false } in the Playwright config.');
   assert.equal(unseededLine('g › t'), 'keploy: keploy answered the begin of g › t with no seed, so its browser draws its own random numbers: ' +
     'its recording kept none (it was recorded before keploy kept seeds, or with seeding off: record the test again with seeding on, the default, to seed it), ' +
-    'or the test was pulled from a Keploy branch, which keeps no seed yet, or this keploy predates seeds.');
+    'or the test was pulled from a Keploy branch, which keeps no seed, or this keploy predates seeds.');
   assert.equal(unplacedLine('g › t', 'http://h/p'), 'keploy: in g › t, the document at http://h/p drew the browser\'s own random numbers, so its draws may differ at replay: ' +
     'it is in a page the app opened that keploy cannot place in the test\'s order (a popup opened with noopener, as a link with target=_blank opens one, ' +
     'or at another origin than its opener\'s page, or after that page moved on; or a frame of another origin in one).');
+});
+
+test('an address a page sends is shown on one line, each control character a ?, cut to 512 characters', () => {
+  assert.equal(pageAddress('http://h/p'), 'http://h/p');
+  assert.equal(pageAddress('http://h/a\nkeploy: forged\r\u0000\u001f\u007f\tz'), 'http://h/a?keploy: forged?????z');
+  assert.equal(pageAddress(`http://h/${'x'.repeat(600)}`), `http://h/${'x'.repeat(503)}`);
+  assert.equal(pageAddress(42), '42');
 });
 
 test('a begin\'s seed is drawn afresh each time: 128 bits of hex, a seed keploy keeps', () => {
