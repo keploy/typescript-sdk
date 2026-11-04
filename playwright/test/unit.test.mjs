@@ -404,7 +404,7 @@ test('quiet: the end of a call it does not count (dropped as cancelled, or begun
   }
 });
 
-test('quiet: a call its page\'s close cancels ends, and restarts the window; a page that closes with no call in flight ends none', async (t) => {
+test('quiet: a call its page\'s close cancels ends, and restarts the window, named or not yet; a page that closes with no call in flight ends none', async (t) => {
   let q = quietOn(t);
   const other = new EventEmitter();
   q.ctx.emit('page', other);
@@ -426,6 +426,21 @@ test('quiet: a call its page\'s close cancels ends, and restarts the window; a p
   assert.equal(q.res.value, 'waiting');
   await after(t, 1);
   assert.equal(q.res.value, true);
+  t.mock.timers.reset();
+  // Cancelled 200 ms into its flight: the wait for it ends at the close,
+  // unnamed, and the window runs from the close.
+  q = quietOn(t);
+  q.ctx.emit('request', fakeRequest(q.page));
+  q.wait();
+  await after(t, 200);
+  q.page.emit('close');
+  assert.equal(q.inflight.size, 0);
+  await after(t, QUIET_MS - 1);
+  assert.equal(q.res.value, 'waiting');
+  assert.equal(q.res.named, 0);
+  await after(t, 1);
+  assert.equal(q.res.value, true);
+  assert.equal(q.res.named, 0);
 });
 
 test('quiet: pages that never go quiet end the wait after 3 s with no call in flight, not before, answering that they did not go quiet', async (t) => {
