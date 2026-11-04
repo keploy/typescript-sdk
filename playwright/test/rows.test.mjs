@@ -162,6 +162,19 @@ test('a worker claims the run, each test begins before its beforeEach and ends w
   } finally { await a.close(); }
 });
 
+test('given sends its caller path as it appears on disk when the filename has spaces', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  try {
+    const { tests, out } = await playwright(['given caller with spaces.spec.ts'], keployEnv(a.url));
+    assert.equal(tests['caller with spaces'].status, 'passed', out);
+    const call = calls(j).find((c) => c.path === '/agent/scope/given');
+    assert.deepEqual(call?.body, {
+      name: 'customer', value: 'customer-1', source: 'test/fixtures/given caller with spaces.spec.ts:4',
+    }, out);
+  } finally { await a.close(); }
+});
+
 test('keploy skips a set-aside test with its reason, fails a judged-red one, and a refused begin fails the test', async () => {
   const j = journal();
   const a = await fakeAgent(j, (c) => {

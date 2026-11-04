@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { AgentClient, KeployError } from '../dist/agent.js';
 import { decide } from '../dist/join.js';
 import { Inflight } from '../dist/settle.js';
@@ -279,6 +280,12 @@ test('sourceOf: the first frame outside the package, relative to the project', (
   assert.equal(sourceOf(stack, '/proj'), 'tests/a.spec.ts:12');
   assert.equal(sourceOf(['Error', '    at Object.<anonymous> (/proj/t/b.spec.ts:3:1)'].join('\n'), '/proj'), 't/b.spec.ts:3');
   assert.equal(sourceOf(['Error', '    at x (file:///proj/t/c.spec.mjs:4:2)'].join('\n'), '/proj'), 't/c.spec.mjs:4');
+  const encoded = pathToFileURL('/proj/t/a b.spec.mjs').href;
+  assert.equal(sourceOf(`Error\n    at x (${encoded}:5:2)`, '/proj'), 't/a b.spec.mjs:5');
+  assert.equal(sourceOf('Error\n    at /proj/t/a b.spec.ts:5:2', '/proj'), 't/a b.spec.ts:5');
+  assert.equal(sourceOf('Error\n    at async /proj/t/a b.spec.ts:5:2', '/proj'), 't/a b.spec.ts:5');
+  assert.equal(sourceOf('Error\n    at async /proj/t/a.spec.ts:5:2', '/proj'), 't/a.spec.ts:5');
+  assert.equal(sourceOf('Error\n    at eval (file:///proj/a%2Fb.spec.ts:1:1)\n    at /proj/a.spec.ts:2:1', '/proj'), 'a.spec.ts:2');
   assert.equal(sourceOf('Error\n    at <anonymous>', '/proj'), '');
 });
 
