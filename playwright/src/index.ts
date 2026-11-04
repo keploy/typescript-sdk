@@ -161,12 +161,12 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       const report = `__keploy_random_unplaced_${++reports}`;
       const told = new Set<string>();
       let opened: (page: Page | null | undefined) => Promise<boolean> = async () => false;
-      await context.exposeBinding(report, async (source, at: unknown, why: unknown) => {
+      await context.exposeBinding(report, async (source, at: unknown, why: unknown, others: unknown) => {
         const a = pageAddress(at);
         if (told.has(a)) return;
         told.add(a);
-        const w: Unplaced = why === 'frame' ? 'frame' : (await opened(source.page)) ? 'own' : 'popup';
-        process.stdout.write(`${unplacedLine(name, a, w)}\n`);
+        const w: Unplaced = why === 'frame' || why === 'twin' ? why : (await opened(source.page)) ? 'own' : 'popup';
+        process.stdout.write(`${unplacedLine(name, a, w, Number(others))}\n`);
       });
       // Before the test's first page: an init script runs in every frame's
       // document before its own scripts.

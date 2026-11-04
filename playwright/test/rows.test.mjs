@@ -447,7 +447,29 @@ async function drawsServer() {
     if (u.pathname === '/fr') { setTimeout(() => res.end(page('r')), u.searchParams.get('n') === u.searchParams.get('slow') ? 800 : 0); return; }
     if (u.pathname === '/nested') { res.end(page('<iframe name="x" src="/fa"></iframe><iframe name="n" src="/fn"></iframe>')); return; }
     if (u.pathname === '/fn') { res.end(page('<iframe name="y" src="/fb"></iframe><iframe name="z" src="/fb"></iframe><iframe name="nn" src="/fa"></iframe>')); return; }
-    if (['/fa', '/fb', '/fc', '/fw'].includes(u.pathname)) { res.end(page(u.pathname)); return; }
+    if (['/fa', '/fb', '/fc', '/fw', '/fm', '/fs'].includes(u.pathname)) { res.end(page(u.pathname)); return; }
+    // many.spec.ts's: /many holds k frames m0.. at /fm, in its markup or put
+    // in by one script (?how=); /sbx holds n sandboxed frames s0.. at /fs;
+    // /cost is a page of n elements, or of that many open shadow roots of
+    // 10 elements each, beside an empty #box.
+    if (u.pathname === '/many') {
+      const k = Number(u.searchParams.get('k'));
+      res.end(page(u.searchParams.get('how') === 'markup'
+        ? Array.from({ length: k }, (_, i) => `<iframe name="m${i}" src="/fm"></iframe>`).join('')
+        : `<script>for(let i=0;i<${k};i++){const f=document.createElement('iframe');f.name='m'+i;f.src='/fm';document.body.appendChild(f);}</script>`));
+      return;
+    }
+    if (u.pathname === '/sbx') {
+      res.end(page(Array.from({ length: Number(u.searchParams.get('n')) }, (_, i) => `<iframe name="s${i}" sandbox="allow-scripts" src="/fs"></iframe>`).join('')));
+      return;
+    }
+    if (u.pathname === '/cost') {
+      const n = Number(u.searchParams.get('n') || 0);
+      const sh = Number(u.searchParams.get('shadow') || 0);
+      res.end(page(`<div id="box"></div><script>{const f=document.createDocumentFragment();for(let i=0;i<${n};i++)f.appendChild(document.createElement('i'));` +
+        `for(let i=0;i<${sh};i++){const h=document.createElement('div');f.appendChild(h);h.attachShadow({mode:'open'}).innerHTML='<span>a</span>'.repeat(10);}document.body.appendChild(f);}</script>`));
+      return;
+    }
     res.end('');
   });
   // Every address: the frame is asked for at localhost, which may be ::1.
@@ -778,7 +800,12 @@ for (const engine of ENGINES) {
       });
       // r0 and r1 numbered in their elements' order, not their documents'.
       const race = keyOf(seed.race, 't0', '/race');
-      assert.deepEqual(r.drew.race, { r0: ex('race', '/fr', `${race}f/fr\n0`), r1: ex('race', '/fr', `${race}f/fr\n1`) });
+      // Put back, they take the next numbers there as they are put back,
+      // whatever order their documents then load in.
+      assert.deepEqual(r.drew.race, {
+        r0: ex('race', '/fr', `${race}f/fr\n0`), r1: ex('race', '/fr', `${race}f/fr\n1`),
+        again0: ex('race', '/fr', `${race}f/fr\n2`), again1: ex('race', '/fr', `${race}f/fr\n3`),
+      });
       // The frame put back at /fa takes the next number there: its own
       // numbers, never the removed one's.
       assert.deepEqual(r.drew.remount, { first: ex('remount', '/fa', `${host('remount')}f/fa\n0`), again: ex('remount', '/fa', `${host('remount')}f/fa\n1`) });
@@ -819,6 +846,59 @@ for (const engine of ENGINES) {
         for (const x of names) assert.deepEqual(p.drew[x], r.drew[x], `${order} ${x}`);
         assert.deepEqual(lines(p), [], order);
       }
+    } finally { await rep.close(); await rec.close(); }
+  });
+}
+
+for (const engine of ENGINES) {
+  test(`seeded, in ${engine}: 300 frames in a page's markup, or put in by one script, each load and draw their own numbers, the same at replay, with no page error; three sandboxed frames at one path are not seeded and are named, a lone one is; seeding costs a page whose DOM changes often little`, async () => {
+    const j = journal();
+    const rec = await fakeAgent(j);
+    let kept = {};
+    const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+      ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+    const names = ['markup', 'script', 'sandboxed', 'cost'];
+    const env = (url) => ({ ...keployEnv(url), PW_BROWSER: engine });
+    const unplaced = (r, n) => r.tests[n].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${n}, `)).map((l) => l.replace(/:\d+\//, ':<port>/'));
+    const twins = [unplacedLine('sandboxed', 'http://127.0.0.1:<port>/fs', 'twin', 2)];
+    try {
+      const r = await drawRun(j, env(rec.url), ['many.spec.ts'], names);
+      const seed = r.seeds;
+      // Every frame loads, each the k-th at /fm in /many, and nothing is
+      // thrown into the page.
+      for (const how of ['markup', 'script']) {
+        const { drew, errors } = r.drew[how];
+        assert.deepEqual(errors, [], how);
+        assert.equal(drew.filter((x) => x !== null).length, 300, how);
+        const k = keyOf(seed[how], 't0', '/many');
+        drew.forEach((x, i) => assert.deepEqual(x, expected(seed[how], '/fm', new Map(), `${k}f/fm\n${i}`), `${how} m${i}`));
+        assert.deepEqual(unplaced(r, how), [], how);
+      }
+      // Three sandboxed frames at one path: each draws its own, named once
+      // (one address) with the two others; a lone one is seeded, by its
+      // page and path.
+      const { two, one } = r.drew.sandboxed;
+      const lone = expected(seed.sandboxed, '/fs', new Map(), 't0x');
+      assert.equal(new Set(Object.values(two).map((x) => x.uuid)).size, 3);
+      for (const x of Object.values(two)) assert.notDeepEqual(x, lone);
+      assert.deepEqual(one, lone);
+      assert.deepEqual(unplaced(r, 'sandboxed'), twins);
+      // A page whose DOM changes often, seeded, takes about what it takes
+      // in a context the test made itself: no walk of the page for a change
+      // that puts in no frame.
+      console.log(`seeding cost in ${engine}, ms (least of two runs): ${JSON.stringify(r.drew.cost)}`);
+      for (const [kind, t] of Object.entries(r.drew.cost)) assert.ok(t.seeded <= 1.5 * t.own + 100, `${kind}: seeded ${t.seeded} ms, own ${t.own} ms`);
+      // A replay draws what the record drew, frame by frame.
+      kept = r.seeds;
+      const p = await drawRun(j, env(rep.url), ['many.spec.ts'], names);
+      for (const how of ['markup', 'script']) {
+        assert.deepEqual(p.drew[how].errors, [], how);
+        assert.deepEqual(p.drew[how].drew, r.drew[how].drew, how);
+        assert.deepEqual(unplaced(p, how), [], how);
+      }
+      assert.deepEqual(p.drew.sandboxed.one, one);
+      assert.notDeepEqual(p.drew.sandboxed.two.s0, two.s0);
+      assert.deepEqual(unplaced(p, 'sandboxed'), twins);
     } finally { await rep.close(); await rec.close(); }
   });
 }

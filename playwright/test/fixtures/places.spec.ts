@@ -37,7 +37,15 @@ test('order', async ({ page }) => {
 
 test('race', async ({ page }) => {
   await page.goto(`${base}/race?slow=${process.env.PLACES_SLOW ?? '1'}`);
-  keep('race', { r0: await drawsOf(page, 'r0', '/fr'), r1: await drawsOf(page, 'r1', '/fr') });
+  const drew = { r0: await drawsOf(page, 'r0', '/fr'), r1: await drawsOf(page, 'r1', '/fr') };
+  // Both taken out and put back in one task: each element holds another
+  // window, and their documents load in the server's order again.
+  await page.evaluate(() => {
+    const fs = ['r0', 'r1'].map((n) => document.querySelector(`iframe[name="${n}"]`)!);
+    for (const f of fs) f.remove();
+    for (const f of fs) document.body.appendChild(f);
+  });
+  keep('race', { ...drew, again0: await drawsOf(page, 'r0', '/fr'), again1: await drawsOf(page, 'r1', '/fr') });
 });
 
 test('remount', async ({ page }) => {

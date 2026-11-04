@@ -65,11 +65,12 @@ export function pageAddress(at: unknown): string {
  * Why the seeding could not place a document: 'own' for one in a page the
  * test opened that drew before keploy named the page, 'frame' for a frame
  * it cannot place among its parent's frames (initScript), 'popup' for one
- * in a page the app opened.
+ * in a page the app opened, 'twin' for a frame under a parent of another
+ * origin that it cannot tell apart from that parent's other frames.
  */
-export type Unplaced = 'own' | 'frame' | 'popup';
+export type Unplaced = 'own' | 'frame' | 'popup' | 'twin';
 
-const UNPLACED: Record<Unplaced, string> = {
+const UNPLACED: Record<Exclude<Unplaced, 'twin'>, string> = {
   own: 'it is in a page the test opened, and it drew before keploy named that page: a script the test added with context.addInitScript ' +
     'runs in each of the page\'s documents before keploy\'s, and so does a draw the test makes there before newPage returns.',
   frame: 'it is a frame keploy cannot place among its parent\'s frames (one in a closed shadow root or in an object or embed element, ' +
@@ -81,10 +82,16 @@ const UNPLACED: Record<Unplaced, string> = {
 /**
  * The line a test shows, once for each address, when a document of its
  * seeded context drew the browser's own random numbers because the seeding
- * could not place it among the test's pages (initScript).
+ * could not place it among the test's pages (initScript); others: for
+ * 'twin', how many other frames its parent holds.
  */
-export function unplacedLine(name: string, at: string, why: Unplaced = 'popup'): string {
-  return `keploy: in ${name}, the document at ${at} drew the browser's own random numbers, so its draws may differ at replay: ${UNPLACED[why]}`;
+export function unplacedLine(name: string, at: string, why: Unplaced = 'popup', others = 1): string {
+  const n = Math.max(1, Math.floor(Number(others)) || 1);
+  const reason = why === 'twin'
+    ? `keploy cannot tell it apart from the ${n} other frame(s) its parent holds, which may be at its path: it is under a parent of another origin and has no session storage ` +
+      '(a sandboxed frame without allow-same-origin, or a frame inside one), so it cannot count the documents it loads, and seeded, it could draw another frame\'s numbers.'
+    : UNPLACED[why];
+  return `keploy: in ${name}, the document at ${at} drew the browser's own random numbers, so its draws may differ at replay: ${reason}`;
 }
 
 /** A seed drawn afresh for a test's begin: 128 bits, as hex. */
@@ -186,13 +193,16 @@ export function placePages(context: BrowserContext): { restore: () => void; open
  *     needs an opener of its own origin;
  *   - a frame of its parent's origin is in its parent document, at the
  *     path its element asks for and its number among the parent's frames
- *     that asked for that path, by window, in the order the app put them
+ *     that were put in at that path, by element, in the order the app put them
  *     in: frames at other paths, and the order the frames' documents load
  *     in, do not move it, and it keeps its place whatever it loads. An
  *     about:blank frame does not draw its parent document's numbers;
  *   - a frame under a parent of another origin, which it cannot read, is
  *     in the page the test opened, by its path and how many documents of
- *     that path its origin loaded in the tab before.
+ *     that path its origin loaded in the tab before. One with no session
+ *     storage to count them in (a sandboxed frame) is seeded only while its
+ *     parent holds no other frame: else it draws the browser's own numbers
+ *     and is named, since seeded it could draw another frame's.
  * A document with no place (a popup opened with noopener, as a link with
  * target=_blank opens one, or of another origin than its opener's page, or
  * after its opener's page moved on; a frame of another origin in one; a
@@ -200,8 +210,10 @@ export function placePages(context: BrowserContext): { restore: () => void; open
  * object or embed; a frame whose document began after its removal) draws
  * the browser's own numbers, never another page's, and says so through
  * report, the name of a function the fixture exposed ('' for none), at its
- * first draw, with its address and why ('frame' for a frame its parent
- * cannot place, or one in such a frame, else '').
+ * first draw, with its address, why ('frame' for a frame its parent
+ * cannot place, 'twin' for a frame keploy cannot tell apart from its
+ * parent's other frames, or one in such a frame, else '') and, for 'twin',
+ * how many other frames that parent holds.
  *
  * The path alone names the document in its frame: a replay may serve the
  * app at another host or port than its record did, and a query often
@@ -256,6 +268,14 @@ export function initScript(seed: string, report = ''): string {
   const Mp = Map;
   const U = g.URL;
   const MO = g.MutationObserver;
+  // A frame's element, read through the window's own getter, taken now: the
+  // parent finds the frame by it, and never reads another frame's window.
+  let elementGetter = null;
+  try {
+    const d = Object.getOwnPropertyDescriptor(g, 'frameElement');
+    if (d && typeof d.get === 'function') elementGetter = d.get;
+  } catch (e) { elementGetter = null; }
+  const frameElementOf = () => { try { return elementGetter !== null ? elementGetter.call(g) : g.frameElement; } catch (e) { return null; } };
   // The name pageScript gives the page the test opened, in each of its
   // documents and frames (it runs after this script); null for none.
   const named = () => { try { const v = g[${JSON.stringify(PAGE_KEY)}]; return typeof v === 'string' ? v : null; } catch (e) { return null; } };
@@ -275,30 +295,27 @@ export function initScript(seed: string, report = ''): string {
       return '?';
     }
   };
-  // Numbers the frames of the document that have none yet, each window
-  // once, in the order of their elements in the document (an open shadow
-  // root's at its host): its place is the path its element asks for and
-  // how many frames of this document asked for that path before it. A frame
-  // keeps its place while its window lives, whatever it loads; one put in
-  // later, or put back after its removal, takes the next number at its path.
-  // Frames at other paths do not move it.
+  // The place a frame element takes at the path it asks for: how many
+  // frames of this document were put in at that path before it.
+  const next = (s, el) => {
+    const at = srcOf(el, s.doc);
+    const n = s.numbers.get(at) || 0;
+    s.numbers.set(at, n + 1);
+    return 'f' + at + '\\n' + n;
+  };
+  const isFrame = (n) => { const t = n.localName; return t === 'iframe' || t === 'frame'; };
+  // Numbers the frame elements of the document that have none yet, in the
+  // order of the elements in the document (an open shadow root's at its
+  // host). It reads elements alone, never a frame's window: reading one
+  // makes Chromium begin that frame's first document, whose init script
+  // would ask this document again, a frame deeper each time.
   const number = (s) => {
     const visit = (root) => {
       let all = null;
       try { all = root.querySelectorAll('*'); } catch (e) { return; }
       for (let i = 0; i < all.length; i++) {
         const el = all[i];
-        const t = el.localName;
-        if (t === 'iframe' || t === 'frame') {
-          let w = null;
-          try { w = el.contentWindow; } catch (e) { w = null; }
-          if (w && !s.kids.has(w)) {
-            const at = srcOf(el, s.doc);
-            const n = s.numbers.get(at) || 0;
-            s.numbers.set(at, n + 1);
-            s.kids.set(w, 'f' + at + '\\n' + n);
-          }
-        }
+        if (isFrame(el) && !s.els.has(el)) s.els.set(el, next(s, el));
         let r = null;
         try { r = el.shadowRoot; } catch (e) { r = null; }
         if (r) visit(r);
@@ -306,15 +323,46 @@ export function initScript(seed: string, report = ''): string {
     };
     visit(s.doc);
   };
+  // Whether a node the app put in or took out is a frame element, or holds
+  // one outside its shadow roots.
+  const holds = (n) => {
+    try { return isFrame(n) || (typeof n.querySelector === 'function' && n.querySelector('iframe,frame') !== null); } catch (e) { return false; }
+  };
+  // A frame element taken out loses its number: put back, it holds another
+  // window, and takes the next number at its path.
+  const forget = (s, n) => {
+    try {
+      if (isFrame(n)) { s.els.delete(n); s.bound.delete(n); }
+      const all = n.querySelectorAll('iframe,frame');
+      for (let i = 0; i < all.length; i++) { s.els.delete(all[i]); s.bound.delete(all[i]); }
+    } catch (e) {
+      // A node with no elements.
+    }
+  };
+  // What the app's changes to the document's nodes, in order, do to its
+  // frames: one taken out is forgotten, and the document numbers its frames
+  // only when one was put in (a change that puts in no frame costs no walk).
+  const take = (s, records) => {
+    let put = false;
+    for (let i = 0; i < records.length; i++) {
+      const r = records[i];
+      for (let j = 0; j < r.removedNodes.length; j++) if (holds(r.removedNodes[j])) forget(s, r.removedNodes[j]);
+      for (let j = 0; j < r.addedNodes.length && !put; j++) if (holds(r.addedNodes[j])) put = true;
+    }
+    if (put) number(s);
+  };
   // Numbers a document's frames as the app puts them in (at the end of the
-  // task that put them), so that the order their documents load in (the
-  // network's) does not decide their numbers; enter numbers them too, as a
-  // frame's document begins. The observer does not see into shadow roots:
-  // a frame put into one already in the page is numbered at the next
-  // numbering, either way.
+  // task that put them, or as a frame's document begins, whichever comes
+  // first), so that the order their documents load in (the network's) does
+  // not decide their numbers. The observer watches the document's childList
+  // outside its shadow roots: a frame put into a shadow root already in the
+  // page is numbered when the app next puts a frame in outside them, or when
+  // a document of one of the parent's frames, its own included, begins.
   const watch = (s) => {
     try {
-      new MO(() => { number(s); }).observe(s.doc, { childList: true, subtree: true });
+      const mo = new MO((records) => { take(s, records); });
+      mo.observe(s.doc, { childList: true, subtree: true });
+      s.mo = mo;
     } catch (e) {
       // No document or no observer: frames are numbered as their documents
       // begin.
@@ -348,7 +396,7 @@ export function initScript(seed: string, report = ''): string {
           let d = null;
           try { d = p[${JSON.stringify(DOC_KEY)}]; } catch (e) { kind = 'other'; }
           if (d) {
-            const e = d.enter(g, place);
+            const e = d.enter(frameElementOf(), g, place);
             up = d;
             frame = e[0];
             loads = e[1];
@@ -359,6 +407,8 @@ export function initScript(seed: string, report = ''): string {
       // A parent keploy cannot ask: no place.
       kind = 'frame';
     }
+    // Whether session storage counted this document's loads.
+    let counted = false;
     if (kind !== 'frame') {
       try {
         const store = sessionStorage;
@@ -368,9 +418,12 @@ export function initScript(seed: string, report = ''): string {
         loads = typeof seen[place] === 'number' ? seen[place] : 0;
         seen[place] = loads + 1;
         store.setItem(${JSON.stringify(LOADS_KEY)}, JSON.stringify(seen));
+        counted = true;
       } catch (e) {
         // No session storage here (a sandboxed frame, an opaque origin): every
-        // document of this path in the tab draws the same numbers.
+        // document of this path in the tab draws the same numbers, so a frame
+        // under a parent of another origin is seeded only when its parent
+        // holds no other frame (pageOf).
       }
     }
     // A top document's opener, read as the document begins: an opener may
@@ -388,7 +441,7 @@ export function initScript(seed: string, report = ''): string {
       // An opener of another origin.
       given = null;
     }
-    const s = { doc, place, loads, kind, up, frame, given, page: undefined, opened: [], kids: new WM(), numbers: new Mp(), counts: new Mp(), streams: null };
+    const s = { doc, place, loads, counted, kind, up, frame, given, page: undefined, twins: 0, opened: [], els: new WM(), bound: new WM(), mo: null, numbers: new Mp(), counts: new Mp(), streams: null };
     watch(s);
     return s;
   };
@@ -399,15 +452,22 @@ export function initScript(seed: string, report = ''): string {
     if (state.doc !== doc) state = begin(doc);
     return state;
   };
-  // The place frame w of this document takes, and how many documents at
-  // path w loaded before in that place: [place, loads]; [null, 0] when w is
-  // not among this document's frames (one in a closed shadow root, or in an
-  // object or embed element).
-  const enter = (w, path) => {
+  // The place frame element el of this document takes, for its window w,
+  // and how many documents at path w loaded before in that place: [place,
+  // loads]; [null, 0] when el is not among this document's frames (one in a
+  // closed shadow root, in an object or embed element, or taken out). The
+  // app's changes not yet seen are taken first, in order. An element whose
+  // number another window holds was put back where the observer does not
+  // see (in a shadow root): it takes the next number at its path.
+  const enter = (el, w, path) => {
     const s = now();
-    number(s);
-    if (!s.kids.has(w)) return [null, 0];
-    const f = s.kids.get(w);
+    if (s.mo !== null) take(s, s.mo.takeRecords());
+    if (!s.els.has(el)) number(s);
+    if (!s.els.has(el)) return [null, 0];
+    const had = s.bound.get(el);
+    if (had !== undefined && had !== w) s.els.set(el, next(s, el));
+    s.bound.set(el, w);
+    const f = s.els.get(el);
     const c = f + '\\n' + path;
     const n = s.counts.get(c) || 0;
     s.counts.set(c, n + 1);
@@ -418,7 +478,13 @@ export function initScript(seed: string, report = ''): string {
   // page's own scripts), or the place its opener gives it; for a frame of
   // its parent's origin, its parent document's key and its place among
   // that document's frames; for a frame under a parent of another origin,
-  // the page the test opened, marked as such a frame. null for none.
+  // the page the test opened, marked as such a frame. null for none, and
+  // for a frame under a parent of another origin whose loads session
+  // storage did not count, while its parent holds another frame: their
+  // documents at one path would draw the same numbers (a browser-made ID
+  // sent twice to a real server in a record), and nothing tells them apart.
+  // A parent's frame count is readable across origins.
+  const othersOf = () => { try { return g.parent.length - 1; } catch (e) { return 1; } };
   const pageOf = () => {
     const s = now();
     if (s.page === undefined) {
@@ -428,7 +494,8 @@ export function initScript(seed: string, report = ''): string {
         if (p === null) p = s.given;
       } else if (s.kind === 'other') {
         const t = named();
-        p = t === null ? null : t + 'x';
+        if (t !== null && !s.counted) s.twins = othersOf();
+        p = t === null || s.twins > 0 ? null : t + 'x';
       } else if (s.frame !== null) {
         const k = s.up.key();
         p = k === null ? null : k + s.frame;
@@ -438,16 +505,24 @@ export function initScript(seed: string, report = ''): string {
     return s.page;
   };
   // Why a document with no page has none: 'frame' for a frame its parent
-  // cannot place, or one in such a frame, else ''.
+  // cannot place, 'twin' for a frame under a parent of another origin that
+  // keploy cannot tell apart from its parent's other frames, or one in such
+  // a frame, else ''. othersFor: how many other frames that parent holds.
   const whyOf = () => {
     const s = now();
+    if (s.kind === 'other') return s.twins > 0 ? 'twin' : '';
     if (s.kind !== 'frame') return '';
     return s.frame === null ? 'frame' : s.up.why();
+  };
+  const othersFor = () => {
+    const s = now();
+    if (s.kind === 'other') return s.twins;
+    return s.kind === 'frame' && s.frame !== null ? s.up.others() : 0;
   };
   const key = () => { const p = pageOf(); const s = now(); return p === null ? null : seed + '\\n' + p + '\\n' + s.place + '\\n' + s.loads + '\\n'; };
   let mine;
   try {
-    const d = Object.freeze({ key, why: whyOf, enter, opened: () => now().opened });
+    const d = Object.freeze({ key, why: whyOf, others: othersFor, enter, opened: () => now().opened });
     Object.defineProperty(g, ${JSON.stringify(DOC_KEY)}, { value: d, enumerable: false, writable: false, configurable: true });
     mine = d;
   } catch (e) {
@@ -482,7 +557,7 @@ export function initScript(seed: string, report = ''): string {
         } catch (e) { at = ''; }
         if (at === '') at = 'about:blank';
         const why = whyOf();
-        try { const r = tell(at, why); if (r && typeof r.catch === 'function') r.catch(() => {}); } catch (e) {}
+        try { const r = tell(at, why, othersFor()); if (r && typeof r.catch === 'function') r.catch(() => {}); } catch (e) {}
       }
     }
     return s.streams === false ? null : s.streams[name];
