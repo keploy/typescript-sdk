@@ -2,7 +2,7 @@
 // init script run in a Node vm context in place of a page. No browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DOC_KEY, ENV_SEED_RANDOM, LOADS_KEY, PAGE_KEY, SEEDED_LINE, freshSeed, initScript, pageAddress, pageScript, seedingFromEnv, unplacedLine, unseededLine } from '../dist/random.js';
+import { DOC_KEY, ENV_SEED_RANDOM, LOADS_KEY, PAGE_KEY, SEEDED_LINE, freshSeed, initScript, pageAddress, pageScript, placePages, seedingFromEnv, unplacedLine, unseededLine } from '../dist/random.js';
 import { SEED } from '../dist/agent.js';
 import { documentAt } from './draws.mjs';
 
@@ -205,4 +205,39 @@ test('a document without crypto.randomUUID (not a secure context) is not given o
   d.run(initScript(S1));
   assert.equal(d.run('typeof crypto.randomUUID'), 'undefined');
   assert.equal(d.run('typeof Math.random()'), 'number');
+});
+
+test('a page the test asked for is the test\'s own when its first document tells while its newPage has not come; it is named in the order the test asked', async () => {
+  // A context whose pages come only when the row says, so the order is the
+  // row's, not the browser's.
+  const asked = [];
+  const original = function newPage() { return new Promise((resolve) => asked.push(resolve)); };
+  const context = { newPage: original };
+  const fakePage = () => {
+    const scripts = [];
+    return { scripts, addInitScript: async (s) => { scripts.push(s.content); }, evaluate: async (s) => { scripts.push(s); } };
+  };
+  const placing = placePages(context);
+  const first = fakePage(), second = fakePage(), popup = fakePage();
+  const a = context.newPage(), b = context.newPage();
+  // Both first documents tell before either newPage has come.
+  const firstOwn = placing.opened(first), secondOwn = placing.opened(second), popupOwn = placing.opened(popup);
+  // The second comes first: each keeps the place it was asked in.
+  asked[1](second);
+  asked[0](first);
+  assert.equal(await a, first);
+  assert.equal(await b, second);
+  assert.deepEqual([await firstOwn, await secondOwn, await popupOwn], [true, true, false]);
+  assert.deepEqual(first.scripts, [pageScript('t0'), pageScript('t0')]);
+  assert.deepEqual(second.scripts, [pageScript('t1'), pageScript('t1')]);
+  // After they came, and with none coming.
+  assert.deepEqual([await placing.opened(first), await placing.opened(second), await placing.opened(popup), await placing.opened(null)], [true, true, false, false]);
+  placing.restore();
+  assert.equal(context.newPage, original);
+  // A context whose newPage is its prototype's gets the prototype's back.
+  const proto = { newPage: original };
+  const inherited = Object.create(proto);
+  placePages(inherited).restore();
+  assert.equal(Object.prototype.hasOwnProperty.call(inherited, 'newPage'), false);
+  assert.equal(inherited.newPage, original);
 });

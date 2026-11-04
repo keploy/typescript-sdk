@@ -14,6 +14,7 @@
 // On by default; KEPLOY_SEED_RANDOM=off or the fixture option
 // keploySeedRandom: false turns it off.
 
+import type { BrowserContext, Page } from '@playwright/test';
 import crypto from 'node:crypto';
 
 export const ENV_SEED_RANDOM = 'KEPLOY_SEED_RANDOM';
@@ -117,6 +118,54 @@ export const DOC_KEY = '__keploy_random_doc';
  */
 export function pageScript(id: string): string {
   return `Object.defineProperty(globalThis, ${JSON.stringify(PAGE_KEY)}, { value: ${JSON.stringify(id)}, enumerable: false, writable: false, configurable: true });\n`;
+}
+
+/**
+ * Names each page the test opens in context (context.newPage(), the page
+ * fixture's among them) by its place in the order the test opened them, in
+ * every document of the page, its first about:blank included, before
+ * newPage returns: two tabs of a test draw their own numbers, the same ones
+ * at replay. A popup is placed by its opener's document in the page itself
+ * (initScript). Returns what undoes it, and whether a page is one the test
+ * opened, once every newPage the test has asked for has come.
+ */
+export function placePages(context: BrowserContext): { restore: () => void; opened: (page: Page | null | undefined) => Promise<boolean> } {
+  const had = Object.prototype.hasOwnProperty.call(context, 'newPage');
+  const newPage = context.newPage;
+  let made = 0;
+  // The test's pages, and those it has asked for that have not come yet.
+  const pages = new WeakSet<Page>();
+  const coming = new Set<Promise<Page>>();
+  context.newPage = async function placed(this: BrowserContext): Promise<Page> {
+    // Its place is taken when the test asks for it, not when the page
+    // comes: two pages asked for at once keep the order the test asked in.
+    const id = `t${made++}`;
+    const asked = newPage.call(context);
+    coming.add(asked);
+    let p: Page;
+    try {
+      p = await asked;
+    } finally {
+      coming.delete(asked);
+    }
+    pages.add(p);
+    // The documents the page loads, and the one it has: an init script
+    // does not run in a document that already exists.
+    await p.addInitScript({ content: pageScript(id) });
+    await p.evaluate(pageScript(id));
+    return p;
+  };
+  return {
+    restore: () => {
+      if (had) context.newPage = newPage;
+      else delete (context as { newPage?: unknown }).newPage;
+    },
+    // A page's first document may tell before its newPage has come.
+    opened: async (page) => {
+      const came = await Promise.allSettled([...coming]);
+      return pages.has(page as Page) || came.some((c) => c.status === 'fulfilled' && c.value === page);
+    },
+  };
 }
 
 /**
