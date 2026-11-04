@@ -22,8 +22,14 @@ export const BLANK_DRAWS = '({ random: [Math.random(), Math.random()], bytes: Ar
  * page script names (a popup with no opener). told collects what the
  * document tells the fixture's function named report: its address, or
  * [address, why] when it says why. origin and href are its location's.
+ * parent is the window's parent: the window itself (a top window) when
+ * undefined; null for a removed frame; OTHER for a parent of another origin
+ * (reading it throws); or an object, a parent of the frame's origin. doc is
+ * its document (with URL beside it), for a document whose frames the row
+ * makes.
  */
-export function documentAt(script, path = '/p', storage = new Map(), page = 't0', { report = '', told = [], origin = 'http://h', href = undefined } = {}) {
+export const OTHER = Symbol('a parent of another origin');
+export function documentAt(script, path = '/p', storage = new Map(), page = 't0', { report = '', told = [], origin = 'http://h', href = undefined, parent = undefined, doc = undefined } = {}) {
   // As the browser's: a this that is no Crypto is refused.
   class Crypto {
     getRandomValues(a) { if (!(this instanceof Crypto)) throw new TypeError('Illegal invocation'); return webcrypto.getRandomValues(a); }
@@ -36,9 +42,13 @@ export function documentAt(script, path = '/p', storage = new Map(), page = 't0'
     ctx.sessionStorage = { getItem: (k) => (storage.has(k) ? storage.get(k) : null), setItem: (k, v) => { storage.set(k, String(v)); } };
   }
   if (report) ctx[report] = (at, why) => { told.push(why ? [at, why] : at); return Promise.resolve(); };
+  if (doc !== undefined) { ctx.document = doc; ctx.URL = URL; }
   vm.createContext(ctx);
   // A top window: its own parent and top.
   vm.runInContext('globalThis.parent = globalThis; globalThis.top = globalThis;', ctx);
+  if (parent !== undefined) {
+    ctx.parent = parent === OTHER ? new Proxy({}, { get() { throw new Error('SecurityError: a parent of another origin'); } }) : parent;
+  }
   if (script) vm.runInContext(script, ctx);
   if (page !== null) vm.runInContext(pageScript(page), ctx);
   return { ctx, run: (code) => vm.runInContext(code, ctx), draws: () => JSON.parse(JSON.stringify(vm.runInContext(DRAWS, ctx))) };

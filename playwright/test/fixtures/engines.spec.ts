@@ -3,12 +3,13 @@ import type { Page } from '@playwright/test';
 import { test } from '../../dist';
 
 // Run in Chromium, Firefox and WebKit (PW_BROWSER). Frames of a page's
-// first document: one srcdoc, one about:blank with no src, then one the app
-// puts where a removed frame was; a popup the first document opens with
+// first document: two srcdoc (the first holding a frame of its own), one
+// about:blank with no src, then one the app puts where that one was after
+// removing it; a popup the first document opens with
 // window.open('about:blank'); the test's own context init script, which
-// draws in each document before keploy names the page; a frame in a shadow
-// root; and a frame's Math.random drawn from once the frame is removed. Each
-// test keeps what its pages drew.
+// draws in each document before keploy names the page; a frame in an open
+// shadow root and one in a closed one; and a frame's Math.random drawn from
+// once the frame is removed. Each test keeps what its pages drew.
 const base = process.env.DRAWS_BASE ?? '';
 const keep = (name: string, v: unknown): void => fs.writeFileSync(`${process.env.MARKER_DIR}/${name}.json`, JSON.stringify(v));
 // test/draws.mjs's BLANK_DRAWS: about:blank is no secure context, so it has
@@ -52,17 +53,19 @@ test('ownctxinit', async ({ context }) => {
 });
 
 test('shadow', async ({ page }) => {
-  // A frame inside a shadow root: whether its parent lists it among its
-  // frames is the engine's.
-  await page.setContent('<div id="h"></div>');
+  // A frame inside an open shadow root, and one inside a closed one: no
+  // engine lists either among its parent's frames.
+  await page.setContent('<div id="h"></div><div id="k"></div>');
   await page.evaluate(() => {
-    const f = document.createElement('iframe');
-    f.name = 'w';
-    document.getElementById('h')!.attachShadow({ mode: 'open' }).appendChild(f);
+    for (const [id, name, mode] of [['h', 'w', 'open'], ['k', 'v', 'closed']] as const) {
+      const f = document.createElement('iframe');
+      f.name = name;
+      document.getElementById(id)!.attachShadow({ mode }).appendChild(f);
+    }
   });
   const f = frame(page, 'w');
   const index = await f.evaluate(() => Array.from({ length: parent.length }, (_, j) => parent[j]).indexOf(window));
-  keep('shadow', { index, draws: await f.evaluate(BLANK_DRAWS) });
+  keep('shadow', { index, open: await f.evaluate(BLANK_DRAWS), closed: await frame(page, 'v').evaluate(BLANK_DRAWS) });
 });
 
 test('removed', async ({ page }) => {

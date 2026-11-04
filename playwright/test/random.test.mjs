@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DOC_KEY, ENV_SEED_RANDOM, LOADS_KEY, PAGE_KEY, SEEDED_LINE, freshSeed, initScript, pageAddress, pageScript, placePages, seedingFromEnv, unplacedLine, unseededLine } from '../dist/random.js';
 import { SEED } from '../dist/agent.js';
-import { documentAt } from './draws.mjs';
+import { OTHER, documentAt } from './draws.mjs';
 
 // Two seeds, as keploy answers them.
 const S1 = '0123456789abcdef0123456789abcdef';
@@ -42,9 +42,8 @@ test('the lines say what is seeded, what is not, where the seed lives, and how t
     'it is in a page the test opened, and it drew before keploy named that page: a script the test added with context.addInitScript ' +
     'runs in each of the page\'s documents before keploy\'s, and so does a draw the test makes there before newPage returns.');
   assert.equal(unplacedLine('g › t', 'about:blank', 'frame'), 'keploy: in g › t, the document at about:blank drew the browser\'s own random numbers, so its draws may differ at replay: ' +
-    'it is a frame keploy cannot place among its parent\'s frames: one at an index where its parent document had another frame ' +
-    '(one the app removed, or one it inserted this frame before), so it does not draw that frame\'s numbers again, ' +
-    'one in a shadow root, which its parent does not list, or one removed before its first draw.');
+    'it is a frame keploy cannot place among its parent\'s frames (one in a closed shadow root or in an object or embed element, ' +
+    'which its parent document cannot list, or one whose document began after its removal), or a frame inside one.');
 });
 
 test('an address a page sends is shown on one line, each control character a ?, cut to 512 characters', () => {
@@ -240,4 +239,118 @@ test('a page the test asked for is the test\'s own when its first document tells
   placePages(inherited).restore();
   assert.equal(Object.prototype.hasOwnProperty.call(inherited, 'newPage'), false);
   assert.equal(inherited.newPage, original);
+});
+
+// A frame element of a document the row makes: its tag, the window it
+// holds, its src (null for none), whether it has srcdoc, and the shadow
+// root it hosts.
+const el = (localName, contentWindow, src = null, { srcdoc = false, shadow = null } = {}) => ({
+  localName, contentWindow, shadowRoot: shadow,
+  getAttribute: (n) => (n === 'src' ? src : null),
+  hasAttribute: (n) => n === 'srcdoc' && srcdoc,
+});
+// A document (or shadow root) whose elements, in tree order, are els.
+const tree = (els, baseURI = 'https://h/host') => ({ baseURI, querySelectorAll: (q) => { assert.equal(q, '*'); return els; } });
+
+test('a document numbers its frames at the path each element asks for, in element order, whatever order their documents begin in, and counts each place\'s loads', () => {
+  const w = (n) => ({ n });
+  const [r0, r1, a, a2, b, sd, none, empty, blob, data, other, bad, fr, sh, closed, emb, gone] = Array.from({ length: 17 }, (_, i) => w(i));
+  const els = [
+    el('iframe', r0, '/fr?n=0'), el('div', null, null, { shadow: tree([el('iframe', sh, '/fr')]) }), el('iframe', a, '/fa'), el('iframe', r1, 'https://cdn.example/fr#x'),
+    el('iframe', sd, '/ignored', { srcdoc: true }), el('iframe', none), el('iframe', empty, ''), el('iframe', blob, 'blob:https://h/5d3c'),
+    el('iframe', data, 'data:text/html,<p>'), el('iframe', other, 'mailto:x'), el('iframe', bad, 'http://['), el('frame', fr, '/fb'),
+    el('embed', emb, '/fa'), el('iframe', null, '/fr'),
+  ];
+  const doc = tree(els);
+  const doc0 = documentAt(initScript(S1), '/host', new Map(), 't0', { doc }).run(`globalThis[${JSON.stringify(DOC_KEY)}]`);
+  // What enter answers, or what it threw.
+  const d = { enter: (x, p) => { try { return [...doc0.enter(x, p)]; } catch (e) { return String(e); } } };
+  // r1's document begins first: still the second at /fr, after r0, and
+  // after sh, in the shadow root of the element before a.
+  assert.deepEqual(d.enter(r1, '/fr'), ['f/fr\n2', 0]);
+  assert.deepEqual(d.enter(sh, '/fr'), ['f/fr\n1', 0]);
+  assert.deepEqual(d.enter(r0, '/fr'), ['f/fr\n0', 0]);
+  // Each place counts the documents of each path it loads.
+  assert.deepEqual(d.enter(r1, '/fr'), ['f/fr\n2', 1]);
+  assert.deepEqual(d.enter(r1, '/fb'), ['f/fr\n2', 0]);
+  assert.deepEqual(d.enter(r0, '/fr'), ['f/fr\n0', 1]);
+  assert.deepEqual(d.enter(a, '/fa'), ['f/fa\n0', 0]);
+  // srcdoc, no src, an empty src, other schemes (by scheme alone: a blob:
+  // URL carries a browser-made ID), a src keploy cannot read, a frameset's
+  // frame.
+  for (const [x, at] of [[sd, 'about:srcdoc\n0'], [none, 'about:blank\n0'], [empty, 'about:blank\n1'], [blob, 'blob:\n0'], [data, 'data:\n0'], [other, 'mailto:\n0'], [bad, '?\n0'], [fr, '/fb\n0']]) {
+    assert.deepEqual(d.enter(x, 'p'), [`f${at}`, 0], at);
+  }
+  // A window no element of the document holds (an embed's, one in a closed
+  // shadow root, a removed one) has no place.
+  for (const x of [emb, closed, gone]) assert.deepEqual(d.enter(x, '/fa'), [null, 0]);
+  // a removed, and a2 put in at its path: a2 takes the next number there;
+  // a keeps its place.
+  els.splice(2, 1, el('iframe', a2, '/fa'));
+  assert.deepEqual(d.enter(a2, '/fa'), ['f/fa\n1', 0]);
+  assert.deepEqual(d.enter(a, '/fa'), ['f/fa\n0', 1]);
+  // Put in another order, the same frames take the same places.
+  const e2 = documentAt(initScript(S1), '/host', new Map(), 't0', { doc: tree([el('iframe', b, '/fb'), el('iframe', w(), '/fx'), el('iframe', r0, '/fr'), el('iframe', r1, '/fr')]) }).run(`globalThis[${JSON.stringify(DOC_KEY)}]`);
+  assert.deepEqual([...e2.enter(r1, '/fr')], ['f/fr\n1', 0]);
+  assert.deepEqual([...e2.enter(b, '/fb')], ['f/fb\n0', 0]);
+});
+
+test('a frame of its parent\'s origin draws in its parent document\'s key and its place there; one under a parent of another origin, in its page by its path; one with no place draws its own and says why', () => {
+  const at = 'http://h/f';
+  // Placed by its parent: the parent's key, its place, its own path and
+  // its loads in that place; session storage untouched.
+  const asked = [];
+  const parent = { [DOC_KEY]: { enter: (w, p) => { asked.push(p); return ['f/f\n3', 2]; }, key: () => 'K\n', why: () => 'unused' } };
+  const store = new Map();
+  const placed = documentAt(initScript(S1), '/f', store, null, { parent });
+  assert.deepEqual(placed.draws(), documentAt(initScript(S1), '/f', new Map([[LOADS_KEY, '{"/f":2}']]), 'K\nf/f\n3').draws());
+  assert.deepEqual(asked, ['/f']);
+  assert.equal(store.size, 0);
+  // Under a parent of another origin: its page, marked, its path, and its
+  // origin's count in the tab.
+  const tab = new Map([[LOADS_KEY, '{"/f":1}']]);
+  assert.deepEqual(documentAt(initScript(S1), '/f', tab, 't0', { parent: OTHER }).draws(), documentAt(initScript(S1), '/f', new Map([[LOADS_KEY, '{"/f":1}']]), 't0x').draws());
+  assert.equal(tab.get(LOADS_KEY), '{"/f":2}');
+  // In a page no page script names, it has no place, and says so with no
+  // reason of its own.
+  const none = [];
+  const u = documentAt(initScript(S1, 'rep'), '/f', new Map(), null, { parent: OTHER, report: 'rep', told: none });
+  assert.notDeepEqual(u.draws(), u.draws());
+  assert.deepEqual(none, [at]);
+  // A frame its parent cannot place, one whose parent is gone, and one
+  // whose parent has no seeding state: no place, the frame reason.
+  for (const p of [{ [DOC_KEY]: { enter: () => [null, 0], key: () => 'K\n', why: () => '' } }, null, {}]) {
+    const told = [];
+    const f = documentAt(initScript(S1, 'rep'), '/f', new Map(), 't0', { parent: p, report: 'rep', told });
+    let drew = [];
+    try { drew = [f.draws(), f.draws()]; } catch (e) { drew = [String(e)]; }
+    assert.deepEqual(told, [[at, 'frame']]);
+    assert.notDeepEqual(drew[0], drew[1]);
+  }
+  // A frame placed in a parent with no place: no place, its parent's
+  // reason.
+  for (const why of ['', 'frame']) {
+    const told = [];
+    documentAt(initScript(S1, 'rep'), '/f', new Map(), 't0', { parent: { [DOC_KEY]: { enter: () => ['f/f\n0', 0], key: () => null, why: () => why } }, report: 'rep', told }).draws();
+    assert.deepEqual(told, [why ? [at, why] : at], why);
+  }
+});
+
+test('a document that a second run of the script takes over (WebKit runs it in a document that takes over its window\'s first about:blank) begins once: the first run passes on the browser\'s own', () => {
+  const store = new Map();
+  const blank = { baseURI: 'about:blank', querySelectorAll: () => [] };
+  // The window's first about:blank runs the script; a window.open of its
+  // own is there to be wrapped.
+  const d = documentAt(`globalThis.open = function () { return {}; };\n${initScript(S1)}`, 'blank', store, 't0', { doc: blank });
+  // Its document is taken over by /p, which runs the script again.
+  d.ctx.document = { baseURI: 'http://h/p', querySelectorAll: () => [] };
+  d.ctx.location.pathname = '/p';
+  d.run(initScript(S1));
+  d.run(pageScript('t0'));
+  // getRandomValues and randomUUID call the first run's functions first,
+  // and a popup goes through its window.open: /p is still counted once.
+  const drew = d.draws();
+  d.run('open()');
+  assert.equal(store.get(LOADS_KEY), '{"blank":1,"/p":1}');
+  assert.deepEqual(drew, documentAt(initScript(S1), '/p', new Map(), 't0').draws());
 });
