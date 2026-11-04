@@ -934,7 +934,7 @@ for (const engine of ENGINES) {
 }
 
 for (const engine of ENGINES) {
-  test(`seeded, in ${engine}: 300 frames in a page's markup, or put in by one script, each load and draw their own numbers, the same at replay, with no page error; sandboxed frames are never seeded, each draws its own numbers and is named with how many frames are beside it once its parent's parser has ended: three at one path, a lone one, a new one put in at a removed one's path, ones whose own script replaces the global parent before they draw, one that draws and loads while its parent's parser holds the frames after it, and a srcdoc frame inside one (named with the frames beside the sandboxed one); a page whose DOM changes often is walked only when a frame is put in`, async () => {
+  test(`seeded, in ${engine}: 300 frames in a page's markup, or put in by one script, each load and draw their own numbers, the same at replay, with no page error; sandboxed frames are never seeded, each draws its own numbers and is named with how many frames are beside it once its parent's parser has ended: three at one path, a lone one, a new one put in at a removed one's path, ones whose own script replaces the global parent before they draw, one that draws and loads while its parent's parser holds the frames after it, and a srcdoc frame inside one (sandboxed too, alone under its parent); a page whose DOM changes often is walked only when a frame is put in`, async () => {
     const j = journal();
     const rec = await fakeAgent(j);
     let kept = {};
@@ -950,9 +950,11 @@ for (const engine of ENGINES) {
       assert.deepEqual(unplaced(run, 'lone'), [line('lone', '/fs', 0)]);
       assert.deepEqual(unplaced(run, 'swapped').sort(), SWAP.map(([, at]) => line('swapped', at, 8)).sort());
       assert.deepEqual(unplaced(run, 'held'), [line('held', '/fh', 2)]);
-      // A srcdoc frame in a sandboxed one counts the frames beside the
-      // sandboxed one, as the sandboxed one does.
-      assert.deepEqual(unplaced(run, 'nested').sort(), [line('nested', '/fsn', 1), unplacedLine('nested', 'about:srcdoc', 'uncounted', 1)].sort());
+      // A srcdoc frame in a sandboxed one is sandboxed too, so its origin
+      // is an opaque one of its own, not its parent's: it is itself a frame
+      // under a parent of another origin with no session storage, alone
+      // under its parent, and its line counts no other frame (every engine).
+      assert.deepEqual(unplaced(run, 'nested').sort(), [line('nested', '/fsn', 1), unplacedLine('nested', 'about:srcdoc', 'uncounted', 0)].sort());
     };
     try {
       const r = await drawRun(j, env(rec.url), ['many.spec.ts'], names);
