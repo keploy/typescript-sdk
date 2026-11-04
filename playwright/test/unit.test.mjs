@@ -252,6 +252,65 @@ test('settle: a cancel that comes while settle already waits wakes it (its page 
   }
 });
 
+// A frame's request, its navigation's, and the navigation's answer.
+function frameRequest(frame, url, nav = false) {
+  return { frame: () => frame, isNavigationRequest: () => nav, method: () => 'GET', url: () => `http://localhost${url}` };
+}
+function answer(request, status = 200, headers = {}) {
+  return { request: () => request, status: () => status, headers: () => headers };
+}
+
+// Firefox can report a call the new document makes as it loads (here an
+// image its parser asks for) before it reports the frame's commit: the
+// order a Firefox run gave, made exact. The commit drops only the calls
+// reported before the new document's answer, the old document's, one
+// started while the navigation ran included; the new document's call is
+// waited for. A redirect's answer is not the document's: a call reported
+// after it, before the final answer, is still the old document's.
+test('settle: a frame\'s commit drops only the calls reported before its new document\'s answer (Firefox reports the new document\'s first call before the commit; a redirect\'s answer is not the document\'s)', async () => {
+  for (const redirect of [false, true]) {
+    const c = redirect ? 'redirected' : 'answered at once';
+    const ctx = fakeContext();
+    const inflight = new Inflight(ctx);
+    const page = new EventEmitter();
+    const frame = { page: () => page };
+    ctx.emit('page', page);
+    const old = frameRequest(frame, '/slow');
+    ctx.emit('request', old);
+    const nav = frameRequest(frame, '/next', true);
+    ctx.emit('request', nav);
+    // The old document's poller fires while the navigation runs.
+    const during = frameRequest(frame, '/poll');
+    ctx.emit('request', during);
+    let final = nav;
+    let late = null;
+    if (redirect) {
+      ctx.emit('response', answer(nav, 302, { location: '/moved' }));
+      ctx.emit('requestfinished', nav);
+      late = frameRequest(frame, '/poll2');
+      ctx.emit('request', late);
+      final = frameRequest(frame, '/moved', true);
+      ctx.emit('request', final);
+    }
+    ctx.emit('response', answer(final));
+    ctx.emit('requestfinished', final);
+    const mine = frameRequest(frame, '/hold.png');
+    ctx.emit('request', mine);
+    page.emit('framenavigated', frame);
+    assert.deepEqual(inflight.describe(), ['GET http://localhost/hold.png'], `${c}: only the new document's call is left in flight`);
+    let settled = false;
+    inflight.settled().then(() => { settled = true; });
+    await ticks();
+    assert.equal(settled, false, `${c}: settle waits for the new document's call`);
+    // A route change inside the new document (no answer) drops nothing.
+    page.emit('framenavigated', frame);
+    assert.equal(inflight.size, 1, `${c}: a commit with no answer drops nothing`);
+    ctx.emit('requestfinished', mine);
+    await ticks();
+    assert.equal(settled, true, `${c}: settle is woken once the new document's call ends`);
+  }
+});
+
 test('decide: inert, refused, active', () => {
   const never = () => { throw new Error('runsInside called'); };
   assert.deepEqual(decide({}, 10, never), { mode: 'inert' });
