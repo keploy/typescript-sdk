@@ -21,13 +21,14 @@ export const BLANK_DRAWS = '({ random: [Math.random(), Math.random()], bytes: Ar
  * runs a page's init scripts after its context's); null: a document no
  * page script names (a popup with no opener). told collects what the
  * document tells the fixture's function named report: its address, or
- * [address, why] when it says why ([address, why, others] for 'uncounted').
+ * [address, why] when it says why ([address, why, above] for 'uncounted').
  * origin and href are its location's.
  * parent is the window's parent: the window itself (a top window) when
  * undefined; null for a removed frame; OTHER for a parent of another origin
  * (reading it throws); or an object, a parent of the frame's origin. frames:
  * how many frames a parent of another origin says it holds (its length,
- * which another origin may read); undefined: reading it throws too. element
+ * which another origin may read, and the seeding does not); undefined:
+ * reading it throws too. element
  * is the window's frameElement, read through a getter. doc is its document
  * (with URL beside it), for a document whose frames the row makes. opener
  * is the window's opener (none when undefined).
@@ -45,7 +46,7 @@ export function documentAt(script, path = '/p', storage = new Map(), page = 't0'
   } else {
     ctx.sessionStorage = { getItem: (k) => (storage.has(k) ? storage.get(k) : null), setItem: (k, v) => { storage.set(k, String(v)); } };
   }
-  if (report) ctx[report] = (at, why, others) => { told.push(why === 'uncounted' ? [at, why, others] : why ? [at, why] : at); return Promise.resolve(); };
+  if (report) ctx[report] = (at, why, above) => { told.push(why === 'uncounted' ? [at, why, above] : why ? [at, why] : at); return Promise.resolve(); };
   if (element !== undefined) Object.defineProperty(ctx, 'frameElement', { get() { return element; }, configurable: true, enumerable: true });
   if (doc !== undefined) { ctx.document = doc; ctx.URL = URL; }
   if (opener !== undefined) ctx.opener = opener;

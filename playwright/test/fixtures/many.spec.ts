@@ -83,6 +83,15 @@ test('swapped', async ({ page }) => {
   keep('swapped', drew);
 });
 
+test('held', async ({ page }) => {
+  // Three sandboxed frames at /fh: the parent's parser puts in the second
+  // and third only once the first has drawn and loaded.
+  await page.goto(`${base}/held`);
+  const drew: Record<string, unknown> = {};
+  for (const n of ['h0', 'h1', 'h2']) drew[n] = await (await loaded(page, n, '/fh')).evaluate(read);
+  keep('held', drew);
+});
+
 // A workload in the page: 'grow' adds 20000 rows in 500 tasks; 'churn'
 // adds and removes one span in each of 300 tasks, on a page of 20000
 // elements; 'shadow' does the same on a page of 2000 open shadow roots of

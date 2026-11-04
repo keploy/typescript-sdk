@@ -408,10 +408,27 @@ for (const [title, why, call] of [
 // 127.0.0.1: a cross-site frame), which draws the same way.
 async function drawsServer() {
   const page = (body) => `<html><head><script>window.__draws = ${DRAWS};</script></head><body>${body}</body></html>`;
+  // /held.js's answer waits for a load of /fh (or 10 s): each load lets one
+  // /held.js through.
+  const held = (() => {
+    let loads = 0;
+    const waiting = [];
+    return {
+      loaded: () => { const w = waiting.shift(); if (w) w(); else loads++; },
+      script: (done) => {
+        if (loads > 0) { loads--; done(); return; }
+        const t = setTimeout(() => { const i = waiting.indexOf(go); if (i >= 0) waiting.splice(i, 1); done(); }, 10000);
+        t.unref();
+        const go = () => { clearTimeout(t); done(); };
+        waiting.push(go);
+      },
+    };
+  })();
   const srv = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x');
     // /csp is served with a CSP sandbox: an opaque origin, no session storage.
     if (u.pathname === '/csp') { res.writeHead(200, { 'content-type': 'text/html', 'content-security-policy': 'sandbox allow-scripts' }); res.end(page('csp')); return; }
+    if (u.pathname === '/held.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); held.script(() => res.end('')); return; }
     res.writeHead(200, { 'content-type': 'text/html' });
     if (u.pathname === '/draws') { res.end(page(`<iframe src="http://localhost:${srv.address().port}/frame"></iframe>`)); return; }
     if (u.pathname === '/frame') { res.end(page('frame')); return; }
@@ -471,6 +488,25 @@ async function drawsServer() {
       res.end(page(at.flatMap(([k, path]) => Array.from({ length: n }, (_, i) => `<iframe name="${k}${i}" sandbox="allow-scripts" src="${path}"></iframe>`)).join('')));
       return;
     }
+    // /held holds sandboxed frame h0 at /fh, then /held.js, then h1 and h2
+    // at /fh. /held.js is answered only once h0 has loaded (its load sends
+    // /fh-loaded), so its parent's parser puts h1 and h2 in only after h0
+    // has drawn and loaded, every run.
+    if (u.pathname === '/held') {
+      const f = (n) => `<iframe name="${n}" sandbox="allow-scripts" src="/fh"></iframe>`;
+      res.end(page(`${f('h0')}<script src="/held.js"></script>${f('h1')}${f('h2')}`));
+      return;
+    }
+    if (u.pathname === '/fh') { res.end(page('<script>addEventListener("load", () => { new Image().src = "/fh-loaded"; });</script>')); return; }
+    if (u.pathname === '/fh-loaded') { held.loaded(); res.end(''); return; }
+    // parse.spec.ts's: two sandboxed frames u0, u1 at /fs, then a script
+    // (/unparsed) or an image (/unloaded) the server never answers.
+    if (u.pathname === '/unparsed' || u.pathname === '/unloaded') {
+      const f = (n) => `<iframe name="${n}" sandbox="allow-scripts" src="/fs"></iframe>`;
+      res.end(page(`${f('u0')}${f('u1')}${u.pathname === '/unparsed' ? '<script src="/hold.js"></script>' : '<img src="/hold.png">'}`));
+      return;
+    }
+    if (u.pathname === '/hold.js' || u.pathname === '/hold.png') return;
     if (u.pathname === '/cost') {
       const n = Number(u.searchParams.get('n') || 0);
       const sh = Number(u.searchParams.get('shadow') || 0);
@@ -876,13 +912,13 @@ for (const engine of ENGINES) {
 }
 
 for (const engine of ENGINES) {
-  test(`seeded, in ${engine}: 300 frames in a page's markup, or put in by one script, each load and draw their own numbers, the same at replay, with no page error; sandboxed frames are never seeded, each draws its own numbers and is named with how many frames are beside it: three at one path, a lone one, a new one put in at a removed one's path, and ones whose own script replaces the global parent before they draw; a page whose DOM changes often is walked only when a frame is put in`, async () => {
+  test(`seeded, in ${engine}: 300 frames in a page's markup, or put in by one script, each load and draw their own numbers, the same at replay, with no page error; sandboxed frames are never seeded, each draws its own numbers and is named with how many frames are beside it once its parent's parser has ended: three at one path, a lone one, a new one put in at a removed one's path, ones whose own script replaces the global parent before they draw, and one that draws and loads while its parent's parser holds the frames after it; a page whose DOM changes often is walked only when a frame is put in`, async () => {
     const j = journal();
     const rec = await fakeAgent(j);
     let kept = {};
     const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
       ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
-    const names = ['markup', 'script', 'sandboxed', 'lone', 'swapped', 'cost'];
+    const names = ['markup', 'script', 'sandboxed', 'lone', 'swapped', 'held', 'cost'];
     const env = (url) => ({ ...keployEnv(url), PW_BROWSER: engine });
     const unplaced = (r, n) => r.tests[n].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${n}, `)).map((l) => l.replace(/:\d+\//, ':<port>/'));
     const line = (n, at, others) => unplacedLine(n, `http://127.0.0.1:<port>${at}`, 'uncounted', others);
@@ -891,6 +927,7 @@ for (const engine of ENGINES) {
       assert.deepEqual(unplaced(run, 'sandboxed'), [line('sandboxed', '/fs', 2)]);
       assert.deepEqual(unplaced(run, 'lone'), [line('lone', '/fs', 0)]);
       assert.deepEqual(unplaced(run, 'swapped').sort(), SWAP.map(([, at]) => line('swapped', at, 8)).sort());
+      assert.deepEqual(unplaced(run, 'held'), [line('held', '/fh', 2)]);
     };
     try {
       const r = await drawRun(j, env(rec.url), ['many.spec.ts'], names);
@@ -907,9 +944,11 @@ for (const engine of ENGINES) {
       }
       // Sandboxed frames: none draws what seeding would give it (its page,
       // marked, and its path); each draws its own, named once for each
-      // address, with how many other frames its parent holds. Three at one
-      // path, then a lone one; a lone one, taken out and another put in at
-      // its path; nine whose script replaces parent before they draw.
+      // address, with how many other frames its parent holds once its
+      // parser has ended. Three at one path, then a lone one; a lone one,
+      // taken out and another put in at its path; nine whose script
+      // replaces parent before they draw; three where the first draws and
+      // loads while its parent holds no other (the count is still 2).
       const { three, one } = r.drew.sandboxed;
       const seeded = (n, at) => expected(seed[n], at, new Map(), 't0x');
       assert.equal(new Set(Object.values(three).map((x) => x.uuid)).size, 3);
@@ -920,6 +959,9 @@ for (const engine of ENGINES) {
       const swapped = r.drew.swapped;
       assert.equal(new Set(Object.values(swapped).map((x) => x.uuid)).size, 9);
       for (const [k, at] of SWAP) for (let i = 0; i < 3; i++) assert.notDeepEqual(swapped[`${k}${i}`], seeded('swapped', at), `${k}${i}`);
+      const held = r.drew.held;
+      assert.equal(new Set(Object.values(held).map((x) => x.uuid)).size, 3);
+      for (const x of Object.values(held)) assert.notDeepEqual(x, seeded('held', '/fh'));
       sandboxed(r);
       // A page whose DOM changes often: seeding walks the document for no
       // change that puts in no frame, and once when one frame is put in.
@@ -941,6 +983,27 @@ for (const engine of ENGINES) {
       assert.notDeepEqual(p.drew.lone.first, first);
       sandboxed(p);
     } finally { await rep.close(); await rec.close(); }
+  });
+}
+
+for (const engine of ENGINES) {
+  test(`seeded, in ${engine}: a sandboxed frame's line counts the frames beside it once its parent's parser has ended, not at its parent's load; or at the test's end when the parser has not ended by then`, async () => {
+    const j = journal();
+    const a = await fakeAgent(j);
+    const d = await drawsServer();
+    try {
+      const { tests, out } = await playwright(['parse.spec.ts'], { ...keployEnv(a.url), PW_BROWSER: engine, DRAWS_BASE: d.url, PW_TIMEOUT: '15000' });
+      // unloaded: counted at the parse's end, before the test put u2 in;
+      // unparsed: at the test's end, u2 included. Each test then waits for
+      // the call its page never had answered.
+      for (const [n, others, call] of [['unloaded', 1, '/hold.png'], ['unparsed', 2, '/hold.js']]) {
+        const t = tests[n];
+        assert.equal(t.status, 'timedOut', `${n}: ${t.error}\n${out}`);
+        const said = t.stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${n}, `)).map((l) => l.replace(/:\d+\//, ':<port>/'));
+        assert.deepEqual(said, [unplacedLine(n, 'http://127.0.0.1:<port>/fs', 'uncounted', others)], n);
+        assert.ok(t.steps.some((s) => s.startsWith('keploy: wait for the test\'s 1 call(s) in flight') && s.endsWith(call)), `${n}: ${t.steps.join('\n')}`);
+      }
+    } finally { await d.close(); await a.close(); }
   });
 }
 

@@ -52,7 +52,7 @@ import { ACTION_FAIL, ACTION_SKIP, AgentClient, KeployError, RANDOM_OWN, RANDOM_
 import type { Outcome, Random, TestRef } from './agent';
 import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
-import { SEEDED_LINE, freshSeed, initScript, pageAddress, placePages, seedingFromEnv, unplacedLine, unseededLine, type Unplaced } from './random';
+import { SEEDED_LINE, besideOf, freshSeed, initScript, othersNow, pageAddress, placePages, seedingFromEnv, unplacedLine, unseededLine, type Unplaced } from './random';
 import { Inflight } from './settle';
 
 export { expect, KeployError };
@@ -155,13 +155,16 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
     }
     const name = open.name;
     let restore = (): void => {};
+    // The lines that wait for a parent's parser to end, each said at the
+    // test's end if it has not.
+    const waiting = new Set<() => void>();
     if (s.seed !== '') {
       // A document the seeding cannot place draws the browser's own numbers
       // and says so here, once for each address and reason in the test.
       const report = `__keploy_random_unplaced_${++reports}`;
       const told = new Set<string>();
       let opened: (page: Page | null | undefined) => Promise<boolean> = async () => false;
-      await context.exposeBinding(report, async (source, at: unknown, why: unknown, others: unknown) => {
+      await context.exposeBinding(report, async (source, at: unknown, why: unknown, above: unknown) => {
         const a = pageAddress(at);
         const w: Unplaced = why === 'frame' || why === 'uncounted' || why === 'nostorage' ? why : (await opened(source.page)) ? 'own' : 'popup';
         // Once for each address and reason: two documents at one address
@@ -169,7 +172,29 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
         const k = `${w}\n${a}`;
         if (told.has(k)) return;
         told.add(k);
-        process.stdout.write(`${unplacedLine(name, a, w, Number(others))}\n`);
+        if (w !== 'uncounted') {
+          process.stdout.write(`${unplacedLine(name, a, w)}\n`);
+          return;
+        }
+        // Its line says how many frames are beside its frame once their
+        // parent's parser has ended, or at the test's end.
+        const b = besideOf(source.frame, Number(above));
+        let said = false;
+        const say = (): void => {
+          if (said) return;
+          said = true;
+          waiting.delete(say);
+          process.stdout.write(`${unplacedLine(name, a, w, b === null ? 0 : othersNow(b))}\n`);
+        };
+        waiting.add(say);
+        if (b !== null) {
+          try {
+            await b[1].waitForLoadState('domcontentloaded', { timeout: 0 });
+          } catch {
+            // The parent, or its page, is gone.
+          }
+        }
+        say();
       });
       // Before the test's first page: an init script runs in every frame's
       // document before its own scripts.
@@ -196,6 +221,7 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       await use(context);
     } finally {
       restore();
+      for (const say of [...waiting]) say();
     }
     if (inflight.size > 0) {
       const calls = inflight.describe();

@@ -14,7 +14,7 @@
 // On by default; KEPLOY_SEED_RANDOM=off or the fixture option
 // keploySeedRandom: false turns it off.
 
-import type { BrowserContext, Page } from '@playwright/test';
+import type { BrowserContext, Frame, Page } from '@playwright/test';
 import crypto from 'node:crypto';
 
 export const ENV_SEED_RANDOM = 'KEPLOY_SEED_RANDOM';
@@ -91,7 +91,8 @@ const UNPLACED: Record<Exclude<Unplaced, 'uncounted'>, string> = {
  * of its seeded context drew the browser's own random numbers because the
  * seeding could not place it among the test's pages (initScript); others: for
  * 'uncounted', how many other frames are beside the frame with no session
- * storage (under its parent): the document's own frame, or the one it is in.
+ * storage (under its parent): the document's own frame, or the one it is in
+ * (othersNow).
  */
 export function unplacedLine(name: string, at: string, why: Unplaced = 'popup', others = 0): string {
   const n = Math.floor(Number(others));
@@ -101,6 +102,33 @@ export function unplacedLine(name: string, at: string, why: Unplaced = 'popup', 
       (n > 0 ? ` or, at its path, one of the ${n} other frame(s) beside that frame` : '') + ' could draw the same numbers.'
     : UNPLACED[why];
   return `keploy: in ${name}, the document at ${at} drew the browser's own random numbers, so its draws may differ at replay: ${reason}`;
+}
+
+/**
+ * The frame with no session storage that an 'uncounted' line names, and its
+ * parent: frame is the document's own frame, and above how many frames up
+ * from it that one is (initScript; 0 for its own). null when it has no
+ * parent (a top document, or one further up than the top).
+ */
+export function besideOf(frame: Frame, above: number): [Frame, Frame] | null {
+  let f: Frame | null = frame;
+  for (let i = 0; i < above && f !== null; i++) f = f.parentFrame();
+  const parent = f === null ? null : f.parentFrame();
+  return f === null || parent === null ? null : [f, parent];
+}
+
+/**
+ * How many other frames are beside that frame under its parent (besideOf)
+ * now; 0, so the line names no other frame, when the frame is gone (its
+ * parent may have moved on to another document, which holds other frames).
+ * The fixture counts once the parent's parser has ended (its
+ * DOMContentLoaded), or at the test's end if it has not: a frame draws as it
+ * loads, and may draw and load while its parent's parser holds the frames
+ * after it in its markup (behind a script it loads), so a count taken at
+ * its draw, or at its own load, would depend on the network.
+ */
+export function othersNow([frame, parent]: [Frame, Frame]): number {
+  return frame.isDetached() ? 0 : parent.childFrames().length - 1;
 }
 
 /** A seed drawn afresh for a test's begin: 128 bits, as hex. */
@@ -246,7 +274,9 @@ export function placePages(context: BrowserContext, mark: string): { restore: ()
  * cannot place, 'uncounted' for a frame under a parent of another origin
  * with no session storage, or one in such a frame, 'nostorage' for a top
  * document with no session storage, or a frame of its origin in one, else
- * '') and, for 'uncounted', how many other frames are beside that frame.
+ * '') and, for 'uncounted', how many frames up from the document's own
+ * frame the frame with no session storage is (0 for its own), so the
+ * fixture can count the frames beside that one (othersNow).
  *
  * The path alone names the document in its frame: a replay may serve the
  * app at another host or port than its record did, and a query often
@@ -436,10 +466,8 @@ export function initScript(seed: string, report = '', mark = ''): string {
     let loads = 0;
     // The parent as the document begins, before any script of the page has
     // run: a page script may replace the global parent (var parent = ...).
-    let par = null;
     try {
       const p = g.parent;
-      par = p;
       if (p !== g) {
         kind = 'frame';
         if (p !== null && p !== undefined) {
@@ -491,7 +519,7 @@ export function initScript(seed: string, report = '', mark = ''): string {
       // An opener of another origin.
       given = null;
     }
-    const s = { doc, place, loads, counted, par, kind, up, frame, given, page: undefined, first: false, uncounted: false, others: 0, opened: [], els: new WM(), held: 0, bound: new WM(), mo: null, numbers: new Mp(), counts: new Mp(), streams: null };
+    const s = { doc, place, loads, counted, kind, up, frame, given, page: undefined, first: false, uncounted: false, opened: [], els: new WM(), held: 0, bound: new WM(), mo: null, numbers: new Mp(), counts: new Mp(), streams: null };
     watch(s);
     return s;
   };
@@ -533,11 +561,7 @@ export function initScript(seed: string, report = '', mark = ''): string {
   // storage did not count: nothing tells its documents at one path apart
   // (a reload, a frame put in again at its place, another frame beside it),
   // and seeded they would draw the same numbers (a browser-made ID sent
-  // twice to a real server in a record). Its line says how many other
-  // frames its parent holds: the parent's frame count, readable across
-  // origins, read from the parent as the document began (its own scripts
-  // may have replaced the global parent since); 1 when it cannot be read.
-  const othersOf = (s) => { try { const n = Number(s.par.length); return Number.isFinite(n) ? n - 1 : 1; } catch (e) { return 1; } };
+  // twice to a real server in a record).
   const pageOf = () => {
     const s = now();
     if (s.page === undefined) {
@@ -553,7 +577,7 @@ export function initScript(seed: string, report = '', mark = ''): string {
         if (p !== null && !s.counted && !s.first) { s.uncounted = true; p = null; }
       } else if (s.kind === 'other') {
         const t = named();
-        if (t !== null && !s.counted) { s.uncounted = true; s.others = othersOf(s); }
+        if (t !== null && !s.counted) s.uncounted = true;
         p = t === null || s.uncounted ? null : t + 'x';
       } else if (s.frame !== null) {
         const k = s.up.key();
@@ -567,8 +591,9 @@ export function initScript(seed: string, report = '', mark = ''): string {
   // cannot place, 'uncounted' for a frame under a parent of another origin
   // with no session storage, or one in such a frame, 'nostorage' for a top
   // document with no session storage, or a frame of its origin in one, else
-  // ''. othersFor: how many other frames are beside that frame, under its
-  // parent.
+  // ''. aboveFor: for 'uncounted', how many frames up from the document's
+  // own frame that frame with no session storage is (0 for its own): the
+  // fixture counts the frames beside it under its parent (othersNow).
   const whyOf = () => {
     const s = now();
     if (s.kind === 'top') return s.uncounted ? 'nostorage' : '';
@@ -576,10 +601,9 @@ export function initScript(seed: string, report = '', mark = ''): string {
     if (s.kind !== 'frame') return '';
     return s.frame === null ? 'frame' : s.up.why();
   };
-  const othersFor = () => {
+  const aboveFor = () => {
     const s = now();
-    if (s.kind === 'other') return s.others;
-    return s.kind === 'frame' && s.frame !== null ? s.up.others() : 0;
+    return s.kind === 'frame' && s.frame !== null ? s.up.above() + 1 : 0;
   };
   const key = () => { const p = pageOf(); const s = now(); return p === null ? null : seed + '\\n' + p + '\\n' + s.place + '\\n' + s.loads + '\\n'; };
   let mine;
@@ -588,7 +612,7 @@ export function initScript(seed: string, report = '', mark = ''): string {
     // (its state, so a later document that takes over the window is not),
     // with the mark the fixture gave this script, which a page's own script
     // does not know.
-    const d = Object.freeze({ key, why: whyOf, others: othersFor, enter, opened: () => now().opened, first: (m) => { if (mark !== '' && m === mark) now().first = true; } });
+    const d = Object.freeze({ key, why: whyOf, above: aboveFor, enter, opened: () => now().opened, first: (m) => { if (mark !== '' && m === mark) now().first = true; } });
     Object.defineProperty(g, ${JSON.stringify(DOC_KEY)}, { value: d, enumerable: false, writable: false, configurable: true });
     mine = d;
   } catch (e) {
@@ -623,7 +647,7 @@ export function initScript(seed: string, report = '', mark = ''): string {
         } catch (e) { at = ''; }
         if (at === '') at = 'about:blank';
         const why = whyOf();
-        try { const r = tell(at, why, othersFor()); if (r && typeof r.catch === 'function') r.catch(() => {}); } catch (e) {}
+        try { const r = tell(at, why, aboveFor()); if (r && typeof r.catch === 'function') r.catch(() => {}); } catch (e) {}
       }
     }
     return s.streams === false ? null : s.streams[name];
