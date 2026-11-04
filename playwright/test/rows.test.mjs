@@ -1,6 +1,7 @@
 // Rows: real Playwright runs of test/fixtures against a fake keploy agent,
-// which records every call and answers as each row says. The settle rows
-// need Chromium (npx playwright install chromium).
+// which records every call and answers as each row says. They need
+// Chromium, and the seeding's engine rows Firefox and WebKit too
+// (npx playwright install chromium firefox webkit).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -458,7 +459,7 @@ test('seeded: a record seeds each test\'s pages from the fresh seed its begin se
     for (const r of [r1, r2]) {
       // The numbers are the seed's: the init script ran before the page's
       // first script, in every frame.
-      for (const n of ['one', 'two']) assert.deepEqual(r.drew[n], { top: expected(r.seeds[n], '/draws'), frame: expected(r.seeds[n], '/frame') }, n);
+      for (const n of ['one', 'two']) assert.deepEqual(r.drew[n], { top: expected(r.seeds[n], '/draws'), frame: expected(r.seeds[n], '/frame', undefined, 't0f0') }, n);
       // A page loaded again draws new numbers; a query is no part of its name.
       const tab = new Map();
       const loads = [expected(r.seeds.again, '/draws', tab), expected(r.seeds.again, '/draws', tab), expected(r.seeds.again, '/draws', tab)];
@@ -535,8 +536,8 @@ test('seeded: each page of a test draws its own numbers at one path, a popup pla
     // place in the order the test opened them naming it, in its cross-site
     // frame too.
     assert.notEqual(t.second.top.uuid, t.first.top.uuid);
-    assert.deepEqual(t.first, { top: expected(seed, '/draws'), frame: expected(seed, '/frame') });
-    assert.deepEqual(t.second, { top: expected(seed, '/draws', undefined, 't1'), frame: expected(seed, '/frame', undefined, 't1') });
+    assert.deepEqual(t.first, { top: expected(seed, '/draws'), frame: expected(seed, '/frame', undefined, 't0f0') });
+    assert.deepEqual(t.second, { top: expected(seed, '/draws', undefined, 't1'), frame: expected(seed, '/frame', undefined, 't1f0') });
     // Two popups the first tab opened at one moment: each the window its
     // opener's document opened, in that order, from the opener's copied
     // session storage (its /draws loaded once).
@@ -558,14 +559,14 @@ test('seeded: each page of a test draws its own numbers at one path, a popup pla
     assert.deepEqual(unplaced(r, 'atonce'), []);
     // A frame of the page's own origin, whose document may take over the
     // window of its first about:blank, is seeded in the page's place too.
-    assert.deepEqual(r.drew.nest, { top: expected(r.seeds.nest, '/nest'), frame: expected(r.seeds.nest, '/frame') });
+    assert.deepEqual(r.drew.nest, { top: expected(r.seeds.nest, '/nest'), frame: expected(r.seeds.nest, '/frame', undefined, 't0f0') });
     assert.deepEqual(unplaced(r, 'nest'), []);
     // So is one in a popup, in the popup's place: the popup's document and
     // its frame both took over their windows' first about:blank.
     const pop = `${r.seeds.popnest}\nt0\n/draws\n0\nw0`;
     assert.deepEqual(r.drew.popnest, {
       top: expected(r.seeds.popnest, '/nest', new Map([[LOADS_KEY, '{"/draws":1}']]), pop),
-      frame: expected(r.seeds.popnest, '/frame', undefined, pop),
+      frame: expected(r.seeds.popnest, '/frame', undefined, `${pop}f0`),
     });
     assert.deepEqual(unplaced(r, 'popnest'), []);
     // A popup opened with noopener has no opener to place it: its own
@@ -633,6 +634,82 @@ test('seeded: a page\'s first document, before its first goto and as setContent 
     assert.deepEqual(unplaced(p, 'longpath'), [unplacedLine('longpath', p.drew.longpath.url.slice(0, 512))]);
   } finally { await rep.close(); await rec.close(); }
 });
+
+// The engines the seeding's frame, first-document popup and own-init-script
+// rows run in (CI installs all three).
+const ENGINES = ['chromium', 'firefox', 'webkit'];
+
+for (const engine of ENGINES) {
+  test(`seeded, in ${engine}: frames of a first document each draw their own numbers, never their parent's, and one put where a removed frame was, one its parent does not list, or a removed one has no place; a first document's popup is placed in Chromium only, else named; the test's own context init script is named as the test's`, async () => {
+    const j = journal();
+    const rec = await fakeAgent(j);
+    let kept = {};
+    const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+      ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+    const names = ['frames', 'popupfromblank', 'ownctxinit', 'shadow', 'removed'];
+    const unplaced = (r, n) => r.tests[n].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${n}, `)).map((l) => l.replace(/:\d+\//, ':<port>/')).sort();
+    const env = (url) => ({ ...keployEnv(url), PW_BROWSER: engine });
+    try {
+      const r = await drawRun(j, env(rec.url), ['engines.spec.ts'], names);
+      const at = (id, where, seed = r.seeds.frames) => JSON.parse(JSON.stringify(documentAt(initScript(seed), where, null, id).run(BLANK_DRAWS)));
+      // The first document, its srcdoc frame and its about:blank frame: each
+      // its own numbers, a frame by its index among its parent's frames.
+      const f = r.drew.frames;
+      // Firefox runs a window's first document's init scripts before that
+      // document has its URL, so its draws are its own engine's, not the vm
+      // model's: there each document draws apart, the same at replay.
+      const model = engine !== 'firefox';
+      if (model) {
+        assert.deepEqual(f.top, at('t0', 'blank'));
+        assert.deepEqual(f.n, { url: 'about:srcdoc', draws: at('t0f0', 'srcdoc') });
+        assert.deepEqual(f.nn, { url: 'about:blank', draws: at('t0f0f0', 'blank') });
+        assert.deepEqual(f.s, { url: 'about:srcdoc', draws: at('t0f1', 'srcdoc') });
+        assert.deepEqual(f.b, { url: 'about:blank', draws: at('t0f2', 'blank') });
+      }
+      const docs = [f.top, f.n.draws, f.nn.draws, f.s.draws, f.b.draws].map((d) => JSON.stringify(d));
+      assert.equal(new Set(docs).size, 5, docs.join('\n'));
+      // The frame put at the removed one's index draws the browser's own,
+      // never the removed frame's, and is named.
+      assert.notDeepEqual(f.c, f.b.draws);
+      assert.deepEqual(unplaced(r, 'frames'), [unplacedLine('frames', 'about:blank', 'frame')]);
+      // A popup the first document opens with window.open('about:blank'):
+      // Chromium places it; Firefox and WebKit begin its document before
+      // window.open returns, so it has no place there, and is named.
+      const pop = r.drew.popupfromblank;
+      assert.equal(pop.url, 'about:blank');
+      const placed = engine === 'chromium';
+      if (placed) assert.deepEqual(pop.draws, at(`${r.seeds.popupfromblank}\nt0\nblank\n0\nw0`, 'blank', r.seeds.popupfromblank));
+      assert.deepEqual(unplaced(r, 'popupfromblank'), placed ? [] : [unplacedLine('popupfromblank', 'about:blank', 'popup')]);
+      // The test's own context init script draws first in each document of
+      // its page, its first about:blank too: named as the test's, with the
+      // reason.
+      assert.deepEqual(unplaced(r, 'ownctxinit'), ['about:blank', 'http://127.0.0.1:<port>/draws', 'http://localhost:<port>/frame'].map((a) => unplacedLine('ownctxinit', a, 'own')).sort());
+      // A frame in a shadow root is placed by the index its parent lists it
+      // at; one its parent does not list has no place, and is named.
+      const sh = r.drew.shadow;
+      const listed = sh.index >= 0;
+      if (listed && model) assert.deepEqual(sh.draws, at(`t0f${sh.index}`, 'blank', r.seeds.shadow));
+      assert.deepEqual(unplaced(r, 'shadow'), listed ? [] : [unplacedLine('shadow', 'about:blank', 'frame')]);
+      // A removed frame's Math.random, first drawn from after the removal,
+      // has no place: never its page's first document's numbers.
+      assert.notDeepEqual(r.drew.removed, at('t0', 'blank', r.seeds.removed).random);
+      assert.deepEqual(r.ends, names.map((x) => [x, 'seeded']));
+      // A replay draws what each placed document drew; what had no place
+      // draws anew, named again.
+      kept = r.seeds;
+      const p = await drawRun(j, env(rep.url), ['engines.spec.ts'], names);
+      assert.deepEqual({ ...p.drew.frames, c: null }, { ...f, c: null });
+      assert.notDeepEqual(p.drew.frames.c, f.c);
+      if (placed) assert.deepEqual(p.drew.popupfromblank, pop);
+      else assert.notDeepEqual(p.drew.popupfromblank.draws, pop.draws);
+      assert.notEqual(p.drew.ownctxinit.early, r.drew.ownctxinit.early);
+      if (listed) assert.deepEqual(p.drew.shadow, sh);
+      else assert.notDeepEqual(p.drew.shadow.draws, sh.draws);
+      assert.notDeepEqual(p.drew.removed, r.drew.removed);
+      for (const x of names) assert.deepEqual(unplaced(p, x), unplaced(r, x), x);
+    } finally { await rep.close(); await rec.close(); }
+  });
+}
 
 test('seeded: a retry draws the numbers its first attempt drew, from the seed keploy answers it', async () => {
   const j = journal();

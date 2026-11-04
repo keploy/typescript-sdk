@@ -52,7 +52,7 @@ import { ACTION_FAIL, ACTION_SKIP, AgentClient, KeployError, RANDOM_OWN, RANDOM_
 import type { Outcome, Random, TestRef } from './agent';
 import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
-import { SEEDED_LINE, freshSeed, initScript, pageAddress, pageScript, seedingFromEnv, unplacedLine, unseededLine } from './random';
+import { SEEDED_LINE, freshSeed, initScript, pageAddress, pageScript, seedingFromEnv, unplacedLine, unseededLine, type Unplaced } from './random';
 import { Inflight } from './settle';
 
 export { expect, KeployError };
@@ -84,26 +84,45 @@ let reports = 0;
  * every document of the page, its first about:blank included, before
  * newPage returns: two tabs of a test draw their own numbers, the same ones
  * at replay. A popup is placed by its opener's document in the page itself
- * (initScript). Returns what undoes it.
+ * (initScript). Returns what undoes it, and whether a page is one the test
+ * opened, once every newPage the test has asked for has come.
  */
-function placePages(context: BrowserContext): () => void {
+function placePages(context: BrowserContext): { restore: () => void; opened: (page: Page | null | undefined) => Promise<boolean> } {
   const had = Object.prototype.hasOwnProperty.call(context, 'newPage');
   const newPage = context.newPage;
   let made = 0;
+  // The test's pages, and those it has asked for that have not come yet.
+  const pages = new WeakSet<Page>();
+  const coming = new Set<Promise<Page>>();
   context.newPage = async function placed(this: BrowserContext): Promise<Page> {
     // Its place is taken when the test asks for it, not when the page
     // comes: two pages asked for at once keep the order the test asked in.
     const id = `t${made++}`;
-    const p = await newPage.call(context);
+    const asked = newPage.call(context);
+    coming.add(asked);
+    let p: Page;
+    try {
+      p = await asked;
+    } finally {
+      coming.delete(asked);
+    }
+    pages.add(p);
     // The documents the page loads, and the one it has: an init script
     // does not run in a document that already exists.
     await p.addInitScript({ content: pageScript(id) });
     await p.evaluate(pageScript(id));
     return p;
   };
-  return () => {
-    if (had) context.newPage = newPage;
-    else delete (context as { newPage?: unknown }).newPage;
+  return {
+    restore: () => {
+      if (had) context.newPage = newPage;
+      else delete (context as { newPage?: unknown }).newPage;
+    },
+    // A page's first document may tell before its newPage has come.
+    opened: async (page) => {
+      const came = await Promise.allSettled([...coming]);
+      return pages.has(page as Page) || came.some((c) => c.status === 'fulfilled' && c.value === page);
+    },
   };
 }
 
@@ -189,16 +208,20 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       // and says so here, once for each address in the test.
       const report = `__keploy_random_unplaced_${++reports}`;
       const told = new Set<string>();
-      await context.exposeBinding(report, (_source, at: unknown) => {
+      let opened: (page: Page | null | undefined) => Promise<boolean> = async () => false;
+      await context.exposeBinding(report, async (source, at: unknown, why: unknown) => {
         const a = pageAddress(at);
         if (told.has(a)) return;
         told.add(a);
-        process.stdout.write(`${unplacedLine(name, a)}\n`);
+        const w: Unplaced = why === 'frame' ? 'frame' : (await opened(source.page)) ? 'own' : 'popup';
+        process.stdout.write(`${unplacedLine(name, a, w)}\n`);
       });
       // Before the test's first page: an init script runs in every frame's
       // document before its own scripts.
       await context.addInitScript({ content: initScript(s.seed, report) });
-      restore = placePages(context);
+      const placing = placePages(context);
+      restore = placing.restore;
+      opened = placing.opened;
       if (!saidSeeded) {
         saidSeeded = true;
         process.stdout.write(`${SEEDED_LINE}\n`);

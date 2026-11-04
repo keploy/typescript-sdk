@@ -34,5 +34,7 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      # The rows run in Chromium, and the seeding's engine rows in Firefox and
+      # WebKit too.
+      - run: npx playwright install --with-deps chromium firefox webkit
       - run: npm test

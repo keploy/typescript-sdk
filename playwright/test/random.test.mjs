@@ -37,6 +37,14 @@ test('the lines say what is seeded, what is not, where the seed lives, and how t
   assert.equal(unplacedLine('g › t', 'http://h/p'), 'keploy: in g › t, the document at http://h/p drew the browser\'s own random numbers, so its draws may differ at replay: ' +
     'it is in a page the app opened that keploy cannot place in the test\'s order (a popup opened with noopener, as a link with target=_blank opens one, ' +
     'or at another origin than its opener\'s page, or after that page moved on; or a frame of another origin in one).');
+  assert.equal(unplacedLine('g › t', 'http://h/p', 'popup'), unplacedLine('g › t', 'http://h/p'));
+  assert.equal(unplacedLine('g › t', 'about:blank', 'own'), 'keploy: in g › t, the document at about:blank drew the browser\'s own random numbers, so its draws may differ at replay: ' +
+    'it is in a page the test opened, and it drew before keploy named that page: a script the test added with context.addInitScript ' +
+    'runs in each of the page\'s documents before keploy\'s, and so does a draw the test makes there before newPage returns.');
+  assert.equal(unplacedLine('g › t', 'about:blank', 'frame'), 'keploy: in g › t, the document at about:blank drew the browser\'s own random numbers, so its draws may differ at replay: ' +
+    'it is a frame keploy cannot place among its parent\'s frames: one at an index where its parent document had another frame ' +
+    '(one the app removed, or one it inserted this frame before), so it does not draw that frame\'s numbers again, ' +
+    'one in a shadow root, which its parent does not list, or one removed before its first draw.');
 });
 
 test('an address a page sends is shown on one line, each control character a ?, cut to 512 characters', () => {
@@ -117,6 +125,21 @@ test('a document no page names and no opener places draws the browser\'s own num
   for (const r of a.random) assert.ok(r >= 0 && r < 1, String(r));
   // With no function to tell, it still draws its own.
   assert.notDeepEqual(documentAt(initScript(S1), '/p', new Map(), null).draws(), documentAt(initScript(S1), '/p', new Map(), null).draws());
+  // An opaque origin tells its URL with no query or fragment, never its
+  // origin's "null" before its path.
+  for (const [href, at] of [['about:blank', 'about:blank'], ['about:srcdoc?q#f', 'about:srcdoc'], ['http://h/sandboxed#f', 'http://h/sandboxed']]) {
+    const o = [];
+    documentAt(s, 'blank', null, null, { report: '__report', told: o, origin: 'null', href }).draws();
+    assert.deepEqual(o, [at], href);
+  }
+  const e = [];
+  documentAt(s, 'blank', null, null, { report: '__report', told: e, origin: '', href: 'about:blank#x' }).draws();
+  assert.deepEqual(e, ['about:blank']);
+  // A window's first document with no URL yet (Firefox, as its init
+  // scripts run) is about:blank.
+  const none = [];
+  documentAt(s, '', null, null, { report: '__report', told: none, origin: '', href: '' }).draws();
+  assert.deepEqual(none, ['about:blank']);
 });
 
 test('a document loaded again in the same tab draws new numbers, the same ones each run', () => {

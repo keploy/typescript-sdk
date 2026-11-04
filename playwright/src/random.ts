@@ -61,14 +61,30 @@ export function pageAddress(at: unknown): string {
 }
 
 /**
+ * Why the seeding could not place a document: 'own' for one in a page the
+ * test opened that drew before keploy named the page, 'frame' for a frame
+ * it cannot place among its parent's frames (initScript), 'popup' for one
+ * in a page the app opened.
+ */
+export type Unplaced = 'own' | 'frame' | 'popup';
+
+const UNPLACED: Record<Unplaced, string> = {
+  own: 'it is in a page the test opened, and it drew before keploy named that page: a script the test added with context.addInitScript ' +
+    'runs in each of the page\'s documents before keploy\'s, and so does a draw the test makes there before newPage returns.',
+  frame: 'it is a frame keploy cannot place among its parent\'s frames: one at an index where its parent document had another frame ' +
+    '(one the app removed, or one it inserted this frame before), so it does not draw that frame\'s numbers again, ' +
+    'one in a shadow root, which its parent does not list, or one removed before its first draw.',
+  popup: 'it is in a page the app opened that keploy cannot place in the test\'s order (a popup opened with noopener, as a link with target=_blank opens one, ' +
+    'or at another origin than its opener\'s page, or after that page moved on; or a frame of another origin in one).',
+};
+
+/**
  * The line a test shows, once for each address, when a document of its
  * seeded context drew the browser's own random numbers because the seeding
  * could not place it among the test's pages (initScript).
  */
-export function unplacedLine(name: string, at: string): string {
-  return `keploy: in ${name}, the document at ${at} drew the browser's own random numbers, so its draws may differ at replay: ` +
-    'it is in a page the app opened that keploy cannot place in the test\'s order (a popup opened with noopener, as a link with target=_blank opens one, ' +
-    'or at another origin than its opener\'s page, or after that page moved on; or a frame of another origin in one).';
+export function unplacedLine(name: string, at: string, why: Unplaced = 'popup'): string {
+  return `keploy: in ${name}, the document at ${at} drew the browser's own random numbers, so its draws may differ at replay: ${UNPLACED[why]}`;
 }
 
 /** A seed drawn afresh for a test's begin: 128 bits, as hex. */
@@ -119,18 +135,23 @@ export function pageScript(id: string): string {
  *     document begins (or, for a document that took over its window's
  *     first about:blank and so ran no init script, at its first draw); it
  *     needs an opener of its own origin;
- *   - a frame of a popup is its parent document's, of the same origin.
+ *   - a frame is in its parent document's tab (a frame of a popup needs a
+ *     parent of its own origin), at its index among its parent's frames,
+ *     and its parent's among the grandparent's, up to the top: an
+ *     about:blank frame does not draw the numbers of its parent document at
+ *     about:blank.
  * A document with no place (a popup opened with noopener, as a link with
  * target=_blank opens one, or of another origin than its opener's page, or
- * after its opener's page moved on; a frame of another origin in one) draws
+ * after its opener's page moved on; a frame of another origin in one; a
+ * frame at an index where its parent document had another frame) draws
  * the browser's own numbers, never another page's, and says so through
  * report, the name of a function the fixture exposed ('' for none), at its
- * first draw.
+ * first draw, with its address and why ('frame' for a frame with no place
+ * among its parent's frames, else '').
  *
- * The path alone names the document in its page: a replay may serve the app
- * at another host or port than its record did, and a query often carries a
- * time. So two frames of different origins at the same path in one page
- * draw the same numbers. A stream for each function keeps one's draws from
+ * The path alone names the document in its frame: a replay may serve the
+ * app at another host or port than its record did, and a query often
+ * carries a time. A stream for each function keeps one's draws from
  * shifting another's: a timer's Math.random does not move the next
  * crypto.randomUUID.
  */
@@ -198,7 +219,9 @@ export function initScript(seed: string, report = ''): string {
       // No session storage here (a sandboxed frame, an opaque origin): every
       // document of this path in the page draws the same numbers.
     }
-    // Read as the document begins: an opener or a parent may move on later.
+    // A top document's opener, read as the document begins: an opener may
+    // move on later. A frame's parent is read at its first draw (frameOf):
+    // a frame goes with its parent document.
     let given = null;
     try {
       const top = g.top;
@@ -211,14 +234,13 @@ export function initScript(seed: string, report = ''): string {
           if (k !== null) given = k + 'w' + i;
         }
       } else {
-        const d = g.parent[${JSON.stringify(DOC_KEY)}];
-        if (d) given = d.page();
+        given = undefined;
       }
     } catch (e) {
-      // An opener or a parent of another origin.
+      // An opener of another origin.
       given = null;
     }
-    return { doc, place, loads, given, page: undefined, opened: [], streams: null };
+    return { doc, place, loads, given, tab: undefined, frame: undefined, page: undefined, opened: [], held: [], streams: null };
   };
   const docNow = () => { try { return document; } catch (e) { return null; } };
   let state = begin(docNow());
@@ -227,20 +249,76 @@ export function initScript(seed: string, report = ''): string {
     if (state.doc !== doc) state = begin(doc);
     return state;
   };
-  // The document's page, named when first asked: the page script runs
-  // after this one, before the page's own scripts.
+  // The document's tab, when first asked: the page the test opened (the
+  // page script runs after this one, before the page's own scripts), or the
+  // place its opener gives it, or its parent document's of its own origin.
+  const tabOf = () => {
+    const s = now();
+    if (s.tab === undefined) {
+      let p = null;
+      try { const v = g[${JSON.stringify(PAGE_KEY)}]; if (typeof v === 'string') p = v; } catch (e) { p = null; }
+      if (p === null && s.given === undefined) {
+        try { const d = g.parent[${JSON.stringify(DOC_KEY)}]; if (d) p = d.tab(); } catch (e) { p = null; }
+      }
+      s.tab = p !== null ? p : (s.given === undefined ? null : s.given);
+    }
+    return s.tab;
+  };
+  // A frame's place in its tab, when first asked: its index among its
+  // parent's frames, then its parent's among the grandparent's, up to the
+  // top, as a frame of another origin reads it too ('' for a top document).
+  // null when it is not among its parent's frames (one in a shadow root),
+  // has no parent (removed before its first draw), or its parent document of
+  // its own origin had another frame at that index (one the app removed, or
+  // moved on by inserting this one before it): it then draws the browser's
+  // own numbers, never that frame's.
+  const frameOf = () => {
+    const s = now();
+    if (s.frame === undefined) {
+      let f = '';
+      let own = -1;
+      try {
+        for (let w = g; ;) {
+          const p = w.parent;
+          if (p === w) break;
+          if (p === undefined || p === null) { f = null; break; }
+          let i = -1;
+          for (let j = 0; j < p.length; j++) if (p[j] === w) { i = j; break; }
+          if (i < 0) { f = null; break; }
+          if (w === g) own = i;
+          f = 'f' + i + f;
+          w = p;
+        }
+      } catch (e) {
+        f = null;
+      }
+      if (f !== null && own >= 0) {
+        try { const d = g.parent[${JSON.stringify(DOC_KEY)}]; if (d && !d.hold(g, own)) f = null; } catch (e) {}
+      }
+      s.frame = f;
+    }
+    return s.frame;
+  };
+  // The document's page: its tab, then its place among the tab's frames.
   const pageOf = () => {
     const s = now();
     if (s.page === undefined) {
-      let p = null;
-      try { const v = g[${JSON.stringify(PAGE_KEY)}]; if (typeof v === 'string') p = v; } catch (e) { p = null; }
-      s.page = p !== null ? p : s.given;
+      const t = tabOf();
+      const f = frameOf();
+      s.page = t === null || f === null ? null : t + f;
     }
     return s.page;
   };
+  // Whether the frame w may take index i among this document's frames: no
+  // other frame of this document took it before.
+  const hold = (w, i) => {
+    const h = now().held;
+    if (h[i] === undefined) h[i] = w;
+    return h[i] === w;
+  };
   const key = () => { const p = pageOf(); const s = now(); return p === null ? null : seed + '\\n' + p + '\\n' + s.place + '\\n' + s.loads + '\\n'; };
   try {
-    Object.defineProperty(g, ${JSON.stringify(DOC_KEY)}, { value: Object.freeze({ key, page: pageOf, opened: () => now().opened }), enumerable: false, writable: false, configurable: true });
+    Object.defineProperty(g, ${JSON.stringify(DOC_KEY)}, { value: Object.freeze({ key, tab: tabOf, hold, opened: () => now().opened }), enumerable: false, writable: false, configurable: true });
   } catch (e) {
     // A window that takes no property: nothing it opens or holds has a place.
   }
@@ -256,9 +334,19 @@ export function initScript(seed: string, report = ''): string {
         uuid: stream(k + 'crypto.randomUUID'),
       };
       if (s.streams === false && tell !== null) {
+        // Its address: origin and path, or for an opaque origin (about:blank,
+        // about:srcdoc, a sandboxed frame) its URL, with no query or
+        // fragment. A window's first document has no URL yet while Firefox
+        // runs its init scripts: it is about:blank. Why: 'frame' for a frame
+        // with no place among its parent's frames, else ''.
         let at = '';
-        try { at = location.origin + location.pathname; } catch (e) { at = s.place; }
-        try { const r = tell(at); if (r && typeof r.catch === 'function') r.catch(() => {}); } catch (e) {}
+        try {
+          const o = location.origin;
+          at = o && o !== 'null' ? o + location.pathname : String(location.href).split(/[?#]/)[0];
+        } catch (e) { at = ''; }
+        if (at === '') at = 'about:blank';
+        const why = frameOf() === null ? 'frame' : '';
+        try { const r = tell(at, why); if (r && typeof r.catch === 'function') r.catch(() => {}); } catch (e) {}
       }
     }
     return s.streams === false ? null : s.streams[name];
