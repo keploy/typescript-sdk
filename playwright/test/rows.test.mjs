@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LOADS_KEY, OFF_LINE, SEEDED_LINE, initScript, processRandom, unplacedLine, unseededLine } from '../dist/random.js';
+import { HELD_LINE, heldBeforeLine, seedWithStart, startOf, unheldLine } from '../dist/clock.js';
 import { DRAWS, documentAt } from './draws.mjs';
 
 const PKG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -921,4 +922,172 @@ test('seeded: after a test that throws, and after one that times out, the worker
     const begins = calls(j).filter((c) => c.path === '/agent/scope/begin').map((c) => c.body);
     assert.deepEqual(begins.map((b) => [b.name, b.random, /^[0-9a-f]{32}$/.test(b.seed)]), [['throws', 'seeded', true], ['times out', 'seeded', true]]);
   } finally { await rec.close(); }
+});
+
+// The clock rows: clock.spec.ts reads the clock in each test's beforeEach,
+// body (through a helper file, as a suite's own helpers do) and
+// afterEach; each test keeps what it read. A run gives what each test read,
+// its status, the lines it said, the seed each begin sent, and when
+// Playwright's report says each test started.
+const CLOCK_TESTS = ['stamps', 'other', 'own › free', 'asked › held'];
+const short = (n) => n.replace(/^(own|asked) › /, '');
+async function clockRun(j, env) {
+  const from = j.events.length;
+  const { tests, tmp, out } = await playwright(['clock.spec.ts'], env);
+  const status = Object.fromEntries(Object.entries(tests).map(([k, t]) => [k, t.status]));
+  const read = {};
+  for (const n of [...CLOCK_TESTS.map(short), 'outside']) {
+    const f = path.join(tmp, `clock-${n}.json`);
+    if (fs.existsSync(f)) read[n] = JSON.parse(fs.readFileSync(f, 'utf8'));
+  }
+  const lines = Object.values(tests).map((t) => t.stdout).join('').split('\n').filter((l) => l.startsWith('keploy:')).sort();
+  const seeds = Object.fromEntries(calls({ events: j.events.slice(from) }).filter((c) => c.path === '/agent/scope/begin').map((c) => [short(c.body.name), c.body.seed]));
+  const started = {};
+  const walk = (suite) => {
+    for (const x of suite.suites ?? []) walk(x);
+    for (const spec of suite.specs ?? []) started[spec.title] = Date.parse(spec.tests[0].results.at(-1)?.startTime ?? '');
+  };
+  for (const x of JSON.parse(fs.readFileSync(path.join(tmp, 'report.json'), 'utf8')).suites) walk(x);
+  // When the worker said stamps' own step began: a read of Playwright's.
+  const stepped = fs.readFileSync(path.join(tmp, 'steps.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    .filter((x) => x.test === 'stamps' && x.step === 'a step').map((x) => x.start);
+  return { read, status, lines, seeds, started, stepped, tests, out };
+}
+const PASSED = Object.fromEntries(CLOCK_TESTS.map((n) => [n, 'passed']));
+// What stamps reads when held from start s under seed sd: its beforeEach,
+// two suffixes (each with its random part from the test's stream), a Date's
+// checks, Date(), Playwright's waits, the account's stamp, its afterEach.
+function stampsHeld(sd, s) {
+  const next = processRandom(sd);
+  const f = () => Math.floor(next() * 1000);
+  return [s, `${s + 1}-${f()}`, `${s + 2}-${f()}`, [true, true, true, Date.UTC(2020, 0, 1), 0], new Date(s + 4).toString(), [true, true], true, s + 5];
+}
+// Whether every read of a test is the real clock's: each a time near now.
+const near = (v) => typeof v === 'number' && Math.abs(v - Date.now()) < 600000;
+function realReads(r, n) {
+  const v = r.read[n];
+  assert.ok(Array.isArray(v) && v.length > 0, `${n}: ${JSON.stringify(v)}`);
+  assert.ok(near(v[0]) && near(v.at(-1)), `${n}: ${JSON.stringify(v)}`);
+  if (typeof v[1] === 'string' && v[1].includes('-')) assert.ok(near(Number(v[1].split('-')[0])), `${n}: ${JSON.stringify(v)}`);
+}
+
+test('held clock, opt-in off: with KEPLOY_HOLD_CLOCK unset each begin sends a seed as before (32 hex digits) and the test reads the real clock; only a group that sets keployHoldClock: true is held', async () => {
+  const j = journal();
+  const rec = await fakeAgent(j);
+  try {
+    const r = await clockRun(j, keployEnv(rec.url));
+    assert.deepEqual(r.status, PASSED, r.out);
+    for (const n of ['stamps', 'other', 'free']) {
+      assert.match(r.seeds[n], /^[0-9a-f]{32}$/, n);
+      realReads(r, n);
+    }
+    // Real reads one after another, not one millisecond apart from a start.
+    assert.notEqual(r.read.stamps.at(-1), r.read.stamps[0] + 5);
+    const sd = r.seeds.held;
+    const s = startOf(sd);
+    assert.ok(s !== null && near(s), sd);
+    assert.deepEqual(r.read.held, [s, s + 1, s + 2]);
+    assert.equal(r.read.outside.real, true);
+    assert.deepEqual(r.lines, [SEEDED_LINE, HELD_LINE].sort(), r.out);
+  } finally { await rec.close(); }
+});
+
+test('held clock: KEPLOY_HOLD_CLOCK=on holds each test\'s own reads at its recorded start, one millisecond later at each read, the start in its seed; a replay reads its recording\'s instants; Playwright\'s reads and waits and a worker fixture\'s setup keep the real clock; keployHoldClock: false keeps a test\'s real clock', async () => {
+  const j = journal();
+  const rec = await fakeAgent(j);
+  let kept = {};
+  const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+    ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+  const on = (url) => ({ ...keployEnv(url), KEPLOY_HOLD_CLOCK: 'on' });
+  try {
+    const r = await clockRun(j, on(rec.url));
+    assert.deepEqual(r.status, PASSED, r.out);
+    const s = startOf(r.seeds.stamps);
+    const o = startOf(r.seeds.other);
+    const h = startOf(r.seeds.held);
+    for (const x of [s, o, h]) assert.ok(x !== null && near(x), JSON.stringify(r.seeds));
+    assert.deepEqual(r.read.stamps, stampsHeld(r.seeds.stamps, s), r.out);
+    assert.deepEqual(r.read.other, [o, `${o + 1}-${Math.floor(processRandom(r.seeds.other)() * 1000)}`, o + 2]);
+    assert.deepEqual(r.read.held, [h, h + 1, h + 2]);
+    // The opted-out test sent a seed with no start and read the real clock.
+    assert.match(r.seeds.free, /^[0-9a-f]{32}$/);
+    realReads(r, 'free');
+    assert.equal(r.read.outside.real, true);
+    assert.deepEqual(r.lines, [SEEDED_LINE, HELD_LINE].sort(), r.out);
+    kept = { stamps: r.seeds.stamps, other: r.seeds.other, 'own › free': r.seeds.free, 'asked › held': r.seeds.held };
+    const p = await clockRun(j, on(rep.url));
+    assert.deepEqual(p.status, PASSED, p.out);
+    // The replay's begins sent fresh seeds, with their own starts; keploy
+    // answered the recording's, so its code read the recording's instants.
+    assert.notEqual(p.seeds.stamps, r.seeds.stamps);
+    assert.deepEqual(p.read.stamps, r.read.stamps);
+    assert.deepEqual(p.read.other, r.read.other);
+    assert.deepEqual(p.read.held, r.read.held);
+    assert.notDeepEqual(p.read.free, r.read.free);
+    assert.equal(p.read.outside.real, true);
+    // A recording made long ago: the test's reads are its day's, while
+    // Playwright's report, its waits and the worker fixture read today.
+    const long = seedWithStart('ab'.repeat(16), Date.UTC(2026, 0, 2, 3, 4, 5, 6));
+    kept = { stamps: long };
+    const g = await clockRun(j, on(rep.url));
+    assert.deepEqual(g.status, PASSED, g.out);
+    assert.deepEqual(g.read.stamps, stampsHeld(long, Date.UTC(2026, 0, 2, 3, 4, 5, 6)), g.out);
+    assert.ok(near(g.started.stamps), String(g.started.stamps));
+    assert.equal(g.stepped.length, 1, g.out);
+    assert.ok(near(g.stepped[0]), String(g.stepped[0]));
+    // A record made again reads a new start.
+    const r2 = await clockRun(j, on(rec.url));
+    assert.ok(r2.read.stamps[0] > r.read.stamps[0]);
+  } finally { await rep.close(); await rec.close(); }
+});
+
+test('held clock: KEPLOY_HOLD_CLOCK=off keeps every test\'s real clock, a group\'s that sets keployHoldClock: true too; a test whose recording held its clock, replayed not held, says so', async () => {
+  const j = journal();
+  const rec = await fakeAgent(j);
+  const long = seedWithStart('cd'.repeat(16), Date.UTC(2026, 0, 2));
+  const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed ? { body: { v: 1, status: 'ok', seed: long } } : undefined));
+  try {
+    const off = await clockRun(j, { ...keployEnv(rec.url), KEPLOY_HOLD_CLOCK: 'off' });
+    assert.deepEqual(off.status, PASSED, off.out);
+    for (const n of ['stamps', 'other', 'free', 'held']) {
+      assert.match(off.seeds[n], /^[0-9a-f]{32}$/, n);
+      realReads(off, n);
+    }
+    assert.deepEqual(off.lines, [SEEDED_LINE], off.out);
+    // Every recording held its clock; this run holds only the asking group's.
+    const p = await clockRun(j, keployEnv(rep.url));
+    assert.deepEqual(p.status, PASSED, p.out);
+    for (const n of ['stamps', 'other', 'free']) realReads(p, n);
+    const s = Date.UTC(2026, 0, 2);
+    assert.deepEqual(p.read.held, [s, s + 1, s + 2]);
+    assert.deepEqual(p.lines, [SEEDED_LINE, HELD_LINE, heldBeforeLine('stamps'), heldBeforeLine('other'), heldBeforeLine('own › free')].sort(), p.out);
+  } finally { await rep.close(); await rec.close(); }
+});
+
+test('held clock: asked for but with no start (a recording made not held, keploy answering no seed, or seeding off), each test says why and reads the real clock; a KEPLOY_HOLD_CLOCK neither on nor off fails every test, naming it', async () => {
+  const j = journal();
+  const old = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed ? { body: { v: 1, status: 'ok', seed: 'a'.repeat(32) } } : undefined));
+  const none = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' ? { body: { v: 1, status: 'ok' } } : undefined));
+  const rec = await fakeAgent(j);
+  const on = (url) => ({ ...keployEnv(url), KEPLOY_HOLD_CLOCK: 'on' });
+  const asked = ['stamps', 'other', 'asked › held'];
+  try {
+    const a = await clockRun(j, on(old.url));
+    assert.deepEqual(a.status, PASSED, a.out);
+    for (const n of ['stamps', 'other', 'held']) realReads(a, n);
+    // The random part is still seeded: the recording's.
+    assert.equal(a.read.stamps[1].split('-')[1], String(Math.floor(processRandom('a'.repeat(32))() * 1000)));
+    assert.deepEqual(a.lines, [SEEDED_LINE, ...asked.map((n) => unheldLine(n, 'no start'))].sort(), a.out);
+    const b = await clockRun(j, on(none.url));
+    assert.deepEqual(b.status, PASSED, b.out);
+    for (const n of ['stamps', 'other', 'held']) realReads(b, n);
+    assert.deepEqual(b.lines, [...CLOCK_TESTS.map((n) => unseededLine(n)), ...asked.map((n) => unheldLine(n, 'no seed'))].sort(), b.out);
+    const c = await clockRun(j, { ...on(rec.url), KEPLOY_SEED_RANDOM: 'off' });
+    assert.deepEqual(c.status, PASSED, c.out);
+    for (const n of ['stamps', 'other', 'held']) { realReads(c, n); assert.equal(c.seeds[n], undefined, n); }
+    assert.deepEqual(c.lines, [OFF_LINE, ...asked.map((n) => unheldLine(n, 'unseeded'))].sort(), c.out);
+    const { tests, out } = await playwright(['clock.spec.ts'], { ...keployEnv(rec.url), KEPLOY_HOLD_CLOCK: 'maybe' });
+    assert.equal(Object.keys(tests).length, 4, out);
+    for (const t of Object.values(tests)) assert.match(t.error, /KEPLOY_HOLD_CLOCK="maybe" is neither on nor off/, out);
+  } finally { await rec.close(); await none.close(); await old.close(); }
 });
