@@ -41,12 +41,16 @@ test('the lines say what is seeded, what is not, where the seed lives, and how t
   assert.equal(unplacedLine('g › t', 'about:blank', 'own'), 'keploy: in g › t, the document at about:blank drew the browser\'s own random numbers, so its draws may differ at replay: ' +
     'it is in a page the test opened, and it drew before keploy named that page: a script the test added with context.addInitScript ' +
     'runs in each of the page\'s documents before keploy\'s, and so does a draw the test makes there before newPage returns.');
- const twin = (n) => 'keploy: in g › t, the document at http://h/f drew the browser\'s own random numbers, so its draws may differ at replay: ' +
-    `keploy cannot tell it apart from the ${n} other frame(s) its parent holds, which may be at its path: it is under a parent of another origin and has no session storage ` +
-    '(a sandboxed frame without allow-same-origin, or a frame inside one), so it cannot count the documents it loads, and seeded, it could draw another frame\'s numbers.';
-  assert.equal(unplacedLine('g › t', 'http://h/f', 'twin', 3), twin(3));
-  // A count that is no whole number above 0 is shown as 1.
-  for (const [n, k] of [[NaN, 1], [0, 1], [-3, 1], [2.5, 2], [undefined, 1]]) assert.equal(unplacedLine('g › t', 'http://h/f', 'twin', n), twin(k), String(n));
+  const uncounted = (beside) => 'keploy: in g › t, the document at http://h/f drew the browser\'s own random numbers, so its draws may differ at replay: ' +
+    'it is a frame under a parent of another origin with no session storage (a sandboxed frame without allow-same-origin), or a frame inside one: ' +
+    `keploy cannot count the documents that frame loads, so seeded, the next document there (a reload, or a frame the app puts in again at its place)${beside} could draw the same numbers.`;
+  assert.equal(unplacedLine('g › t', 'http://h/f', 'uncounted', 3), uncounted(' or, at its path, one of the 3 other frame(s) beside that frame'));
+  assert.equal(unplacedLine('g › t', 'http://h/f', 'uncounted', 1), uncounted(' or, at its path, one of the 1 other frame(s) beside that frame'));
+  // With no other frame beside it, or a count that is no whole number above
+  // 0, the line names no other frame; a count is cut to a whole number.
+  for (const n of [0, NaN, -3, undefined, 0.5]) assert.equal(unplacedLine('g › t', 'http://h/f', 'uncounted', n), uncounted(''), String(n));
+  assert.equal(unplacedLine('g › t', 'http://h/f', 'uncounted'), uncounted(''));
+  assert.equal(unplacedLine('g › t', 'http://h/f', 'uncounted', 2.5), uncounted(' or, at its path, one of the 2 other frame(s) beside that frame'));
   assert.equal(unplacedLine('g › t', 'about:blank', 'frame'), 'keploy: in g › t, the document at about:blank drew the browser\'s own random numbers, so its draws may differ at replay: ' +
     'it is a frame keploy cannot place among its parent\'s frames (one in a closed shadow root or in an object or embed element, ' +
     'which its parent document cannot list, or one whose document began after its removal), or a frame inside one.');
@@ -378,6 +382,27 @@ test('a document looks into the nodes taken out of it only while it holds a numb
   assert.equal(look(), 1);
 });
 
+test('one change that puts a frame in and then takes a numbered one out forgets the one taken out: its document, beginning after, has no place, and put back, it takes the next number', () => {
+  const w = (n) => ({ n });
+  const els = [];
+  const doc = tree(els);
+  const p = parentOf(doc, true);
+  // f is numbered as it is put in; its document has not begun.
+  const f = el('iframe', '/fa');
+  els.push(f);
+  p.mo.cb([added(f)]);
+  // One change: g put in, then f taken out.
+  const g = el('iframe', '/fb');
+  els.splice(0, 1, g);
+  p.mo.cb([added(g), removed(f)]);
+  assert.deepEqual(p.enter(f, w(0), '/fa'), [null, 0]);
+  assert.deepEqual(p.enter(g, w(1), '/fb'), ['f/fb\n0', 0]);
+  // f put back: the next number at /fa.
+  els.push(f);
+  p.mo.cb([added(f)]);
+  assert.deepEqual(p.enter(f, w(2), '/fa'), ['f/fa\n1', 0]);
+});
+
 test('a document\'s observer numbers its frames as the app puts them in, only when a change puts one in, forgets a frame taken out, and is read up to date as a frame\'s document begins', () => {
   reads = 0;
   const w = (n) => ({ n });
@@ -438,7 +463,7 @@ test('a document\'s observer numbers its frames as the app puts them in, only wh
   assert.equal(reads, 0);
 });
 
-test('a frame of its parent\'s origin draws in its parent document\'s key and its place there; one under a parent of another origin, in its page by its path; one with no place draws its own and says why', () => {
+test('a frame of its parent\'s origin draws in its parent document\'s key and its place there; one under a parent of another origin, in its page by its path, and never with no session storage; one with no place draws its own and says why', () => {
   const at = 'http://h/f';
   // Placed by its parent: the parent's key, its place, its own path and
   // its loads in that place; session storage untouched.
@@ -477,19 +502,32 @@ test('a frame of its parent\'s origin draws in its parent document\'s key and it
     assert.notDeepEqual(u.draws(), u.draws());
     assert.deepEqual(none, [at]);
   }
-  // With no session storage to count its loads in, it is seeded only while
-  // its parent holds no other frame (the parent's length, readable across
-  // origins); else it draws its own and says how many others there are.
-  // With session storage, the others do not matter. A parent whose length
-  // cannot be read is taken to hold another.
-  const alone = documentAt(initScript(S1), '/f', null, 't0', { parent: OTHER, frames: 1 });
-  assert.deepEqual(alone.draws(), documentAt(initScript(S1), '/f', new Map(), 't0x').draws());
+  // With no session storage to count its loads in, it is never seeded,
+  // alone under its parent or not: nothing tells its next document (a
+  // reload, a frame put in again at its place) from it. It draws its own
+  // and says how many other frames its parent holds (the parent's length,
+  // readable across origins; 1 when it cannot be read). With session
+  // storage, it is seeded, whatever its parent holds.
   assert.deepEqual(documentAt(initScript(S1), '/f', new Map(), 't0', { parent: OTHER, frames: 4 }).draws(), documentAt(initScript(S1), '/f', new Map(), 't0x').draws());
-  for (const [frames, others] of [[2, 1], [5, 4], [undefined, 1]]) {
+  for (const [frames, others] of [[1, 0], [2, 1], [5, 4], [undefined, 1], ['x', 1]]) {
     const told = [];
     const t = documentAt(initScript(S1, 'rep'), '/f', null, 't0', { parent: OTHER, frames, report: 'rep', told });
-    assert.notDeepEqual(t.draws(), t.draws());
-    assert.deepEqual(told, [[at, 'twin', others]], String(frames));
+    const drew = t.draws();
+    assert.notDeepEqual(drew, t.draws(), String(frames));
+    assert.notDeepEqual(drew, documentAt(initScript(S1), '/f', new Map(), 't0x').draws(), String(frames));
+    assert.deepEqual(told, [[at, 'uncounted', others]], String(frames));
+  }
+  // The parent is the one the document began with: a page script that
+  // replaces the global parent (var parent = 0, parent = self, a parent of
+  // its own making) before the first draw moves neither the rule nor the
+  // count.
+  for (const swap of ['var parent = 0;', 'parent = globalThis;', 'parent = { length: 1 };', 'parent = { get length() { throw new Error(); } };']) {
+    const told = [];
+    const t = documentAt(initScript(S1, 'rep'), '/f', null, 't0', { parent: OTHER, frames: 3, report: 'rep', told });
+    t.run(swap);
+    const drew = t.draws();
+    assert.notDeepEqual(drew, t.draws(), swap);
+    assert.deepEqual(told, [[at, 'uncounted', 2]], swap);
   }
   // A frame its parent cannot place, one whose parent is gone, and one
   // whose parent has no seeding state: no place, the frame reason.
@@ -503,10 +541,10 @@ test('a frame of its parent\'s origin draws in its parent document\'s key and it
   }
   // A frame placed in a parent with no place: no place, its parent's
   // reason.
-  for (const why of ['', 'frame', 'twin']) {
+  for (const why of ['', 'frame', 'uncounted']) {
     const told = [];
     documentAt(initScript(S1, 'rep'), '/f', new Map(), 't0', { parent: { [DOC_KEY]: { enter: () => ['f/f\n0', 0], key: () => null, why: () => why, others: () => 3 } }, report: 'rep', told }).draws();
-    assert.deepEqual(told, [why === 'twin' ? [at, why, 3] : why ? [at, why] : at], why);
+    assert.deepEqual(told, [why === 'uncounted' ? [at, why, 3] : why ? [at, why] : at], why);
   }
 });
 

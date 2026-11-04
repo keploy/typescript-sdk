@@ -165,7 +165,7 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
         const a = pageAddress(at);
         if (told.has(a)) return;
         told.add(a);
-        const w: Unplaced = why === 'frame' || why === 'twin' ? why : (await opened(source.page)) ? 'own' : 'popup';
+        const w: Unplaced = why === 'frame' || why === 'uncounted' ? why : (await opened(source.page)) ? 'own' : 'popup';
         process.stdout.write(`${unplacedLine(name, a, w, Number(others))}\n`);
       });
       // Before the test's first page: an init script runs in every frame's

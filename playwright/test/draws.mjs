@@ -21,7 +21,7 @@ export const BLANK_DRAWS = '({ random: [Math.random(), Math.random()], bytes: Ar
  * runs a page's init scripts after its context's); null: a document no
  * page script names (a popup with no opener). told collects what the
  * document tells the fixture's function named report: its address, or
- * [address, why] when it says why ([address, why, others] for 'twin').
+ * [address, why] when it says why ([address, why, others] for 'uncounted').
  * origin and href are its location's.
  * parent is the window's parent: the window itself (a top window) when
  * undefined; null for a removed frame; OTHER for a parent of another origin
@@ -44,7 +44,7 @@ export function documentAt(script, path = '/p', storage = new Map(), page = 't0'
   } else {
     ctx.sessionStorage = { getItem: (k) => (storage.has(k) ? storage.get(k) : null), setItem: (k, v) => { storage.set(k, String(v)); } };
   }
-  if (report) ctx[report] = (at, why, others) => { told.push(why === 'twin' ? [at, why, others] : why ? [at, why] : at); return Promise.resolve(); };
+  if (report) ctx[report] = (at, why, others) => { told.push(why === 'uncounted' ? [at, why, others] : why ? [at, why] : at); return Promise.resolve(); };
   if (element !== undefined) Object.defineProperty(ctx, 'frameElement', { get() { return element; }, configurable: true, enumerable: true });
   if (doc !== undefined) { ctx.document = doc; ctx.URL = URL; }
   vm.createContext(ctx);

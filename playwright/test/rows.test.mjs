@@ -448,8 +448,12 @@ async function drawsServer() {
     if (u.pathname === '/nested') { res.end(page('<iframe name="x" src="/fa"></iframe><iframe name="n" src="/fn"></iframe>')); return; }
     if (u.pathname === '/fn') { res.end(page('<iframe name="y" src="/fb"></iframe><iframe name="z" src="/fb"></iframe><iframe name="nn" src="/fa"></iframe>')); return; }
     if (['/fa', '/fb', '/fc', '/fw', '/fm', '/fs'].includes(u.pathname)) { res.end(page(u.pathname)); return; }
+    // /fsv, /fss and /fso replace the global parent before they draw.
+    const swap = { '/fsv': 'var parent = 0;', '/fss': 'parent = self;', '/fso': 'window.parent = { length: 1 };' }[u.pathname];
+    if (swap !== undefined) { res.end(`<html><head><script>${swap}</script><script>window.__draws = ${DRAWS};</script></head><body>${u.pathname}</body></html>`); return; }
     // many.spec.ts's: /many holds k frames m0.. at /fm, in its markup or put
-    // in by one script (?how=); /sbx holds n sandboxed frames s0.. at /fs;
+    // in by one script (?how=); /sbx holds n sandboxed frames s0.. at /fs,
+    // or with swap=1, n at each of /fsv (v0..), /fss (s0..) and /fso (o0..);
     // /cost is a page of n elements, or of that many open shadow roots of
     // 10 elements each, beside an empty #box.
     if (u.pathname === '/many') {
@@ -460,7 +464,9 @@ async function drawsServer() {
       return;
     }
     if (u.pathname === '/sbx') {
-      res.end(page(Array.from({ length: Number(u.searchParams.get('n')) }, (_, i) => `<iframe name="s${i}" sandbox="allow-scripts" src="/fs"></iframe>`).join('')));
+      const n = Number(u.searchParams.get('n'));
+      const at = u.searchParams.get('swap') ? [['v', '/fsv'], ['s', '/fss'], ['o', '/fso']] : [['s', '/fs']];
+      res.end(page(at.flatMap(([k, path]) => Array.from({ length: n }, (_, i) => `<iframe name="${k}${i}" sandbox="allow-scripts" src="${path}"></iframe>`)).join('')));
       return;
     }
     if (u.pathname === '/cost') {
@@ -851,16 +857,22 @@ for (const engine of ENGINES) {
 }
 
 for (const engine of ENGINES) {
-  test(`seeded, in ${engine}: 300 frames in a page's markup, or put in by one script, each load and draw their own numbers, the same at replay, with no page error; three sandboxed frames at one path are not seeded and are named, a lone one is; a page whose DOM changes often is walked only when a frame is put in`, async () => {
+  test(`seeded, in ${engine}: 300 frames in a page's markup, or put in by one script, each load and draw their own numbers, the same at replay, with no page error; sandboxed frames are never seeded, each draws its own numbers and is named with how many frames are beside it: three at one path, a lone one, a new one put in at a removed one's path, and ones whose own script replaces the global parent before they draw; a page whose DOM changes often is walked only when a frame is put in`, async () => {
     const j = journal();
     const rec = await fakeAgent(j);
     let kept = {};
     const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
       ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
-    const names = ['markup', 'script', 'sandboxed', 'cost'];
+    const names = ['markup', 'script', 'sandboxed', 'lone', 'swapped', 'cost'];
     const env = (url) => ({ ...keployEnv(url), PW_BROWSER: engine });
     const unplaced = (r, n) => r.tests[n].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${n}, `)).map((l) => l.replace(/:\d+\//, ':<port>/'));
-    const twins = [unplacedLine('sandboxed', 'http://127.0.0.1:<port>/fs', 'twin', 2)];
+    const line = (n, at, others) => unplacedLine(n, `http://127.0.0.1:<port>${at}`, 'uncounted', others);
+    const SWAP = [['v', '/fsv'], ['s', '/fss'], ['o', '/fso']];
+    const sandboxed = (run) => {
+      assert.deepEqual(unplaced(run, 'sandboxed'), [line('sandboxed', '/fs', 2)]);
+      assert.deepEqual(unplaced(run, 'lone'), [line('lone', '/fs', 0)]);
+      assert.deepEqual(unplaced(run, 'swapped').sort(), SWAP.map(([, at]) => line('swapped', at, 8)).sort());
+    };
     try {
       const r = await drawRun(j, env(rec.url), ['many.spec.ts'], names);
       const seed = r.seeds;
@@ -874,15 +886,22 @@ for (const engine of ENGINES) {
         drew.forEach((x, i) => assert.deepEqual(x, expected(seed[how], '/fm', new Map(), `${k}f/fm\n${i}`), `${how} m${i}`));
         assert.deepEqual(unplaced(r, how), [], how);
       }
-      // Three sandboxed frames at one path: each draws its own, named once
-      // (one address) with the two others; a lone one is seeded, by its
-      // page and path.
-      const { two, one } = r.drew.sandboxed;
-      const lone = expected(seed.sandboxed, '/fs', new Map(), 't0x');
-      assert.equal(new Set(Object.values(two).map((x) => x.uuid)).size, 3);
-      for (const x of Object.values(two)) assert.notDeepEqual(x, lone);
-      assert.deepEqual(one, lone);
-      assert.deepEqual(unplaced(r, 'sandboxed'), twins);
+      // Sandboxed frames: none draws what seeding would give it (its page,
+      // marked, and its path); each draws its own, named once for each
+      // address, with how many other frames its parent holds. Three at one
+      // path, then a lone one; a lone one, taken out and another put in at
+      // its path; nine whose script replaces parent before they draw.
+      const { three, one } = r.drew.sandboxed;
+      const seeded = (n, at) => expected(seed[n], at, new Map(), 't0x');
+      assert.equal(new Set(Object.values(three).map((x) => x.uuid)).size, 3);
+      for (const x of [...Object.values(three), one]) assert.notDeepEqual(x, seeded('sandboxed', '/fs'));
+      const { first, again } = r.drew.lone;
+      for (const x of [first, again]) assert.notDeepEqual(x, seeded('lone', '/fs'));
+      assert.notEqual(first.uuid, again.uuid);
+      const swapped = r.drew.swapped;
+      assert.equal(new Set(Object.values(swapped).map((x) => x.uuid)).size, 9);
+      for (const [k, at] of SWAP) for (let i = 0; i < 3; i++) assert.notDeepEqual(swapped[`${k}${i}`], seeded('swapped', at), `${k}${i}`);
+      sandboxed(r);
       // A page whose DOM changes often: seeding walks the document for no
       // change that puts in no frame, and once when one frame is put in.
       // The times are printed, not judged: a loaded machine moves them.
@@ -896,9 +915,12 @@ for (const engine of ENGINES) {
         assert.deepEqual(p.drew[how].drew, r.drew[how].drew, how);
         assert.deepEqual(unplaced(p, how), [], how);
       }
-      assert.deepEqual(p.drew.sandboxed.one, one);
-      assert.notDeepEqual(p.drew.sandboxed.two.s0, two.s0);
-      assert.deepEqual(unplaced(p, 'sandboxed'), twins);
+      // Sandboxed frames draw the browser's own again, named as in the
+      // record.
+      assert.notDeepEqual(p.drew.sandboxed.one, one);
+      assert.notDeepEqual(p.drew.sandboxed.three.s0, three.s0);
+      assert.notDeepEqual(p.drew.lone.first, first);
+      sandboxed(p);
     } finally { await rep.close(); await rec.close(); }
   });
 }

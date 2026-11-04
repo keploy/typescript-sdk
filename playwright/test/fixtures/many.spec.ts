@@ -4,7 +4,8 @@ import { test } from '../../dist';
 
 // Run in Chromium, Firefox and WebKit (PW_BROWSER). A page that holds many
 // frames of its origin, in its markup or put in by one script; sandboxed
-// frames, which have no session storage; and what seeding costs a page
+// frames, which have no session storage (some whose own script replaces the
+// global parent); and what seeding costs a page
 // whose DOM changes often. Each test keeps what it saw.
 const base = process.env.DRAWS_BASE ?? '';
 const keep = (name: string, v: unknown): void => fs.writeFileSync(`${process.env.MARKER_DIR}/${name}.json`, JSON.stringify(v));
@@ -50,10 +51,36 @@ async function loaded(p: Page, n: string, path: string): Promise<Frame> {
 test('sandboxed', async ({ page }) => {
   // Three sandboxed frames at one path, then a page with one.
   await page.goto(`${base}/sbx?n=3`);
-  const two: Record<string, unknown> = {};
-  for (const n of ['s0', 's1', 's2']) two[n] = await (await loaded(page, n, '/fs')).evaluate(read);
+  const three: Record<string, unknown> = {};
+  for (const n of ['s0', 's1', 's2']) three[n] = await (await loaded(page, n, '/fs')).evaluate(read);
   await page.goto(`${base}/sbx?n=1`);
-  keep('sandboxed', { two, one: await (await loaded(page, 's0', '/fs')).evaluate(read) });
+  keep('sandboxed', { three, one: await (await loaded(page, 's0', '/fs')).evaluate(read) });
+});
+
+test('lone', async ({ page }) => {
+  // A lone sandboxed frame, then taken out, and another put in at its path.
+  await page.goto(`${base}/sbx?n=1`);
+  const first = await (await loaded(page, 's0', '/fs')).evaluate(read);
+  await page.evaluate(() => {
+    document.getElementsByName('s0')[0].remove();
+    const f = document.createElement('iframe');
+    f.name = 'r0';
+    f.setAttribute('sandbox', 'allow-scripts');
+    f.src = '/fs';
+    document.body.appendChild(f);
+  });
+  keep('lone', { first, again: await (await loaded(page, 'r0', '/fs')).evaluate(read) });
+});
+
+test('swapped', async ({ page }) => {
+  // Nine sandboxed frames, three at each of /fsv, /fss and /fso, whose own
+  // script replaces the global parent before it draws.
+  await page.goto(`${base}/sbx?n=3&swap=1`);
+  const drew: Record<string, unknown> = {};
+  for (const [k, path] of [['v', '/fsv'], ['s', '/fss'], ['o', '/fso']]) {
+    for (let i = 0; i < 3; i++) drew[`${k}${i}`] = await (await loaded(page, `${k}${i}`, path)).evaluate(read);
+  }
+  keep('swapped', drew);
 });
 
 // A workload in the page: 'grow' adds 20000 rows in 500 tasks; 'churn'
