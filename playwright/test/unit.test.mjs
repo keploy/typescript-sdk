@@ -502,17 +502,18 @@ function pendingTimers() {
   const clear = globalThis.clearTimeout;
   const pending = new Set();
   const made = { n: 0 };
+  const cleared = { n: 0 };
   globalThis.setTimeout = (f, ms, ...a) => {
     made.n++;
     const id = set(() => { pending.delete(id); f(...a); }, ms);
     pending.add(id);
     return id;
   };
-  globalThis.clearTimeout = (id) => { pending.delete(id); clear(id); };
-  return { pending, made, restore: () => { globalThis.setTimeout = set; globalThis.clearTimeout = clear; } };
+  globalThis.clearTimeout = (id) => { cleared.n++; pending.delete(id); clear(id); };
+  return { pending, made, cleared, restore: () => { globalThis.setTimeout = set; globalThis.clearTimeout = clear; } };
 }
 
-test('quiet: once the wait has ended, quiet, after a named wait or at the bound, it leaves no timer of its own running, and the context\'s calls set none', async (t) => {
+test('quiet: once the wait has ended, quiet, after a named wait or at the bound, it leaves no timer of its own running and keeps none of its waits, and the context\'s calls set or clear no timer', async (t) => {
   for (const ending of ['quiet', 'named', 'bound']) {
     const q = quietOn(t);
     const timers = pendingTimers();
@@ -520,8 +521,10 @@ test('quiet: once the wait has ended, quiet, after a named wait or at the bound,
       q.wait();
       if (ending === 'bound') {
         // A call every 400 ms, each in flight 50 ms: the window is running,
-        // 350 ms after a call was last in flight, when the bound comes.
-        while (q.res.value === 'waiting') {
+        // 350 ms after a call was last in flight, when the bound comes: once
+        // the 350 ms gaps add up to 3000 ms, after about nine calls. The calls
+        // stop after 9 s; a wait still running then fails the assert below.
+        for (let at = 0; q.res.value === 'waiting' && at < 3 * QUIET_MAX_MS; at += 400) {
           const r = fakeRequest(q.page);
           q.ctx.emit('request', r);
           await after(t, 50);
@@ -538,11 +541,19 @@ test('quiet: once the wait has ended, quiet, after a named wait or at the bound,
       } else await after(t, QUIET_MS);
       assert.equal(q.res.value, ending !== 'bound', ending);
       assert.equal(timers.pending.size, 0, ending);
+      // The Inflight lives as long as the context: a wait that has ended
+      // keeps nothing in it (settled()'s waits are its own state; no event
+      // shows them).
+      assert.deepEqual(q.inflight.waiters, [], ending);
       const made = timers.made.n;
+      const cleared = timers.cleared.n;
       const r = fakeRequest(q.page);
       q.ctx.emit('request', r);
       q.ctx.emit('requestfinished', r);
+      // Nothing of the wait still listens: a call neither sets a timer nor
+      // clears one.
       assert.equal(timers.made.n, made, ending);
+      assert.equal(timers.cleared.n, cleared, ending);
     } finally { timers.restore(); }
     t.mock.timers.reset();
   }
