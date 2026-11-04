@@ -7,8 +7,9 @@
 // - a name that starts like a number (a sign, then a digit, or a dot and a
 //   digit), or is ~, null, <<, .inf, .nan or a YAML 1.1 or 1.2 boolean, in
 //   any letter case, is single-quoted where js-yaml 4 may leave it plain;
-// - an id over 76 characters or with a line break, which js-yaml 4 writes
-//   as a block, is double-quoted;
+// - an id with a line break, which js-yaml 4 writes as a block, is
+//   double-quoted, and one over 76 characters, which it folds, stays on one
+//   line;
 // - a line that is not a number (no coverage tool gives one) is JSON.
 
 const ESCAPES: { [c: number]: string } = {
@@ -36,13 +37,12 @@ function escape(c: number): string {
   return c <= 0xff ? '\\x' + ('0' + c.toString(16).toUpperCase()).slice(-2) : '\\u' + ('000' + c.toString(16).toUpperCase()).slice(-4);
 }
 
-// s as a scalar. width: the longest one-line value js-yaml 4 writes there, or
-// 0 for a mapping key, which it never folds.
-export function scalar(s: string, width: number): string {
+// s as a scalar, on one line.
+export function scalar(s: string): string {
   if (s === '') return "''";
   if (BASE60.test(s)) return "'" + s + "'";
   const chars = Array.from(s, (ch) => ch.codePointAt(0) as number);
-  if (!chars.every(printable) || (width > 0 && s.length > width && s[0] !== ' ')) {
+  if (!chars.every(printable)) {
     return '"' + chars.map(escape).join('') + '"';
   }
   const plain = !NOT_FIRST.includes(s[0]) && !/[ :]$/.test(s) && !/: | #/.test(s) && !NOT_A_STRING.test(s);
@@ -61,11 +61,11 @@ export function number(n: number): string {
 
 // The entry for one request, ending in a line break.
 export function entryYaml(id: string, executedLinesByFile: { [filename: string]: unknown[] }): string {
-  let out = '- id: ' + scalar(id, 76) + '\n  executedLinesByFile:';
+  let out = '- id: ' + scalar(id) + '\n  executedLinesByFile:';
   const files = Object.keys(executedLinesByFile);
   if (files.length === 0) return out + ' {}\n';
   for (const file of files) {
-    const key = scalar(file, 0);
+    const key = scalar(file);
     const items = executedLinesByFile[file].map((n) => '- ' + (typeof n === 'number' ? number(n) : JSON.stringify(n) ?? 'null'));
     // A key over 1024 characters is written explicit (? key, then : value),
     // as YAML allows no longer implicit key.
