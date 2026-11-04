@@ -24,3 +24,9 @@ test('a page that never goes quiet, and a call in flight', async ({ page }) => {
 test('a call that never ends, begun while a slower call is waited for', async ({ page }) => {
   await page.goto(`${base}/chain`);
 });
+test('a call its page\'s own timer makes while a slow call is in flight', async ({ page }) => {
+  await page.goto(`${base}/timer`);
+});
+test('a poller that calls again 100 ms after each answer', async ({ page }) => {
+  await page.goto(`${base}/chained`);
+});

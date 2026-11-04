@@ -459,6 +459,25 @@ test('quiet: pages that never go quiet end the wait after 3 s with no call in fl
   assert.equal(q.res.named, 0);
 });
 
+// The default clock, with real timers and the process's Date held (mocked,
+// never moved): a page that calls every 10 ms, each call answered at once,
+// never goes 200 ms without a call, and the 300 ms bound still comes. A
+// stall of the process runs the page's timer before the window's, as the
+// earlier one, so no stall ends the wait as quiet.
+test('quiet: the bound is measured on the process\'s monotonic clock, so a held Date does not hold it', { timeout: 20000 }, async (t) => {
+  t.mock.timers.enable({ apis: ['Date'] });
+  const ctx = fakeContext();
+  const inflight = new Inflight(ctx);
+  const page = new EventEmitter();
+  ctx.emit('page', page);
+  const poll = setInterval(() => { const r = fakeRequest(page); ctx.emit('request', r); ctx.emit('requestfinished', r); }, 10);
+  try {
+    assert.equal(await inflight.quiet(200, 300, () => inflight.settled()), false);
+  } finally {
+    clearInterval(poll);
+  }
+});
+
 test('quiet: time a call is in flight counts toward no bound, short or long, so a slow answer and a quick one end the wait alike', async (t) => {
   for (const flight of [400, 5000]) {
     const q = quietOn(t);

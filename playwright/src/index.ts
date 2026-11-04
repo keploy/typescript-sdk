@@ -25,12 +25,15 @@
 //     "seeded" or "own") and, when they are, with a seed drawn afresh; keploy
 //     answers the seed to draw from; a test keploy set aside is skipped with
 //     keploy's reason;
-//   - before the test's browser context closes, the test waits until its
-//     pages have gone 500 ms with no call starting or ending, counted from
-//     the end of its body and its afterEach hooks, for at most 3 s, so a call
-//     a page makes after the test's last line (a side panel that loads after
-//     an answer) is the test's at record and at replay alike; then until none
-//     of its pages' calls is in flight (settle), so its calls end inside it;
+//   - before the test's browser context closes, from the start of the
+//     context fixture's teardown, the test waits until its pages have gone
+//     500 ms with no call starting or ending and none in flight, for at most
+//     3 s with no call in flight (quiet); a call in flight is waited for to
+//     its end by the browser's request events, in a step that names it once
+//     it has lasted 500 ms (settle). So a call a page makes less than 500 ms
+//     after an answer (a side panel that loads once an answer comes) is the
+//     test's at record and at replay alike, and its calls end inside it;
+//     settle.ts names the limits;
 //   - the test ends (POST /agent/scope/end) after its last teardown, with
 //     its outcome and what its context's pages drew their random numbers
 //     from (random); when keploy saw a call with no recorded answer, or a

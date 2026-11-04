@@ -7,21 +7,30 @@
 //     returned (a side panel that loads after an answer, a search made after
 //     the test typed). Recorded against a slow backend they fall inside the
 //     test; replayed, with every answer at once, the test ended before they
-//     were made. Waiting the same way at record and at replay makes them the
-//     test's at both. The browser's request events restart the window.
+//     were made. The browser's request events restart the window, so a call
+//     made less than QUIET_MS after an answer, or after the wait began, is
+//     the test's at record and at replay alike.
 //   - In flight: a call in flight is waited for until it ends, counted by the
 //     browser's own request events, so it is answered inside the test
 //     instead of being cut by the close (a call keploy recorded whole would
-//     be cut at a different byte each run). That time counts toward no bound:
-//     a call answered slowly at record and at once at replay leaves the same
-//     calls to the test at both. Once the pages have had a call in flight for
-//     QUIET_MS without a break, the wait for the calls then in flight is a
-//     step that names them; a call still in flight after it is named the same
-//     way, in a step of its own, so a call that never ends fails the test by
-//     its own name.
+//     be cut at a different byte each run). That time counts toward no bound,
+//     so a slow answer at record and a quick one at replay leave the calls
+//     that follow an answer to the test at both. Once the pages have had a
+//     call in flight for QUIET_MS without a break, the wait for the calls
+//     then in flight is a step that names them; a call still in flight after
+//     it is named the same way, in a step of its own, so a call that never
+//     ends fails the test by its own name.
 //   - Bound: QUIET_MAX_MS of time with no call in flight, for pages that never
 //     go quiet (a poller), measured with performance.now(): the process's
 //     monotonic clock, which no hold on the test's own clock changes.
+// Limits (README, Limits of this version):
+//   - A call a page's own timer makes while a slow call is in flight at
+//     record is the test's there; at replay the window ends before the timer
+//     fires and the call is not made.
+//   - A poller that waits G ms after each answer of A ms keeps the wait going
+//     about QUIET_MAX_MS x (1 + A / G), with a step for each answer of
+//     QUIET_MS or more, so against a slow backend its test can time out at
+//     record while its replay ends at the bound.
 
 import type { BrowserContext, Frame, Page, Request } from '@playwright/test';
 

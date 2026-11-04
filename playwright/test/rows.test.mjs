@@ -409,16 +409,23 @@ for (const [title, why, call] of [
 // /first is answered after firstMs (a slow backend at record, an answer from
 // the recording at replay). /search calls /late 200 ms after its input last
 // changed. /polling calls /tick every 100 ms while it is open; /hang is never
-// answered. /chain calls /first as it loads and /hang 1 s later.
-async function quietServer(j, firstMs) {
+// answered. /chain calls /first as it loads and /hang 1.5 s later. /timer
+// calls /first as it loads and, from its own timer 2 s after, /late, which
+// follows no answer. /chained calls /stick, answered after stickMs, and
+// calls it again 100 ms after each answer, as a poller that waits for its
+// answer does.
+async function quietServer(j, firstMs, stickMs = 0) {
   const html = (body) => `<html><body>${body}</body></html>`;
   const pages = {
     '/blank': html('blank'),
     '/panel': html("<script>fetch('/first').then((r) => r.text()).then(() => setTimeout(() => { void fetch('/late'); }, 200));</script>"),
     '/search': html("<input><script>let t; document.querySelector('input').addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { void fetch('/late'); }, 200); });</script>"),
     '/polling': html("<script>setInterval(() => { void fetch('/tick'); }, 100);</script>"),
-    '/chain': html("<script>void fetch('/first'); setTimeout(() => { void fetch('/hang'); }, 1000);</script>"),
+    '/chain': html("<script>void fetch('/first'); setTimeout(() => { void fetch('/hang'); }, 1500);</script>"),
+    '/timer': html("<script>void fetch('/first'); setTimeout(() => { void fetch('/late'); }, 2000);</script>"),
+    '/chained': html("<script>(async () => { for (;;) { await fetch('/stick').then((r) => r.text()); await new Promise((r) => setTimeout(r, 100)); } })();</script>"),
   };
+  let sticks = 0;
   const srv = http.createServer((req, res) => {
     if (pages[req.url]) { res.writeHead(200, { 'content-type': 'text/html' }); res.end(pages[req.url]); return; }
     if (req.url === '/first') { setTimeout(() => res.end('first'), firstMs); return; }
@@ -430,15 +437,37 @@ async function quietServer(j, firstMs) {
       return;
     }
     if (req.url === '/tick') { j.add({ page: 'tick' }); res.end('tick'); return; }
+    if (req.url === '/stick') { sticks++; setTimeout(() => res.end('stick'), stickMs); return; }
     if (req.url === '/hang') { j.add({ page: 'hang sent' }); return; }
     res.writeHead(404); res.end();
   });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
-  return { url: `http://127.0.0.1:${srv.address().port}`, close: () => new Promise((r) => { srv.closeAllConnections(); srv.close(r); }) };
+  return { url: `http://127.0.0.1:${srv.address().port}`, sticks: () => sticks, close: () => new Promise((r) => { srv.closeAllConnections(); srv.close(r); }) };
 }
 // The page server's and the agent's events, each scope call named by its test.
 const story = (j) => j.events.filter((e) => e.page || e.agent.path.startsWith('/agent/scope/'))
   .map((e) => (e.page ? e.page : `${e.agent.path.slice('/agent/scope/'.length)}: ${e.agent.body.name}`));
+// The paths of the calls each keploy step of a test names, one list a step.
+// A step names five calls at most and counts the rest (`, and N more`),
+// shown here as 'more'.
+const SETTLE_STEP = /^keploy: wait for the test's (\d+) call\(s\) in flight before its browser context closes: (.*?)(?:, and (\d+) more)?$/;
+function named(t) {
+  return t.steps.filter((s) => s.startsWith('keploy:')).map((s) => {
+    const m = SETTLE_STEP.exec(s);
+    assert.ok(m, `not a settle step: ${s}`);
+    const calls = m[2].split(', ').map((c) => /^GET http:\/\/127\.0\.0\.1:\d+(\/\S*)$/.exec(c)?.[1] ?? c);
+    const more = Number(m[3] ?? 0);
+    assert.equal(Number(m[1]), calls.length + more, s);
+    return more > 0 ? [...calls, 'more'] : calls;
+  });
+}
+// Whether every step names only calls among paths. However quickly a call is
+// answered, a loaded box can keep it in flight 500 ms, so a browser row
+// cannot ask for no step; the unit rows pin, on mocked timers, that a wait
+// shorter than 500 ms is no step.
+const namesOnly = (steps, paths) => steps.every((calls) => calls.every((c) => paths.includes(c)));
+// A replay's agent: the begin answers its own seed.
+const REPLAY = (c) => (c.path === '/agent/scope/begin' ? { body: { v: 1, status: 'ok', seed: 'ab'.repeat(16) } } : undefined);
 
 // Quiet rows: a test ends once its pages have gone 500 ms with no call
 // starting or ending and none in flight, counted from the start of its
@@ -451,7 +480,7 @@ const PANEL = 'a call its page makes after an answer, once the body has ended';
 const TYPED = 'a call its page makes after the test typed, once the body has ended';
 for (const [mode, firstMs, answer] of [
   ['record', 300, () => undefined],
-  ['replay', 0, (c) => (c.path === '/agent/scope/begin' ? { body: { v: 1, status: 'ok', seed: 'ab'.repeat(16) } } : undefined)],
+  ['replay', 0, REPLAY],
 ]) {
   test(`quiet: at ${mode}, a call a page makes after the test's last line, after an answer or after the test typed, is made inside its test, before its end`, async () => {
     const j = journal();
@@ -465,11 +494,13 @@ for (const [mode, firstMs, answer] of [
         `begin: ${TYPED}`, 'late sent', 'late answered', `end: ${TYPED}`,
         'begin: the next test', 'end: the next test',
       ]);
-      // A wait on a call in flight shorter than 500 ms is no step, and the
-      // wait says nothing: the report's steps and output stay the test's
-      // (the first test says it is seeded).
+      // The wait says nothing, and a step it shows names only the test's own
+      // calls: the report's steps and output stay the test's (the first test
+      // says it is seeded). The next test's page makes no call once loaded,
+      // so it shows no step.
+      const own = { [PANEL]: ['/first', '/late'], [TYPED]: ['/late'], 'the next test': [] };
       for (const [k, t] of Object.entries(tests)) {
-        assert.deepEqual(t.steps.filter((s) => s.startsWith('keploy:')), []);
+        assert.ok(namesOnly(named(t), own[k]), `${k}: ${t.steps.join('\n')}`);
         assert.equal(t.stdout, k === PANEL ? `${SEEDED_LINE}\n` : '', k);
       }
     } finally { await p.close(); await a.close(); }
@@ -485,7 +516,7 @@ test('quiet: a call answered past 3 s at record and at once at replay leaves the
   for (const [mode, firstMs, answer] of [
     ['record', 2900, () => undefined],
     ['record', 3300, () => undefined],
-    ['replay', 0, (c) => (c.path === '/agent/scope/begin' ? { body: { v: 1, status: 'ok', seed: 'ab'.repeat(16) } } : undefined)],
+    ['replay', 0, REPLAY],
   ]) {
     const c = `${mode}, first answered after ${firstMs} ms`;
     const j = journal();
@@ -497,9 +528,12 @@ test('quiet: a call answered past 3 s at record and at once at replay leaves the
       assert.equal(t.status, 'passed', `${c}: ${out}`);
       assert.deepEqual(story(j), want, c);
       assert.equal(t.stdout, `${SEEDED_LINE}\n`, c);
-      const steps = t.steps.filter((x) => x.startsWith('keploy:'));
-      if (firstMs > 0) assert.ok(steps.length === 1 && /^keploy: wait for the test's 1 call\(s\) in flight before its browser context closes: GET http:\/\/127\.0\.0\.1:\d+\/first$/.test(steps[0]), `${c}: ${steps.join('\n')}`);
-      else assert.deepEqual(steps, [], c);
+      // At record the wait's first step names the slow call alone; a later
+      // one (a loaded box) names only the side panel's call. At replay a step
+      // names only the page's calls.
+      const steps = named(t);
+      if (firstMs > 0) assert.ok(steps.length >= 1 && steps[0].join() === '/first' && namesOnly(steps.slice(1), ['/late']), `${c}: ${t.steps.join('\n')}`);
+      else assert.ok(namesOnly(steps, ['/first', '/late']), `${c}: ${t.steps.join('\n')}`);
     } finally { await p.close(); await a.close(); }
   }
 });
@@ -513,9 +547,10 @@ test('quiet: a page that never goes quiet ends its test after 3 s with no call i
     let r = await playwright(['quiet.spec.ts', '-g', `${busy}$`], { ...keployEnv(a.url), QUIET_BASE: p.url, PW_TIMEOUT: '20000' });
     assert.equal(r.tests[busy].status, 'passed', r.out);
     assert.equal(r.tests[busy].stdout, `${SEEDED_LINE}\n${settle.busyLine(busy)}\n`);
-    // A tick in flight for 500 ms (a slow box) is waited for by name, as any
-    // call is.
-    assert.ok(r.tests[busy].steps.filter((x) => x.startsWith('keploy:')).every((x) => /in flight before its browser context closes: GET http:\/\/127\.0\.0\.1:\d+\/tick$/.test(x)), r.tests[busy].steps.join('\n'));
+    // A tick in flight for 500 ms (a loaded box) is waited for by name, as
+    // any call is, in a step that names only ticks (the page makes no other
+    // call).
+    assert.ok(namesOnly(named(r.tests[busy]), ['/tick', 'more']), r.tests[busy].steps.join('\n'));
     // The page kept calling up to its test's end.
     const s = story(j);
     assert.equal(s.at(-2), 'tick', s.join(', '));
@@ -527,7 +562,8 @@ test('quiet: a page that never goes quiet ends its test after 3 s with no call i
     assert.equal(t.status, 'timedOut', r.out);
     assert.equal(t.stdout, `${SEEDED_LINE}\n`);
     // A tick in flight then may be named beside it.
-    assert.ok(t.steps.some((x) => /^keploy: wait for the test's \d call\(s\) in flight before its browser context closes: (.*, )?GET http:\/\/127\.0\.0\.1:\d+\/hang(, |$)/.test(x)), t.steps.join('\n'));
+    const steps = named(t);
+    assert.ok(steps.some((calls) => calls.includes('/hang')) && namesOnly(steps, ['/tick', '/hang', 'more']), t.steps.join('\n'));
   } finally { await p.close(); await a.close(); }
 });
 
@@ -540,12 +576,68 @@ test('quiet: a call that never ends, begun while a slower call is waited for by 
     const { tests, out } = await playwright(['quiet.spec.ts', '-g', title], { ...keployEnv(a.url), QUIET_BASE: p.url, PW_TIMEOUT: '6000' });
     const t = tests[title];
     assert.equal(t.status, 'timedOut', out);
-    const steps = t.steps.filter((x) => x.startsWith('keploy:'));
-    const one = (call) => new RegExp(`^keploy: wait for the test's 1 call\\(s\\) in flight before its browser context closes: GET http://127\\.0\\.0\\.1:\\d+${call}$`);
-    assert.ok(steps.some((x) => one('/first').test(x)), steps.join('\n'));
-    assert.ok(steps.some((x) => one('/hang').test(x)), steps.join('\n'));
+    const steps = named(t).map((calls) => calls.join());
+    assert.ok(steps.includes('/first') && steps.includes('/hang'), t.steps.join('\n'));
     assert.ok(story(j).includes('hang sent'), story(j).join(', '));
   } finally { await p.close(); await a.close(); }
+});
+
+// Two limits of the quiet window, pinned as they are today. First: a call a
+// page's own timer makes while a slow call is in flight. At record the slow
+// call keeps the wait going until the timer fires, so the call is the
+// test's; at replay every answer comes at once, the window ends first, and
+// the call is never made, so keploy fails the replay for a recorded call it
+// no longer made.
+const TIMER = 'a call its page\'s own timer makes while a slow call is in flight';
+test('quiet: a call a page\'s own timer makes while a slow call is in flight is the test\'s at record and is not made at replay (a limit)', async () => {
+  for (const [mode, firstMs, answer, want] of [
+    ['record', 3000, () => undefined, [`begin: ${TIMER}`, 'late sent', 'late answered', `end: ${TIMER}`]],
+    ['replay', 0, REPLAY, [`begin: ${TIMER}`, `end: ${TIMER}`]],
+  ]) {
+    const j = journal();
+    const a = await fakeAgent(j, answer);
+    const p = await quietServer(j, firstMs);
+    try {
+      const { tests, out } = await playwright(['quiet.spec.ts', '-g', TIMER], { ...keployEnv(a.url), QUIET_BASE: p.url });
+      const t = tests[TIMER];
+      assert.equal(t.status, 'passed', `${mode}: ${out}`);
+      assert.deepEqual(story(j), want, mode);
+      const steps = named(t);
+      if (firstMs > 0) assert.ok(steps.length >= 1 && steps[0].join() === '/first' && namesOnly(steps.slice(1), ['/late']), `${mode}: ${t.steps.join('\n')}`);
+      else assert.ok(namesOnly(steps, ['/first']), `${mode}: ${t.steps.join('\n')}`);
+    } finally { await p.close(); await a.close(); }
+  }
+});
+
+// Second: a poller that waits for each answer before its next gap. The bound
+// counts only time with no call in flight, 100 ms a gap here, so against a
+// backend that answers after A ms the wait takes about 3 s x (1 + A / 100):
+// 33 s for A = 1000, past Playwright's default 30 s timeout, with a step for
+// each answer, which is in flight over 500 ms. At replay, answered at once,
+// it takes about 3 s.
+const CHAINED = 'a poller that calls again 100 ms after each answer';
+test('quiet: a poller that waits for each answer, answered after 1 s at record, times its test out there, one named step an answer; at replay it ends at the bound (a limit)', async () => {
+  for (const [mode, stickMs, answer] of [['record', 1000, () => undefined], ['replay', 0, REPLAY]]) {
+    const j = journal();
+    const a = await fakeAgent(j, answer);
+    const p = await quietServer(j, 0, stickMs);
+    try {
+      const { tests, out } = await playwright(['quiet.spec.ts', '-g', CHAINED], { ...keployEnv(a.url), QUIET_BASE: p.url, PW_TIMEOUT: '10000' });
+      const t = tests[CHAINED];
+      const steps = named(t);
+      // The page has one call in flight at a time.
+      assert.ok(steps.every((calls) => calls.join() === '/stick'), `${mode}: ${t.steps.join('\n')}`);
+      if (mode === 'record') {
+        // 10 s holds about 9 answers and 0.9 s with no call in flight.
+        assert.equal(t.status, 'timedOut', out);
+        assert.ok(steps.length >= 5 && steps.length <= p.sticks(), `${p.sticks()} calls: ${t.steps.join('\n')}`);
+        assert.equal(t.stdout, `${SEEDED_LINE}\n`);
+      } else {
+        assert.equal(t.status, 'passed', out);
+        assert.equal(t.stdout, `${SEEDED_LINE}\n${settle.busyLine(CHAINED)}\n`);
+      }
+    } finally { await p.close(); await a.close(); }
+  }
 });
 
 // The seeding rows' page server: /draws draws random numbers in its first
