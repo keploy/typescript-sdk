@@ -9,7 +9,12 @@
 //     test; replayed, with every answer at once, the test ended before they
 //     were made. The browser's request events restart the window, so a call
 //     made less than QUIET_MS after an answer, or after the wait began, is
-//     the test's at record and at replay alike.
+//     the test's at record and at replay alike. The window is this process's
+//     timer, and a loaded machine can hold this process's event loop while
+//     the browser's events wait unread, so a window that has passed ends the
+//     wait only once the browser has answered a call made then
+//     (context.cookies(), answered by the browser, not by a page's script):
+//     a call it reported before that answer keeps the wait going.
 //   - In flight: a call in flight is waited for until it ends, counted by the
 //     browser's own request events, so it is answered inside the test
 //     instead of being cut by the close (a call keploy recorded whole would
@@ -31,6 +36,10 @@
 //     about QUIET_MAX_MS x (1 + A / G), with a step for each answer of
 //     QUIET_MS or more, so against a slow backend its test can time out at
 //     record while its replay ends at the bound.
+//   - The wait knows only the calls the browser has reported: a page whose
+//     scripts do not run for QUIET_MS with no call in flight has gone quiet,
+//     even when only a starved machine held them, and a call it makes after
+//     that is not the test's.
 
 import type { BrowserContext, Frame, Page, Request } from '@playwright/test';
 
@@ -74,9 +83,18 @@ export class Inflight {
   private readonly stirs = new Set<() => void>();
   /** The clock quiet() measures its bound with, in milliseconds. */
   private readonly now: () => number;
+  /** A call to the browser that it answers after the events it sent before. */
+  private readonly ask: () => Promise<unknown>;
 
-  constructor(context: BrowserContext, now: () => number = () => performance.now()) {
+  /**
+   * ask: a call the browser answers on its own, not its pages' scripts, by
+   * default context.cookies(). Its answer comes after every event the browser
+   * sent before it, so the calls a page made while this process's event loop
+   * was held are known before a wait that has ended is believed.
+   */
+  constructor(context: BrowserContext, now: () => number = () => performance.now(), ask: () => Promise<unknown> = () => context.cookies()) {
     this.now = now;
+    this.ask = ask;
     context.on('request', (r) => {
       let frame: Frame | null = null;
       // A service worker's call has no frame.
@@ -158,21 +176,40 @@ export class Inflight {
   /**
    * While no call is in flight: 'quiet' once quietMs pass with no call
    * starting or ending, 'bound' once maxMs pass, 'busy' once a call starts.
+   * A timer that fires says only that this process saw no call for that
+   * long: while its event loop was held (a loaded machine), the browser's
+   * events wait unread, and a timer runs before them. So the wait asks the
+   * browser first (ask()) and ends only once it has answered: a call started
+   * before the answer makes it 'busy', and a call that ended before it, for
+   * 'quiet', restarts the window.
    */
   private idle(quietMs: number, maxMs: number): Promise<'quiet' | 'bound' | 'busy'> {
     return new Promise((resolve) => {
-      let window = setTimeout(() => end('quiet'), quietMs);
-      const bound = setTimeout(() => end('bound'), maxMs);
+      let stirred = 0;
+      const ask = (verdict: 'quiet' | 'bound'): void => {
+        const seen = stirred;
+        // Once the wait has ended, end() again changes nothing.
+        const then = (): void => {
+          if (verdict === 'quiet' && stirred !== seen) return;
+          end(verdict);
+        };
+        // A browser that cannot answer (its context is closing) leaves the
+        // verdict as it stands.
+        Promise.resolve().then(this.ask).then(then, then);
+      };
+      let window = setTimeout(() => ask('quiet'), quietMs);
+      const bound = setTimeout(() => ask('bound'), maxMs);
       const stir = (): void => {
+        stirred++;
         if (this.open.size > 0) { end('busy'); return; }
         clearTimeout(window);
-        window = setTimeout(() => end('quiet'), quietMs);
+        window = setTimeout(() => ask('quiet'), quietMs);
       };
-      const end = (ended: 'quiet' | 'bound' | 'busy'): void => {
+      const end = (verdict: 'quiet' | 'bound' | 'busy'): void => {
         clearTimeout(window);
         clearTimeout(bound);
         this.stirs.delete(stir);
-        resolve(ended);
+        resolve(verdict);
       };
       this.stirs.add(stir);
     });

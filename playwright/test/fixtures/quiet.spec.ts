@@ -1,3 +1,4 @@
+import type { Request } from '@playwright/test';
 import { test } from '../../dist';
 
 // The quiet rows' pages (rows.test.mjs, quietServer) each make a call after
@@ -29,4 +30,30 @@ test('a call its page\'s own timer makes while a slow call is in flight', async 
 });
 test('a poller that calls again 100 ms after each answer', async ({ page }) => {
   await page.goto(`${base}/chained`);
+});
+// About 1 s into the settle wait, this process's event loop is held 800 ms,
+// as a loaded machine holds it, while the page goes on calling. The hold
+// starts on the loop's next turn after a call's end, with no call in flight
+// (else after a later end): the end has restarted the 500 ms, which then
+// passes during the hold, and the calls the page makes in the hold wait
+// unread until the timers have run. The calls are counted from before the
+// page's first, so a call in flight when the body ends is counted too.
+test('a page that never goes quiet, its test process held in the wait', async ({ page, context }) => {
+  const open = new Set<Request>();
+  let from = Infinity;
+  let held = false;
+  context.on('request', (r) => { open.add(r); });
+  context.on('requestfailed', (r) => { open.delete(r); });
+  context.on('requestfinished', (r) => {
+    open.delete(r);
+    if (held || performance.now() - from < 1000) return;
+    held = true;
+    setImmediate(() => {
+      if (open.size > 0) { held = false; return; }
+      process.stderr.write('held 800 ms\n');
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 800);
+    });
+  });
+  await page.goto(`${base}/polling`);
+  from = performance.now();
 });

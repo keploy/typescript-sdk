@@ -215,7 +215,7 @@ function fakeRequest(page) {
 }
 // Lets every resolved promise's callbacks run; no timer.
 async function ticks() {
-  for (let i = 0; i < 5; i++) await Promise.resolve();
+  for (let i = 0; i < 20; i++) await Promise.resolve();
 }
 
 test('settle: a cancel that comes while settle already waits wakes it (its page closes; then, for a service worker\'s call, the test closes its context)', async () => {
@@ -259,7 +259,8 @@ test('settle: a cancel that comes while settle already waits wakes it (its page 
 function quietOn(t) {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
   const ctx = fakeContext();
-  const inflight = new Inflight(ctx, () => Date.now());
+  // The browser answers each ask() at once.
+  const inflight = new Inflight(ctx, () => Date.now(), () => Promise.resolve());
   const page = new EventEmitter();
   ctx.emit('page', page);
   const res = { value: 'waiting', named: 0 };
@@ -294,6 +295,88 @@ test('quiet: with no call, the wait ends 500 ms after it began, not before', asy
   await after(t, 1);
   assert.equal(q.res.value, true);
   assert.equal(q.res.named, 0);
+});
+
+// A timer that fires says only that this process saw no call for that long:
+// a loaded machine can hold its event loop while the browser's events wait
+// unread. So the wait asks the browser (context.cookies() by default) and
+// ends only once it has answered.
+test('quiet: a window or bound that has passed ends the wait only once the browser has answered: a call it reported first keeps the wait going, one that ended restarts the window, and no answer leaves the verdict', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const on = (ask) => {
+    const ctx = fakeContext();
+    const inflight = new Inflight(ctx, () => Date.now(), ask);
+    const page = new EventEmitter();
+    ctx.emit('page', page);
+    const res = { value: 'waiting' };
+    inflight.quiet(QUIET_MS, QUIET_MAX_MS, () => inflight.settled()).then((q) => { res.value = q; });
+    return { ctx, page, res };
+  };
+  const asks = [];
+  const ask = () => new Promise((resolve) => asks.push(resolve));
+  // The window has passed: the wait ends at the answer, not before.
+  let q = on(ask);
+  await after(t, QUIET_MS);
+  assert.equal(asks.length, 1);
+  await after(t, 1000);
+  assert.equal(q.res.value, 'waiting');
+  asks.shift()();
+  await ticks();
+  assert.equal(q.res.value, true);
+  // A call reported before the answer: the wait goes on, from its end.
+  q = on(ask);
+  await after(t, QUIET_MS);
+  const r = fakeRequest(q.page);
+  q.ctx.emit('request', r);
+  q.ctx.emit('requestfinished', r);
+  asks.shift()();
+  await after(t, QUIET_MS - 1);
+  assert.equal(q.res.value, 'waiting');
+  await after(t, 1);
+  asks.shift()();
+  await ticks();
+  assert.equal(q.res.value, true);
+  // The end of a call begun before the wait could see it, reported before
+  // the answer, restarts the window.
+  q = on(ask);
+  await after(t, QUIET_MS);
+  q.ctx.emit('requestfailed', fakeRequest(q.page));
+  asks.shift()();
+  await after(t, QUIET_MS - 1);
+  assert.equal(q.res.value, 'waiting');
+  await after(t, 1);
+  assert.equal(asks.length, 1);
+  asks.shift()();
+  await ticks();
+  assert.equal(q.res.value, true);
+  // The bound has passed: a call reported before the answer is waited for,
+  // and the wait then ends at the bound; an ended call's report does not
+  // move the bound.
+  q = on(ask);
+  for (let i = 0; i < QUIET_MAX_MS / 100; i++) {
+    const c = fakeRequest(q.page);
+    q.ctx.emit('request', c);
+    q.ctx.emit('requestfinished', c);
+    await after(t, 100);
+  }
+  assert.equal(asks.length, 1);
+  const late = fakeRequest(q.page);
+  q.ctx.emit('request', late);
+  asks.shift()();
+  await after(t, 200);
+  assert.equal(q.res.value, 'waiting');
+  q.ctx.emit('requestfinished', late);
+  await after(t, 1);
+  q.ctx.emit('requestfailed', fakeRequest(q.page));
+  assert.equal(asks.length, 1);
+  asks.shift()();
+  await ticks();
+  assert.equal(q.res.value, false);
+  // A browser that cannot answer (its context is closing) leaves the verdict.
+  q = on(() => Promise.reject(new Error('Target page, context or browser has been closed')));
+  await after(t, QUIET_MS);
+  assert.equal(q.res.value, true);
+  assert.equal(asks.length, 0);
 });
 
 test('quiet: a call that starts restarts the window and holds it while in flight, by name once it has lasted 500 ms; its end, answered or failed, restarts it', async (t) => {
@@ -498,10 +581,24 @@ test('quiet: the bound is measured on the process\'s monotonic clock, so a held 
   const page = new EventEmitter();
   ctx.emit('page', page);
   const poll = setInterval(() => { const r = fakeRequest(page); ctx.emit('request', r); ctx.emit('requestfinished', r); }, 10);
+  // A wait that never ends is this row's failure, not a hang of the file: the
+  // page's calls stop either way, and a wait still running stops at its next
+  // named wait, which never ends (this page has no call in flight for 200 ms,
+  // so a right wait is never named).
+  let hung;
+  let stopped = false;
+  let named = 0;
   try {
-    assert.equal(await inflight.quiet(200, 300, () => inflight.settled()), false);
+    const ended = await Promise.race([
+      inflight.quiet(200, 300, () => { named++; return stopped ? new Promise(() => {}) : inflight.settled(); }),
+      new Promise((resolve) => { hung = setTimeout(() => resolve('still waiting after 10 s'), 10000); }),
+    ]);
+    assert.equal(ended, false);
+    assert.equal(named, 0);
   } finally {
+    stopped = true;
     clearInterval(poll);
+    clearTimeout(hung);
   }
 });
 

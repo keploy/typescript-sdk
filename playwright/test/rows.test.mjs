@@ -119,6 +119,7 @@ async function playwright(specs, env, cwd = PKG) {
         steps: steps.filter((x) => x.test === spec.title).map((x) => x.step),
         at: Object.fromEntries(steps.filter((x) => x.test === spec.title).map((x) => [x.step, x.at])),
         stdout: (r.stdout ?? []).map((x) => x.text ?? Buffer.from(x.buffer ?? '', 'base64').toString()).join(''),
+        stderr: (r.stderr ?? []).map((x) => x.text ?? Buffer.from(x.buffer ?? '', 'base64').toString()).join(''),
       };
     }
   };
@@ -538,6 +539,11 @@ test('quiet: a call answered past 3 s at record and at once at replay leaves the
   }
 });
 
+// The poller rows' limit: they end at the bound only while the page's own
+// scripts run. A renderer that runs no script for 500 ms with no call in
+// flight has gone quiet by the rule (README, Limits), and the row then fails.
+// Traced on 2 CPUs beside 3 busy loops, the page's 100 ms timer went up to
+// 448 ms without running, while the test process kept up.
 test('quiet: a page that never goes quiet ends its test after 3 s with no call in flight, which says so; a call that never ends keeps it waiting, by name', async () => {
   const j = journal();
   const a = await fakeAgent(j);
@@ -564,6 +570,29 @@ test('quiet: a page that never goes quiet ends its test after 3 s with no call i
     // A tick in flight then may be named beside it.
     const steps = named(t);
     assert.ok(steps.some((calls) => calls.includes('/hang')) && namesOnly(steps, ['/tick', '/hang', 'more']), t.steps.join('\n'));
+  } finally { await p.close(); await a.close(); }
+});
+
+// A loaded machine can hold the test process's event loop while its page
+// goes on calling: the browser's events wait unread, and the window's timer,
+// which runs before them, saw no call. The page never went quiet, so its
+// test still ends at the bound and says so.
+test('quiet: a page that never goes quiet, with its test process held 800 ms in the wait, still ends after 3 s with no call in flight, which says so', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  const p = await quietServer(j, 0);
+  try {
+    const title = 'a page that never goes quiet, its test process held in the wait';
+    const r = await playwright(['quiet.spec.ts', '-g', title], { ...keployEnv(a.url), QUIET_BASE: p.url, PW_TIMEOUT: '20000' });
+    assert.equal(r.tests[title].status, 'passed', r.out);
+    // The hold came, once, inside the wait.
+    assert.equal(r.tests[title].stderr, 'held 800 ms\n', r.out);
+    assert.equal(r.tests[title].stdout, `${SEEDED_LINE}\n${settle.busyLine(title)}\n`);
+    assert.ok(namesOnly(named(r.tests[title]), ['/tick', 'more']), r.tests[title].steps.join('\n'));
+    // The wait's call to the browser is no step of the report.
+    assert.ok(!r.tests[title].steps.some((x) => /cookie/i.test(x)), r.tests[title].steps.join('\n'));
+    const s = story(j);
+    assert.equal(s.at(-2), 'tick', s.join(', '));
   } finally { await p.close(); await a.close(); }
 });
 
