@@ -248,17 +248,21 @@ test('a page the test asked for is the test\'s own when its first document tells
 });
 
 // A frame element of a document the row makes: its tag, its src (null for
-// none), whether it has srcdoc, the shadow root it hosts, and the frame
-// elements under it. Reading its window counts in reads: the numbering
-// never reads one (in Chromium that begins the frame's first document).
+// none), whether it has srcdoc, the shadow root it hosts, the frame
+// elements under it, and whether it has element children (inner; it has
+// when kids has a frame). Reading its window counts in reads: the
+// numbering never reads one (in Chromium that begins the frame's first
+// document). Each query for frames under it counts in queries.
 let reads = 0;
-const el = (localName, src = null, { srcdoc = false, shadow = null, kids = [] } = {}) => ({
+let queries = 0;
+const el = (localName, src = null, { srcdoc = false, shadow = null, kids = [], inner = kids.length > 0 } = {}) => ({
   localName, shadowRoot: shadow,
+  firstElementChild: inner ? (kids[0] ?? { localName: 'span' }) : null,
   get contentWindow() { reads++; return null; },
   getAttribute: (n) => (n === 'src' ? src : null),
   hasAttribute: (n) => n === 'srcdoc' && srcdoc,
-  querySelector: (q) => { assert.equal(q, 'iframe,frame'); return kids[0] ?? null; },
-  querySelectorAll: (q) => { assert.equal(q, 'iframe,frame'); return kids; },
+  querySelector: (q) => { queries++; assert.equal(q, 'iframe,frame'); return kids[0] ?? null; },
+  querySelectorAll: (q) => { queries++; assert.equal(q, 'iframe,frame'); return kids; },
 });
 // A document (or shadow root) whose elements, in tree order, are els; walks
 // counts its walks.
@@ -341,6 +345,39 @@ test('a document numbers its frame elements at the path each asks for, in elemen
   assert.equal(reads, 0);
 });
 
+test('a document looks into the nodes taken out of it only while it holds a numbered frame, counted exactly', () => {
+  const w = (n) => ({ n });
+  const els = [];
+  const doc = tree(els);
+  const p = parentOf(doc, true);
+  const row = el('div', null, { inner: true });
+  const look = () => { queries = 0; p.mo.cb([removed(row)]); return queries; };
+  // a numbered, then c put in and taken out in one change (never
+  // numbered), then a taken out: the document holds none, and looks no more.
+  const a = el('iframe', '/fa');
+  els.push(a);
+  p.mo.cb([added(a)]);
+  assert.equal(look(), 1);
+  // A node that is no frame and has no element child is not looked into.
+  queries = 0;
+  p.mo.cb([removed(el('span'), { nodeName: '#text' })]);
+  assert.equal(queries, 0);
+  const c = el('iframe', '/fa');
+  p.mo.cb([added(c), removed(c)]);
+  assert.equal(look(), 1);
+  // A div holding c (never numbered) taken out does not count a off.
+  p.mo.cb([removed(el('div', null, { kids: [c] }))]);
+  assert.equal(look(), 1);
+  els.splice(els.indexOf(a), 1);
+  p.mo.cb([removed(a)]);
+  assert.equal(look(), 0);
+  // Put back, a takes the next number, and is looked for again.
+  els.push(a);
+  p.mo.cb([added(a)]);
+  assert.deepEqual(p.enter(a, w(1), '/fa'), ['f/fa\n1', 0]);
+  assert.equal(look(), 1);
+});
+
 test('a document\'s observer numbers its frames as the app puts them in, only when a change puts one in, forgets a frame taken out, and is read up to date as a frame\'s document begins', () => {
   reads = 0;
   const w = (n) => ({ n });
@@ -349,16 +386,25 @@ test('a document\'s observer numbers its frames as the app puts them in, only wh
   const p = parentOf(doc, true);
   assert.equal(p.mo.asked[0], doc);
   assert.deepEqual({ ...p.mo.asked[1] }, { childList: true, subtree: true });
-  // A change that puts in, or takes out, no frame costs no walk.
+  // A change that puts in, or takes out, no frame costs no walk. A text
+  // node or an element with no element child costs no query; one with
+  // element children, one; and while the document holds no numbered frame,
+  // a node taken out is not looked into.
   const span = el('span');
-  els.push(span);
-  p.mo.cb([added(span, { nodeName: '#text' }), removed(span)]);
+  const row = el('div', null, { inner: true });
+  els.push(span, row);
+  queries = 0;
+  p.mo.cb([added(span, { nodeName: '#text' }, row), removed(span), removed(row)]);
   assert.equal(doc.walks, 0);
+  assert.equal(queries, 1);
   // b0 put in, then b1 before it: numbered as they come, whatever order
   // their documents begin in. A div that holds a frame counts as one.
+  // Once a change has put a frame in, the rest of it is not looked into.
   const [b0, b1] = [el('iframe', '/fr'), el('iframe', '/fr')];
   els.push(b0);
-  p.mo.cb([added(b0)]);
+  queries = 0;
+  p.mo.cb([added(b0, row), added(row)]);
+  assert.equal(queries, 0);
   const box = el('div', null, { kids: [b1] });
   els.unshift(box, b1);
   p.mo.cb([added(box)]);
@@ -374,6 +420,10 @@ test('a document\'s observer numbers its frames as the app puts them in, only wh
   p.mo.cb([removed(box)]);
   els.splice(els.indexOf(b1), 1);
   assert.deepEqual(p.enter(b1, w(1), '/fr'), [null, 0]);
+  // While it holds a numbered frame (b0), a node taken out is looked into.
+  queries = 0;
+  p.mo.cb([removed(row)]);
+  assert.equal(queries, 1);
   // Changes the observer has not yet delivered are read first, in order:
   // y put back and z put in after it, z's document beginning first.
   const [y, z] = [el('iframe', '/fy'), el('iframe', '/fy')];

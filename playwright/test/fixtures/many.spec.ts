@@ -56,11 +56,19 @@ test('sandboxed', async ({ page }) => {
   keep('sandboxed', { two, one: await (await loaded(page, 's0', '/fs')).evaluate(read) });
 });
 
-// The page's time, in ms, for a workload: 'grow' adds 20000 rows in 500
-// tasks; 'churn' adds and removes one span in each of 300 tasks, on a page
-// of 20000 elements; 'shadow' does the same on a page of 2000 open shadow
-// roots of 10 elements each.
-const work = (kind: string): Promise<number> => new Promise((res) => {
+// A workload in the page: 'grow' adds 20000 rows in 500 tasks; 'churn'
+// adds and removes one span in each of 300 tasks, on a page of 20000
+// elements; 'shadow' does the same on a page of 2000 open shadow roots of
+// 10 elements each. It answers its time in ms, and how many times the
+// seeding walked the document (a querySelectorAll('*') on it) during the
+// workload, and then after one frame is put in.
+const work = (kind: string): Promise<{ ms: number; walks: number; framed: number }> => new Promise((res) => {
+  let walks = 0;
+  const all = Document.prototype.querySelectorAll;
+  Document.prototype.querySelectorAll = function (this: Document, q: string) {
+    if (q === '*' && this === document) walks++;
+    return all.call(this, q);
+  } as typeof all;
   const box = document.getElementById('box')!;
   const mc = new MessageChannel();
   let i = 0;
@@ -75,26 +83,33 @@ const work = (kind: string): Promise<number> => new Promise((res) => {
       last = document.createElement('span');
       box.appendChild(last);
     }
-    if (++i < T) mc.port2.postMessage(0);
-    else setTimeout(() => { res(performance.now() - t0); }, 0);
+    if (++i < T) { mc.port2.postMessage(0); return; }
+    setTimeout(() => {
+      const ms = performance.now() - t0;
+      const during = walks;
+      box.appendChild(document.createElement('iframe'));
+      setTimeout(() => { Document.prototype.querySelectorAll = all; res({ ms, walks: during, framed: walks - during }); }, 0);
+    }, 0);
   };
   mc.port2.postMessage(0);
 });
 
 test('cost', async ({ page, browser }) => {
   // The same workloads in the test's page (seeded) and in a page of a
-  // context the test made itself (not seeded), taken in turn; the least of
-  // two runs each.
+  // context the test made itself (not seeded), taken in turn; the least
+  // time of two runs each, and the walks of the seeded page's runs.
   const own = await browser.newContext();
   try {
     const mine = await own.newPage();
-    const out: Record<string, { seeded: number; own: number }> = {};
+    const out: Record<string, { seeded: number; own: number; walks: number[]; framed: number[]; ownWalks: number[] }> = {};
     for (const [kind, at] of [['grow', '/cost?n=0'], ['churn', '/cost?n=20000'], ['shadow', '/cost?shadow=2000']]) {
-      const t = { seeded: Infinity, own: Infinity };
+      const t = { seeded: Infinity, own: Infinity, walks: [] as number[], framed: [] as number[], ownWalks: [] as number[] };
       for (let r = 0; r < 2; r++) {
         for (const [which, p] of [['seeded', page], ['own', mine]] as const) {
           await p.goto(`${base}${at}`);
-          t[which] = Math.min(t[which], await p.evaluate(work, kind));
+          const got = await p.evaluate(work, kind);
+          t[which] = Math.min(t[which], got.ms);
+          if (which === 'seeded') { t.walks.push(got.walks); t.framed.push(got.framed); } else t.ownWalks.push(got.walks + got.framed);
         }
       }
       out[kind] = t;

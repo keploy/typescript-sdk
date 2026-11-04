@@ -315,7 +315,7 @@ export function initScript(seed: string, report = ''): string {
       try { all = root.querySelectorAll('*'); } catch (e) { return; }
       for (let i = 0; i < all.length; i++) {
         const el = all[i];
-        if (isFrame(el) && !s.els.has(el)) s.els.set(el, next(s, el));
+        if (isFrame(el) && !s.els.has(el)) { s.els.set(el, next(s, el)); s.held++; }
         let r = null;
         try { r = el.shadowRoot; } catch (e) { r = null; }
         if (r) visit(r);
@@ -324,30 +324,39 @@ export function initScript(seed: string, report = ''): string {
     visit(s.doc);
   };
   // Whether a node the app put in or took out is a frame element, or holds
-  // one outside its shadow roots.
+  // one outside its shadow roots. A node with no element child (a text
+  // node, a leaf element) holds none, and costs no query.
   const holds = (n) => {
-    try { return isFrame(n) || (typeof n.querySelector === 'function' && n.querySelector('iframe,frame') !== null); } catch (e) { return false; }
+    try { return isFrame(n) || (n.firstElementChild != null && n.querySelector('iframe,frame') !== null); } catch (e) { return false; }
   };
   // A frame element taken out loses its number: put back, it holds another
   // window, and takes the next number at its path.
+  const drop = (s, el) => { if (s.els.delete(el)) s.held--; s.bound.delete(el); };
   const forget = (s, n) => {
     try {
-      if (isFrame(n)) { s.els.delete(n); s.bound.delete(n); }
+      if (isFrame(n)) drop(s, n);
       const all = n.querySelectorAll('iframe,frame');
-      for (let i = 0; i < all.length; i++) { s.els.delete(all[i]); s.bound.delete(all[i]); }
+      for (let i = 0; i < all.length; i++) drop(s, all[i]);
     } catch (e) {
       // A node with no elements.
     }
   };
   // What the app's changes to the document's nodes, in order, do to its
-  // frames: one taken out is forgotten, and the document numbers its frames
-  // only when one was put in (a change that puts in no frame costs no walk).
+  // frames: one taken out is forgotten (looked for only while the document
+  // holds a numbered frame), and the document numbers its frames only when
+  // one was put in (a change that puts in no frame costs no walk).
   const take = (s, records) => {
     let put = false;
     for (let i = 0; i < records.length; i++) {
       const r = records[i];
-      for (let j = 0; j < r.removedNodes.length; j++) if (holds(r.removedNodes[j])) forget(s, r.removedNodes[j]);
-      for (let j = 0; j < r.addedNodes.length && !put; j++) if (holds(r.addedNodes[j])) put = true;
+      if (s.held > 0) {
+        const out = r.removedNodes;
+        for (let j = 0; j < out.length; j++) if (holds(out[j])) forget(s, out[j]);
+      }
+      if (!put) {
+        const added = r.addedNodes;
+        for (let j = 0; j < added.length; j++) if (holds(added[j])) { put = true; break; }
+      }
     }
     if (put) number(s);
   };
@@ -441,7 +450,7 @@ export function initScript(seed: string, report = ''): string {
       // An opener of another origin.
       given = null;
     }
-    const s = { doc, place, loads, counted, kind, up, frame, given, page: undefined, twins: 0, opened: [], els: new WM(), bound: new WM(), mo: null, numbers: new Mp(), counts: new Mp(), streams: null };
+    const s = { doc, place, loads, counted, kind, up, frame, given, page: undefined, twins: 0, opened: [], els: new WM(), held: 0, bound: new WM(), mo: null, numbers: new Mp(), counts: new Mp(), streams: null };
     watch(s);
     return s;
   };

@@ -851,7 +851,7 @@ for (const engine of ENGINES) {
 }
 
 for (const engine of ENGINES) {
-  test(`seeded, in ${engine}: 300 frames in a page's markup, or put in by one script, each load and draw their own numbers, the same at replay, with no page error; three sandboxed frames at one path are not seeded and are named, a lone one is; seeding costs a page whose DOM changes often little`, async () => {
+  test(`seeded, in ${engine}: 300 frames in a page's markup, or put in by one script, each load and draw their own numbers, the same at replay, with no page error; three sandboxed frames at one path are not seeded and are named, a lone one is; a page whose DOM changes often is walked only when a frame is put in`, async () => {
     const j = journal();
     const rec = await fakeAgent(j);
     let kept = {};
@@ -883,11 +883,11 @@ for (const engine of ENGINES) {
       for (const x of Object.values(two)) assert.notDeepEqual(x, lone);
       assert.deepEqual(one, lone);
       assert.deepEqual(unplaced(r, 'sandboxed'), twins);
-      // A page whose DOM changes often, seeded, takes about what it takes
-      // in a context the test made itself: no walk of the page for a change
-      // that puts in no frame.
-      console.log(`seeding cost in ${engine}, ms (least of two runs): ${JSON.stringify(r.drew.cost)}`);
-      for (const [kind, t] of Object.entries(r.drew.cost)) assert.ok(t.seeded <= 1.5 * t.own + 100, `${kind}: seeded ${t.seeded} ms, own ${t.own} ms`);
+      // A page whose DOM changes often: seeding walks the document for no
+      // change that puts in no frame, and once when one frame is put in.
+      // The times are printed, not judged: a loaded machine moves them.
+      console.log(`seeding cost in ${engine}, ms (least of two runs): ${JSON.stringify(Object.fromEntries(Object.entries(r.drew.cost).map(([k, t]) => [k, { seeded: Math.round(t.seeded), own: Math.round(t.own) }])))}`);
+      for (const [kind, t] of Object.entries(r.drew.cost)) assert.deepEqual({ walks: t.walks, framed: t.framed, own: t.ownWalks }, { walks: [0, 0], framed: [1, 1], own: [0, 0] }, kind);
       // A replay draws what the record drew, frame by frame.
       kept = r.seeds;
       const p = await drawRun(j, env(rep.url), ['many.spec.ts'], names);
