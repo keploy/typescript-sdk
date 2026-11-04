@@ -17,6 +17,8 @@ jobs:
   rows:
     name: build and rows (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    # A leg takes a few minutes, npm installs included: one past 30 is a hang.
+    timeout-minutes: 30
     strategy:
       # One leg failing must not cancel the others: each Node version's
       # result is its own.

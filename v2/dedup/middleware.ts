@@ -2,7 +2,7 @@
 import { log } from "console";
 import { Request, Response, NextFunction } from "express";
 const fs = require('fs');
-const yaml = require('js-yaml');
+import { entryYaml } from "./entry";
 
 const filePath = 'dedupData.yaml';
 
@@ -10,13 +10,11 @@ const filePath = 'dedupData.yaml';
 export default function middleware(): (req: Request, res: Response, next: NextFunction) => void {
   // console.log("Inside middleware...");
 
-  // @ts-ignore
-  fs.access(filePath, fs.constants.F_OK, (err) => {
-    if (err) {
-      // Create the file if it doesn't exist
-      fs.writeFileSync(filePath, '', 'utf-8');
-    }
-  });
+  // Create the file if it does not exist, now, with an append of nothing,
+  // which never empties it; a file that exists is not written. Checking for
+  // it asynchronously and then writing it empty, as before, dropped the
+  // entries of requests that finished between the check and its callback.
+  if (!fs.existsSync(filePath)) fs.appendFileSync(filePath, '', 'utf-8');
   return (req: Request, res: Response, next: NextFunction) => {
     res.on("finish", () => {
       afterMiddleware(req, res);
@@ -34,34 +32,10 @@ export function afterMiddleware(req: Request, res: Response) {
   }
   let executedLinesByFile = GetCoverage();
 
-  let currentData = {
-    id: testSet + "/" + id,
-    executedLinesByFile: executedLinesByFile
-  };
-
-  let existingData = [];
-
-  try {
-    const fileContent = fs.readFileSync(filePath, 'utf-8');
-    existingData = yaml.load(fileContent) || [];
-  } catch (error) {
-    // Handle the case where the file doesn't exist or is not valid YAML
-    console.error("Error reading existing file:", error);
-  }
-
-  if (!Array.isArray(existingData)) {
-    console.error('Expected an array for existingData, but got:', typeof existingData);
-    existingData = []; // Reset to an empty array or handle accordingly
-  }
-
-  // Add or update the entry for the current id
-  existingData.push(currentData);
-
-  // Convert the array to YAML format
-  const yamlData = yaml.dump(existingData);
-
-  // Write the updated YAML data back to the file
-  fs.writeFileSync(filePath, yamlData, 'utf-8');
+  // The file is a list that only grows: append this request's entry, as
+  // js-yaml 4 wrote it, rather than read, parse and rewrite the whole file,
+  // which cost each request time and memory in proportion to the file.
+  fs.appendFileSync(filePath, entryYaml(testSet + "/" + id, executedLinesByFile), 'utf-8');
 
   // Log to the console
   // console.log("Executed lines by file:", executedLinesByFile);

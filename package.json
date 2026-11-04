@@ -1,9 +1,14 @@
 {
   "name": "@keploy/sdk",
-  "version": "2.0.2",
+  "version": "2.0.11",
   "description": "This is the client SDK for the [Keploy](https://github.com/keploy/keploy) testing platform. With the TypeScript SDK, you can test both your existing unit test cases in Jest and create new end-to-end test cases for your applications.",
   "main": "dist/keployCli.js",
   "types": "dist/keployCli.d.ts",
+  "files": [
+    "dist",
+    "keployCli.ts",
+    "v2"
+  ],
   "scripts": {
     "build": "tsc",
     "prepare": "npm run build",
@@ -14,7 +19,7 @@
     "url": "git+https://github.com/keploy/typescript-sdk.git"
   },
   "author": "Keploy <dev@keploy.io>",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "bugs": {
     "url": "https://github.com/keploy/keploy/issues"
   },
@@ -23,14 +28,16 @@
     "@types/express": "^4.17.21",
     "@types/node": "^20.11.16",
     "axios": "^1.6.7",
+    "body-parser": "^1.20.9",
     "cors": "^2.8.5",
     "lodash": "^4.17.21",
     "require-in-the-middle": "^7.3.0",
-    "tree-kill": "^1.2.2",
-    "typescript": "^5.3.3"
+    "tree-kill": "^1.2.2"
   },
   "devDependencies": {
     "@types/axios": "^0.14.0",
-    "@types/cors": "^2.8.17"
+    "@types/cors": "^2.8.17",
+    "typescript": "^5.3.3",
+    "yaml": "^2.9.1"
   }
 }
