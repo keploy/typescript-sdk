@@ -184,7 +184,7 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
           if (said) return;
           said = true;
           waiting.delete(say);
-          process.stdout.write(`${unplacedLine(name, a, w, b === null ? 0 : othersNow(b))}\n`);
+          process.stdout.write(`${unplacedLine(name, a, w, othersNow(b))}\n`);
         };
         waiting.add(say);
         if (b !== null) {

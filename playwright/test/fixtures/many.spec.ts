@@ -5,7 +5,7 @@ import { test } from '../../dist';
 // Run in Chromium, Firefox and WebKit (PW_BROWSER). A page that holds many
 // frames of its origin, in its markup or put in by one script; sandboxed
 // frames, which have no session storage (some whose own script replaces the
-// global parent); and what seeding costs a page
+// global parent, some holding a srcdoc frame); and what seeding costs a page
 // whose DOM changes often. Each test keeps what it saw.
 const base = process.env.DRAWS_BASE ?? '';
 const keep = (name: string, v: unknown): void => fs.writeFileSync(`${process.env.MARKER_DIR}/${name}.json`, JSON.stringify(v));
@@ -90,6 +90,24 @@ test('held', async ({ page }) => {
   const drew: Record<string, unknown> = {};
   for (const n of ['h0', 'h1', 'h2']) drew[n] = await (await loaded(page, n, '/fh')).evaluate(read);
   keep('held', drew);
+});
+
+test('nested', async ({ page }) => {
+  // Two sandboxed frames at /fsn, each holding a srcdoc frame of its origin.
+  await page.goto(`${base}/sbx?n=2&nest=1`);
+  const drew: Record<string, { own: unknown; child: unknown }> = {};
+  for (const n of ['s0', 's1']) {
+    const f = await loaded(page, n, '/fsn');
+    let child: unknown;
+    for (let i = 0; i < 400 && child === undefined; i++) {
+      const c = f.childFrames()[0];
+      if (c) { try { child = await c.evaluate(() => (window as unknown as { __draws?: unknown }).__draws); } catch { /* not yet */ } }
+      if (child === undefined) await page.waitForTimeout(25);
+    }
+    if (child === undefined) throw new Error(`no srcdoc frame drew in ${n}`);
+    drew[n] = { own: await f.evaluate(read), child };
+  }
+  keep('nested', drew);
 });
 
 // A workload in the page: 'grow' adds 20000 rows in 500 tasks; 'churn'

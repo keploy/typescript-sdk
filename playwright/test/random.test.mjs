@@ -101,10 +101,12 @@ test('an uncounted frame\'s line counts the frames beside the frame with no sess
   // parent holds now.
   u.detached = true;
   assert.equal(othersNow(b), 0);
-  // A top document, or a frame further up than the top: no parent.
+  // A top document, or a frame further up than the top: no parent, and
+  // none beside it.
   assert.equal(besideOf(p, 0), null);
   assert.equal(besideOf(u, 1), null);
   assert.equal(besideOf(u, 5), null);
+  assert.equal(othersNow(null), 0);
   // What no script of keploy's sends (not a count of frames up): its own.
   for (const bad of [NaN, -1, undefined]) assert.deepEqual(besideOf(inner, bad), [inner, u], String(bad));
 });

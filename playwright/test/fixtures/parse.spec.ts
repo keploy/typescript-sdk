@@ -6,8 +6,10 @@ import { test } from '../../dist';
 // never answers: unparsed) or whose load never comes (an image the server
 // never answers: unloaded), and a third the test puts in once both have
 // drawn. The test then ends, and its context waits for that call until the
-// test times out.
+// test times out. A 1 ms navigation timeout, so that the fixture's wait for
+// the parse's end holds only by its own timeout of 0 (none).
 const base = process.env.DRAWS_BASE ?? '';
+test.use({ navigationTimeout: 1 });
 
 async function drawn(p: Page, n: string): Promise<void> {
   for (let i = 0; i < 400; i++) {
@@ -22,7 +24,7 @@ async function drawn(p: Page, n: string): Promise<void> {
 
 for (const [name, waitUntil] of [['unparsed', 'commit'], ['unloaded', 'domcontentloaded']] as const) {
   test(name, async ({ page }) => {
-    await page.goto(`${base}/${name}`, { waitUntil });
+    await page.goto(`${base}/${name}`, { waitUntil, timeout: 0 });
     for (const n of ['u0', 'u1']) await drawn(page, n);
     await page.evaluate(() => {
       const f = document.createElement('iframe');

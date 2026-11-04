@@ -119,16 +119,17 @@ export function besideOf(frame: Frame, above: number): [Frame, Frame] | null {
 
 /**
  * How many other frames are beside that frame under its parent (besideOf)
- * now; 0, so the line names no other frame, when the frame is gone (its
- * parent may have moved on to another document, which holds other frames).
+ * now; 0, so the line names no other frame, when there is no such frame or
+ * it is gone (its parent may have moved on to another document, which holds
+ * other frames).
  * The fixture counts once the parent's parser has ended (its
  * DOMContentLoaded), or at the test's end if it has not: a frame draws as it
  * loads, and may draw and load while its parent's parser holds the frames
  * after it in its markup (behind a script it loads), so a count taken at
  * its draw, or at its own load, would depend on the network.
  */
-export function othersNow([frame, parent]: [Frame, Frame]): number {
-  return frame.isDetached() ? 0 : parent.childFrames().length - 1;
+export function othersNow(beside: [Frame, Frame] | null): number {
+  return beside === null || beside[0].isDetached() ? 0 : beside[1].childFrames().length - 1;
 }
 
 /** A seed drawn afresh for a test's begin: 128 bits, as hex. */
