@@ -28,12 +28,12 @@
 //   - before the test's browser context closes, from the start of the
 //     context fixture's teardown, the test waits until its pages have gone
 //     500 ms with no call starting or ending and none in flight, for at most
-//     3 s with no call in flight (quiet); a call in flight is waited for to
-//     its end by the browser's request events, in a step that names it once
-//     it has lasted 500 ms (settle). So a call a page makes less than 500 ms
-//     after an answer (a side panel that loads once an answer comes) is the
-//     test's at record and at replay alike, and its calls end inside it;
-//     settle.ts names the limits;
+//     3 s with no call in flight and at most 5 s from its start (quiet); a
+//     call in flight is waited for to its end by the browser's request
+//     events, in a step that names it once it has lasted 500 ms (settle). So
+//     a call a page makes less than 500 ms after an answer (a side panel that
+//     loads once an answer comes) is the test's at record and at replay
+//     alike, and its calls end inside it; settle.ts names the limits;
 //   - the test ends (POST /agent/scope/end) after its last teardown, with
 //     its outcome and what its context's pages drew their random numbers
 //     from (random); when keploy saw a call with no recorded answer, or a
@@ -63,7 +63,7 @@ import type { Outcome, Random, TestRef } from './agent';
 import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
 import { OFF_LINE, SEEDED_LINE, freshSeed, initScript, pageScript, processRandom, seatRandom, seedingFromEnv, setAside, unplacedLine, unseededLine } from './random';
-import { Inflight, QUIET_MAX_MS, QUIET_MS, busyLine, namedWait } from './settle';
+import { Inflight, QUIET_CAP_MS, QUIET_MAX_MS, QUIET_MS, busyLine, cutLine, namedWait } from './settle';
 
 export { expect, KeployError };
 export type { TestRef, Outcome };
@@ -183,7 +183,7 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
   keploySeedRandom: [true, { option: true }],
 
   // After keployTest: its begin's answer holds the seed.
-  context: async ({ context, keployTest }, use) => {
+  context: async ({ context, keployTest }, use, testInfo) => {
     void keployTest;
     const s = seeding;
     if (client === null || s === null || open === null) {
@@ -221,7 +221,12 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
       await use(context);
       // The test ends once its pages have gone quiet and their calls have
       // ended (settle.ts), the same at record and at replay.
-      if (!(await inflight.quiet(QUIET_MS, QUIET_MAX_MS, named))) process.stdout.write(`${busyLine(name)}\n`);
+      const ended = await inflight.quiet(QUIET_MS, QUIET_MAX_MS, QUIET_CAP_MS, named);
+      // A wait the test's timeout cut short ended when Playwright closed the
+      // browser, which cancels the calls in flight: it says nothing of its own.
+      const own = testInfo.status !== 'timedOut';
+      if (own && ended === 'bound') process.stdout.write(`${busyLine(name)}\n`);
+      else if (own && ended === 'cut') process.stdout.write(`${cutLine(name)}\n`);
     } finally {
       restore();
     }

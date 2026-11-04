@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { AgentClient, KeployError } from '../dist/agent.js';
 import { decide } from '../dist/join.js';
-import { Inflight, QUIET_MAX_MS, QUIET_MS, busyLine, namedWait } from '../dist/settle.js';
+import { Inflight, QUIET_CAP_MS, QUIET_MAX_MS, QUIET_MS, busyLine, cutLine, namedWait } from '../dist/settle.js';
 import { EventEmitter } from 'node:events';
 import { testRef, outcomeOf, sourceOf, keployText } from '../dist/index.js';
 
@@ -263,10 +263,10 @@ function quietOn(t) {
   const inflight = new Inflight(ctx, () => Date.now(), () => Promise.resolve());
   const page = new EventEmitter();
   ctx.emit('page', page);
-  const res = { value: 'waiting', named: 0 };
-  // named(): the step the fixture wraps settled() in.
-  const named = () => { res.named++; return inflight.settled(); };
-  return { ctx, page, inflight, res, wait: () => { inflight.quiet(QUIET_MS, QUIET_MAX_MS, named).then((q) => { res.value = q; }); } };
+  const res = { value: 'waiting', named: 0, calls: [] };
+  // named(): the step the fixture wraps settled() in, with the calls it names.
+  const named = (calls = inflight.inFlight()) => { res.named++; res.calls.push(calls); return inflight.settled(calls); };
+  return { ctx, page, inflight, res, wait: () => { inflight.quiet(QUIET_MS, QUIET_MAX_MS, QUIET_CAP_MS, named).then((q) => { res.value = q; }); } };
 }
 async function after(t, ms) {
   await ticks();
@@ -274,9 +274,13 @@ async function after(t, ms) {
   await ticks();
 }
 
-test('quiet: the bounds are 500 ms of no call starting or ending, and 3 s with no call in flight', () => {
+test('quiet: the bounds are 500 ms of no call starting or ending, 3 s with no call in flight, and 5 s from the start of the wait', () => {
   assert.equal(QUIET_MS, 500);
   assert.equal(QUIET_MAX_MS, 3000);
+  assert.equal(QUIET_CAP_MS, 5000);
+  assert.equal(cutLine('t'), 'keploy: t: settle cut at 5 s: calls never went quiet for 500 ms; the page\'s calls kept it busy from the start of ' +
+    'its browser context\'s teardown. Each call in flight at the cut was waited for to its end; a call a page starts later is not waited for, ' +
+    'at record or at replay.');
   assert.equal(busyLine('t'), 'keploy: t ended with its pages still making calls: they did not go 500 ms without a call starting or ending ' +
     'in 3000 ms with no call in flight, from the start of its browser context\'s teardown, so a call they would have made later is not the test\'s, ' +
     'at record or at replay (each call in flight was waited for to its end).');
@@ -293,7 +297,7 @@ test('quiet: with no call, the wait ends 500 ms after it began, not before', asy
   await after(t, QUIET_MS - 1);
   assert.equal(q.res.value, 'waiting');
   await after(t, 1);
-  assert.equal(q.res.value, true);
+  assert.equal(q.res.value, 'quiet');
   assert.equal(q.res.named, 0);
 });
 
@@ -309,7 +313,7 @@ test('quiet: a window or bound that has passed ends the wait only once the brows
     const page = new EventEmitter();
     ctx.emit('page', page);
     const res = { value: 'waiting' };
-    inflight.quiet(QUIET_MS, QUIET_MAX_MS, () => inflight.settled()).then((q) => { res.value = q; });
+    inflight.quiet(QUIET_MS, QUIET_MAX_MS, QUIET_CAP_MS, (c) => inflight.settled(c)).then((q) => { res.value = q; });
     return { ctx, page, res };
   };
   const asks = [];
@@ -322,7 +326,7 @@ test('quiet: a window or bound that has passed ends the wait only once the brows
   assert.equal(q.res.value, 'waiting');
   asks.shift()();
   await ticks();
-  assert.equal(q.res.value, true);
+  assert.equal(q.res.value, 'quiet');
   // A call reported before the answer: the wait goes on, from its end.
   q = on(ask);
   await after(t, QUIET_MS);
@@ -335,7 +339,7 @@ test('quiet: a window or bound that has passed ends the wait only once the brows
   await after(t, 1);
   asks.shift()();
   await ticks();
-  assert.equal(q.res.value, true);
+  assert.equal(q.res.value, 'quiet');
   // The end of a call begun before the wait could see it, reported before
   // the answer, restarts the window.
   q = on(ask);
@@ -348,7 +352,7 @@ test('quiet: a window or bound that has passed ends the wait only once the brows
   assert.equal(asks.length, 1);
   asks.shift()();
   await ticks();
-  assert.equal(q.res.value, true);
+  assert.equal(q.res.value, 'quiet');
   // The bound has passed: a call reported before the answer is waited for,
   // and the wait then ends at the bound; an ended call's report does not
   // move the bound.
@@ -371,11 +375,11 @@ test('quiet: a window or bound that has passed ends the wait only once the brows
   assert.equal(asks.length, 1);
   asks.shift()();
   await ticks();
-  assert.equal(q.res.value, false);
+  assert.equal(q.res.value, 'bound');
   // A browser that cannot answer (its context is closing) leaves the verdict.
   q = on(() => Promise.reject(new Error('Target page, context or browser has been closed')));
   await after(t, QUIET_MS);
-  assert.equal(q.res.value, true);
+  assert.equal(q.res.value, 'quiet');
   assert.equal(asks.length, 0);
 });
 
@@ -396,7 +400,7 @@ test('quiet: a call reported after the bound has passed is waited for, then the 
   ctx.emit('page', page);
   let named = 0;
   let res = 'waiting';
-  inflight.quiet(QUIET_MS, QUIET_MAX_MS, () => { named++; return inflight.settled(); }).then((v) => { res = v; });
+  inflight.quiet(QUIET_MS, QUIET_MAX_MS, QUIET_CAP_MS, (c) => { named++; return inflight.settled(c); }).then((v) => { res = v; });
   // A poller: a call every 400 ms, each ended at once, 2800 ms of them.
   for (let i = 0; i < 7; i++) {
     await after(t, 400);
@@ -418,7 +422,7 @@ test('quiet: a call reported after the bound has passed is waited for, then the 
   assert.equal(answers.length, 2, 'the bound passed: the wait asks at once');
   answers[1]();
   await ticks();
-  assert.equal(res, false);
+  assert.equal(res, 'bound');
   assert.equal(named, 0);
   assert.ok(delays.every((d) => d >= 0), `timers set for ${delays.join(', ')} ms`);
 });
@@ -441,7 +445,7 @@ test('quiet: a call that starts restarts the window and holds it while in flight
       await after(t, QUIET_MS - 1);
       assert.equal(q.res.value, 'waiting', c);
       await after(t, 1);
-      assert.equal(q.res.value, true, c);
+      assert.equal(q.res.value, 'quiet', c);
       assert.equal(q.res.named, flight < QUIET_MS ? 0 : 1, c);
       t.mock.timers.reset();
     }
@@ -463,7 +467,7 @@ test('quiet: calls in flight one after another, with no break, keep the wait in 
   assert.equal(q.res.named, 1);
   q.ctx.emit('requestfinished', r);
   await after(t, QUIET_MS);
-  assert.equal(q.res.value, true);
+  assert.equal(q.res.value, 'quiet');
   assert.equal(q.res.named, 1);
 });
 
@@ -487,8 +491,14 @@ test('quiet: a named wait is a step that names the calls in flight, five at most
     const shown = calls.slice(0, 5).map((r) => `GET ${r.url()}`).join(', ') + (n > 5 ? `, and ${n - 5} more` : '');
     assert.deepEqual(titles, [`keploy: wait for the test's ${n} call(s) in flight before its browser context closes: ${shown}`], `${n} calls`);
     assert.equal(ended, false, `${n} calls: the wait waits for the calls it names`);
-    calls.forEach((r) => ctx.emit('requestfinished', r));
-    await ticks();
+    // Ended one at a time, the last named first, then the first: the wait
+    // goes on while any of them is in flight.
+    const order = n > 1 ? [calls[n - 1], ...calls.slice(0, n - 1)] : calls;
+    for (const [i, r] of order.entries()) {
+      ctx.emit('requestfinished', r);
+      await ticks();
+      if (i < n - 1) assert.equal(ended, false, `${n} calls: ${i + 1} ended, the wait waits for the rest`);
+    }
     assert.equal(ended, true, `${n} calls: the wait ends once they have ended, the later call still in flight`);
     assert.deepEqual(inflight.inFlight(), [late], `${n} calls`);
   }
@@ -518,7 +528,7 @@ test('quiet: a named wait waits for the calls it names; a call begun during it, 
   assert.deepEqual(q.inflight.inFlight(), [later]);
   q.ctx.emit('requestfinished', later);
   await after(t, QUIET_MS);
-  assert.equal(q.res.value, true);
+  assert.equal(q.res.value, 'quiet');
   assert.equal(q.res.named, 2);
 });
 
@@ -532,7 +542,7 @@ test('quiet: a call that starts while the window runs, with none in flight, rest
   await after(t, QUIET_MS - 1);
   assert.equal(q.res.value, 'waiting');
   await after(t, 1);
-  assert.equal(q.res.value, true);
+  assert.equal(q.res.value, 'quiet');
 });
 
 test('quiet: the end of a call it does not count (dropped as cancelled, or begun before it watched) restarts the window too', async (t) => {
@@ -553,7 +563,7 @@ test('quiet: the end of a call it does not count (dropped as cancelled, or begun
     await after(t, QUIET_MS - 1);
     assert.equal(q.res.value, 'waiting', which);
     await after(t, 1);
-    assert.equal(q.res.value, true, which);
+    assert.equal(q.res.value, 'quiet', which);
     t.mock.timers.reset();
   }
 });
@@ -566,7 +576,7 @@ test('quiet: a call its page\'s close cancels ends, and restarts the window, nam
   await after(t, 400);
   other.emit('close');
   await after(t, QUIET_MS - 400);
-  assert.equal(q.res.value, true, 'a close that cancels nothing leaves the window as it ran');
+  assert.equal(q.res.value, 'quiet', 'a close that cancels nothing leaves the window as it ran');
   t.mock.timers.reset();
   q = quietOn(t);
   q.ctx.emit('request', fakeRequest(q.page));
@@ -579,7 +589,7 @@ test('quiet: a call its page\'s close cancels ends, and restarts the window, nam
   await after(t, QUIET_MS - 1);
   assert.equal(q.res.value, 'waiting');
   await after(t, 1);
-  assert.equal(q.res.value, true);
+  assert.equal(q.res.value, 'quiet');
   t.mock.timers.reset();
   // Cancelled 200 ms into its flight: the wait for it ends at the close,
   // unnamed, and the window runs from the close.
@@ -593,7 +603,7 @@ test('quiet: a call its page\'s close cancels ends, and restarts the window, nam
   assert.equal(q.res.value, 'waiting');
   assert.equal(q.res.named, 0);
   await after(t, 1);
-  assert.equal(q.res.value, true);
+  assert.equal(q.res.value, 'quiet');
   assert.equal(q.res.named, 0);
 });
 
@@ -609,45 +619,61 @@ test('quiet: pages that never go quiet end the wait after 3 s with no call in fl
   await after(t, 99);
   assert.equal(q.res.value, 'waiting');
   await after(t, 1);
-  assert.equal(q.res.value, false);
+  assert.equal(q.res.value, 'bound');
   assert.equal(q.res.named, 0);
 });
 
 // The default clock, with real timers and the process's Date held (mocked,
-// never moved): a page that calls every 10 ms, each call answered at once,
+// never moved). A page that calls every 10 ms, each call answered at once,
 // never goes 200 ms without a call, and the 300 ms bound still comes. A
 // stall of the process runs the page's timer before the window's, as the
-// earlier one, so no stall ends the wait as quiet.
-test('quiet: the bound is measured on the process\'s monotonic clock, so a held Date does not hold it', { timeout: 20000 }, async (t) => {
+// earlier one, so no stall ends the wait as quiet. A page whose calls, each
+// in flight 15 ms, overlap never has 300 ms with no call in flight, and the
+// 300 ms cap still comes.
+test('quiet: the bound and the cap are measured on the process\'s monotonic clock, so a held Date holds neither', { timeout: 30000 }, async (t) => {
   t.mock.timers.enable({ apis: ['Date'] });
-  const ctx = fakeContext();
-  const inflight = new Inflight(ctx);
-  const page = new EventEmitter();
-  ctx.emit('page', page);
-  const poll = setInterval(() => { const r = fakeRequest(page); ctx.emit('request', r); ctx.emit('requestfinished', r); }, 10);
-  // A wait that never ends is this row's failure, not a hang of the file: the
-  // page's calls stop either way, and a wait still running stops at its next
-  // named wait, which never ends (this page has no call in flight for 200 ms,
-  // so a right wait is never named).
-  let hung;
-  let stopped = false;
-  let named = 0;
-  try {
-    const ended = await Promise.race([
-      inflight.quiet(200, 300, () => { named++; return stopped ? new Promise(() => {}) : inflight.settled(); }),
-      new Promise((resolve) => { hung = setTimeout(() => resolve('still waiting after 10 s'), 10000); }),
-    ]);
-    assert.equal(ended, false);
-    assert.equal(named, 0);
-  } finally {
-    stopped = true;
-    clearInterval(poll);
-    clearTimeout(hung);
+  for (const [pages, bound, cap, want] of [['answered at once', 300, 5000, 'bound'], ['overlapping', 10000, 300, 'cut']]) {
+    // A wait that never ends is this row's failure, not a hang of the file:
+    // once the row has stopped, the page's calls stop, and neither the
+    // browser's answer nor a named wait comes, so the wait sets no timer
+    // again.
+    let stopped = false;
+    const ctx = fakeContext();
+    const inflight = new Inflight(ctx, undefined, () => (stopped ? new Promise(() => {}) : Promise.resolve()));
+    const page = new EventEmitter();
+    ctx.emit('page', page);
+    const ends = new Set();
+    const poll = setInterval(() => {
+      const r = fakeRequest(page);
+      ctx.emit('request', r);
+      if (pages === 'answered at once') { ctx.emit('requestfinished', r); return; }
+      const e = setTimeout(() => { ends.delete(e); ctx.emit('requestfinished', r); }, 15);
+      ends.add(e);
+    }, 10);
+    let hung;
+    let named = 0;
+    try {
+      const ended = await Promise.race([
+        inflight.quiet(200, bound, cap, (c) => { named++; return stopped ? new Promise(() => {}) : inflight.settled(c); }),
+        new Promise((resolve) => { hung = setTimeout(() => resolve('still waiting after 10 s'), 10000); }),
+      ]);
+      assert.equal(ended, want, pages);
+      // Calls answered at once are never in flight 200 ms, so a right wait
+      // is never named.
+      if (pages === 'answered at once') assert.equal(named, 0, pages);
+    } finally {
+      stopped = true;
+      clearInterval(poll);
+      ends.forEach((e) => clearTimeout(e));
+      clearTimeout(hung);
+    }
   }
 });
 
+// Both flights keep the whole wait under the 5 s cap, which counts the time
+// calls are in flight (the cap's rows are below).
 test('quiet: time a call is in flight counts toward no bound, short or long, so a slow answer and a quick one end the wait alike', async (t) => {
-  for (const flight of [400, 5000]) {
+  for (const flight of [400, 1900]) {
     const q = quietOn(t);
     q.wait();
     // 1 s with no call in flight, then one call in flight for flight ms.
@@ -672,7 +698,7 @@ test('quiet: time a call is in flight counts toward no bound, short or long, so 
     await after(t, 99);
     assert.equal(q.res.value, 'waiting', `in flight ${flight} ms`);
     await after(t, 1);
-    assert.equal(q.res.value, false, `in flight ${flight} ms`);
+    assert.equal(q.res.value, 'bound', `in flight ${flight} ms`);
     assert.equal(q.res.named, flight < QUIET_MS ? 0 : 1, `in flight ${flight} ms`);
     t.mock.timers.reset();
   }
@@ -697,6 +723,201 @@ test('quiet: a call that never ends keeps the wait named, past any bound, until 
   assert.equal(q.res.named, 1);
 });
 
+// The cap: pages whose calls keep the wait from going quiet, and from
+// having 3 s with no call in flight, end it 5 s after it began. A call
+// every 100 ms, each in flight 60 ms, leaves 40 ms a call with no call in
+// flight: n of them take n x 100 ms and leave n x 40 ms toward the bound.
+async function overlap(t, q, n) {
+  for (let k = 0; k < n; k++) {
+    const r = fakeRequest(q.page);
+    q.ctx.emit('request', r);
+    await after(t, 60);
+    q.ctx.emit('requestfinished', r);
+    await after(t, 40);
+  }
+}
+
+test('quiet: pages whose calls keep the bound from coming end the wait 5 s after it began, not before, once the browser has answered; a call it reported first is waited for', async (t) => {
+  let q = quietOn(t);
+  q.wait();
+  await overlap(t, q, 49);
+  const r = fakeRequest(q.page);
+  q.ctx.emit('request', r);
+  await after(t, 60);
+  q.ctx.emit('requestfinished', r);
+  await after(t, 39);
+  assert.equal(q.res.value, 'waiting');
+  await after(t, 1);
+  assert.equal(q.res.value, 'cut');
+  assert.equal(q.res.named, 0);
+  // The cap passes with no call in flight, and the wait asks the browser,
+  // whose answer the test gives.
+  const asks = [];
+  const asked = async () => {
+    t.mock.timers.reset();
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    const ctx = fakeContext();
+    const inflight = new Inflight(ctx, () => Date.now(), () => new Promise((resolve) => asks.push(resolve)));
+    const page = new EventEmitter();
+    ctx.emit('page', page);
+    const on = { ctx, page, res: { value: 'waiting' } };
+    inflight.quiet(QUIET_MS, QUIET_MAX_MS, QUIET_CAP_MS, (c) => inflight.settled(c)).then((v) => { on.res.value = v; });
+    await overlap(t, on, 50);
+    assert.equal(asks.length, 1, 'the cap has passed: the wait asks the browser');
+    return on;
+  };
+  // The browser answers the cap's ask after a call it reported first: the
+  // wait waits for that call and ends at its end.
+  q = await asked();
+  const late = fakeRequest(q.page);
+  q.ctx.emit('request', late);
+  asks.shift()();
+  await after(t, 100);
+  assert.equal(q.res.value, 'waiting', 'a call reported before the answer is waited for');
+  q.ctx.emit('requestfinished', late);
+  await after(t, 0);
+  assert.equal(q.res.value, 'cut');
+  assert.equal(asks.length, 0);
+  // The end of a call the wait does not count (dropped as cancelled, or
+  // begun before it watched), reported before the answer: the wait still
+  // ends at the cut, at the answer, as it does at the bound, and asks no
+  // more.
+  q = await asked();
+  q.ctx.emit('requestfailed', fakeRequest(q.page));
+  asks.shift()();
+  await ticks();
+  assert.equal(q.res.value, 'cut', 'an uncounted call\'s end before the answer does not move the cut');
+  await after(t, QUIET_MS);
+  assert.equal(asks.length, 0);
+});
+
+test('quiet: once the cap has passed, the calls in flight then are waited for to their end, by name once in flight 500 ms without a break, and a call begun after it is not', async (t) => {
+  for (const lasts of [false, true]) {
+    const c = lasts ? 'in flight past 500 ms' : 'ended within 500 ms';
+    const q = quietOn(t);
+    q.wait();
+    // 1840 ms with no call in flight by 4600 ms; from then, calls in flight
+    // with no break: a, and b from 4800 ms, after which a ends.
+    await overlap(t, q, 46);
+    const [a, b, later] = [fakeRequest(q.page), fakeRequest(q.page), fakeRequest(q.page)];
+    q.ctx.emit('request', a);
+    await after(t, 200);
+    q.ctx.emit('request', b);
+    await after(t, 100);
+    q.ctx.emit('requestfinished', a);
+    // 5000 ms: the cap passes with b in flight, 400 ms into the calls'
+    // flight; a call that starts 50 ms later is not waited for.
+    await after(t, 100);
+    await after(t, 50);
+    q.ctx.emit('request', later);
+    assert.equal(q.res.value, 'waiting', c);
+    if (!lasts) {
+      await after(t, 40);
+      q.ctx.emit('requestfinished', b);
+      await ticks();
+      assert.equal(q.res.value, 'cut', c);
+      assert.equal(q.res.named, 0, c);
+    } else {
+      await after(t, 49);
+      assert.equal(q.res.named, 0, c);
+      await after(t, 1);
+      assert.equal(q.res.named, 1, c);
+      assert.deepEqual(q.res.calls.at(-1), [b], c);
+      await after(t, 1000);
+      assert.equal(q.res.value, 'waiting', c);
+      q.ctx.emit('requestfinished', b);
+      await ticks();
+      assert.equal(q.res.value, 'cut', c);
+      assert.equal(q.res.named, 1, c);
+    }
+    assert.deepEqual(q.inflight.inFlight(), [later], c);
+    t.mock.timers.reset();
+  }
+});
+
+test('quiet: a cap that passes while a named wait runs: the calls in flight then are waited for after it, by name once in flight 500 ms more, and a call begun after it is not', async (t) => {
+  for (const lasts of [false, true]) {
+    const c = lasts ? 'in flight 500 ms past the named wait' : 'ended within 500 ms of it';
+    const q = quietOn(t);
+    q.wait();
+    const slow = fakeRequest(q.page);
+    q.ctx.emit('request', slow);
+    await after(t, QUIET_MS);
+    assert.equal(q.res.named, 1, c);
+    await after(t, QUIET_CAP_MS - QUIET_MS - 100);
+    // In flight when the cap passes, at 5000 ms, and after it.
+    const before = fakeRequest(q.page);
+    q.ctx.emit('request', before);
+    await after(t, 100);
+    const later = fakeRequest(q.page);
+    q.ctx.emit('request', later);
+    await after(t, 100);
+    q.ctx.emit('requestfinished', slow);
+    await ticks();
+    assert.equal(q.res.value, 'waiting', c);
+    if (!lasts) {
+      await after(t, QUIET_MS - 1);
+      q.ctx.emit('requestfinished', before);
+      await ticks();
+      assert.equal(q.res.named, 1, c);
+    } else {
+      await after(t, QUIET_MS - 1);
+      assert.equal(q.res.named, 1, c);
+      await after(t, 1);
+      assert.equal(q.res.named, 2, c);
+      assert.deepEqual(q.res.calls.at(-1), [before], c);
+      q.ctx.emit('requestfinished', before);
+      await ticks();
+    }
+    assert.equal(q.res.value, 'cut', c);
+    assert.deepEqual(q.inflight.inFlight(), [later], c);
+    t.mock.timers.reset();
+  }
+});
+
+// A loaded machine can run a browser event before a timer that is due: the
+// process's clock can pass the cap before the cap's timer has run, as the
+// wait enters its next phase. The wait then ends at the cut at once, and sets
+// no timer for a negative time, which Node 24 warns of in the test's output.
+test('quiet: a cap passed on the clock before its timer ran ends the wait at the cut at once, in each phase, with no timer set for a negative time', async (t) => {
+  for (const phase of ['idle', 'busy', 'named']) {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const delays = [];
+    const mocked = globalThis.setTimeout;
+    globalThis.setTimeout = (f, ms, ...a) => { delays.push(ms); return mocked(f, ms, ...a); };
+    try {
+      let clock = 0;
+      const ctx = fakeContext();
+      const inflight = new Inflight(ctx, () => clock, () => Promise.resolve());
+      const page = new EventEmitter();
+      ctx.emit('page', page);
+      let named = 0;
+      let res = 'waiting';
+      const r = fakeRequest(page);
+      if (phase !== 'busy') ctx.emit('request', r);
+      inflight.quiet(QUIET_MS, QUIET_MAX_MS, QUIET_CAP_MS, (c) => { named++; return inflight.settled(c); }).then((v) => { res = v; });
+      await ticks();
+      clock = QUIET_CAP_MS + 1000;
+      if (phase === 'idle') ctx.emit('requestfinished', r);
+      if (phase === 'busy') ctx.emit('request', r);
+      if (phase === 'named') {
+        await after(t, QUIET_MS);
+        assert.equal(named, 1, phase);
+      }
+      await after(t, 0);
+      if (phase !== 'idle') {
+        assert.equal(res, 'waiting', `${phase}: the call in flight at the cut is waited for`);
+        ctx.emit('requestfinished', r);
+        await after(t, 0);
+      }
+      assert.equal(res, 'cut', phase);
+      assert.equal(named, phase === 'named' ? 1 : 0, phase);
+      assert.ok(delays.every((d) => d >= 0), `${phase}: timers set for ${delays.join(', ')} ms`);
+    } finally { globalThis.setTimeout = mocked; }
+    t.mock.timers.reset();
+  }
+});
+
 // The timers set while it is installed that have neither run nor been
 // cleared.
 function pendingTimers() {
@@ -715,8 +936,8 @@ function pendingTimers() {
   return { pending, made, cleared, restore: () => { globalThis.setTimeout = set; globalThis.clearTimeout = clear; } };
 }
 
-test('quiet: once the wait has ended, quiet, after a named wait or at the bound, it leaves no timer of its own running and keeps none of its waits, and the context\'s calls set or clear no timer', async (t) => {
-  for (const ending of ['quiet', 'named', 'bound']) {
+test('quiet: once the wait has ended, quiet, after a named wait, at the bound or at the cap, it leaves no timer of its own running and keeps none of its waits, and the context\'s calls set or clear no timer', async (t) => {
+  for (const ending of ['quiet', 'named', 'bound', 'cut']) {
     const q = quietOn(t);
     const timers = pendingTimers();
     try {
@@ -733,6 +954,16 @@ test('quiet: once the wait has ended, quiet, after a named wait or at the bound,
           q.ctx.emit('requestfinished', r);
           await after(t, 350);
         }
+      } else if (ending === 'cut') {
+        // A call named at 500 ms that ends after the cap: the wait ends at
+        // its end.
+        const r = fakeRequest(q.page);
+        q.ctx.emit('request', r);
+        await after(t, QUIET_MS);
+        await after(t, QUIET_CAP_MS);
+        assert.equal(q.res.named, 1);
+        q.ctx.emit('requestfinished', r);
+        await after(t, 0);
       } else if (ending === 'named') {
         const r = fakeRequest(q.page);
         q.ctx.emit('request', r);
@@ -741,7 +972,7 @@ test('quiet: once the wait has ended, quiet, after a named wait or at the bound,
         q.ctx.emit('requestfinished', r);
         await after(t, QUIET_MS);
       } else await after(t, QUIET_MS);
-      assert.equal(q.res.value, ending !== 'bound', ending);
+      assert.equal(q.res.value, ending === 'named' ? 'quiet' : ending, ending);
       assert.equal(timers.pending.size, 0, ending);
       // The Inflight lives as long as the context: a wait that has ended
       // keeps nothing in it (settled()'s waits are its own state; no event

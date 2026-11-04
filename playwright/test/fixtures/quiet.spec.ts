@@ -1,4 +1,4 @@
-import type { Request } from '@playwright/test';
+import type { BrowserContext, Request } from '@playwright/test';
 import { test } from '../../dist';
 
 // The quiet rows' pages (rows.test.mjs, quietServer) each make a call after
@@ -15,12 +15,26 @@ test('a call its page makes after the test typed, once the body has ended', asyn
 test('the next test', async ({ page }) => {
   await page.goto(`${base}/blank`);
 });
-test('a page that never goes quiet', async ({ page }) => {
+// Writes, as the test's context closes, the time from the end of its body,
+// on the clock the wait's bound and cap are measured with: the wait lies between the two.
+function sinceBody(context: BrowserContext): () => void {
+  let end = 0;
+  context.on('close', () => { process.stderr.write(`closed ${(performance.now() - end).toFixed(1)} ms after the body ended\n`); });
+  return () => { end = performance.now(); };
+}
+test('a page that never goes quiet', async ({ page, context }) => {
+  const ended = sinceBody(context);
   await page.goto(`${base}/polling`);
+  ended();
 });
 test('a page that never goes quiet, and a call in flight', async ({ page }) => {
   await page.goto(`${base}/polling`);
   await page.evaluate(() => { void fetch('/hang'); });
+});
+test('a page whose calls overlap: it polls every 50 ms and never reads the answers', async ({ page, context }) => {
+  const ended = sinceBody(context);
+  await page.goto(`${base}/unread`);
+  ended();
 });
 test('a call that never ends, begun while a slower call is waited for', async ({ page }) => {
   await page.goto(`${base}/chain`);
@@ -28,8 +42,10 @@ test('a call that never ends, begun while a slower call is waited for', async ({
 test('a call its page\'s own timer makes while a slow call is in flight', async ({ page }) => {
   await page.goto(`${base}/timer`);
 });
-test('a poller that calls again 100 ms after each answer', async ({ page }) => {
+test('a poller that calls again 100 ms after each answer', async ({ page, context }) => {
+  const ended = sinceBody(context);
   await page.goto(`${base}/chained`);
+  ended();
 });
 // About 1 s into the settle wait, this process's event loop is held 800 ms,
 // as a loaded machine holds it, while the page goes on calling. The hold

@@ -28,14 +28,30 @@
 //   - Bound: QUIET_MAX_MS of time with no call in flight, for pages that never
 //     go quiet (a poller), measured with performance.now(): the process's
 //     monotonic clock, which no hold on the test's own clock changes.
+//   - Cap: QUIET_CAP_MS of wall time from the start of the wait, on the same
+//     clock, the same at record and at replay, for pages whose calls overlap
+//     so that the bound never accrues. A call is in flight until the browser
+//     reports its end, and for an answer the page never reads Chromium
+//     reports it about 50 ms after the answer, so a page that calls every
+//     50 ms without reading the answers always has a call in flight. Once
+//     the cap has passed, the calls in flight then are waited for to their
+//     end, by name once they have lasted QUIET_MS, so a call that never ends
+//     still fails the test by its own name. A call that starts after the cap
+//     is not waited for: it falls inside the test only if it reaches the
+//     backend before the calls in flight at the cut end, and closing the
+//     context cancels it if it is still in flight then.
 // Limits (README, Limits of this version):
 //   - A call a page's own timer makes while a slow call is in flight at
 //     record is the test's there; at replay the window ends before the timer
 //     fires and the call is not made.
 //   - A poller that waits G ms after each answer of A ms keeps the wait going
 //     about QUIET_MAX_MS x (1 + A / G), with a step for each answer of
-//     QUIET_MS or more, so against a slow backend its test can time out at
-//     record while its replay ends at the bound.
+//     QUIET_MS or more, until the cap cuts it: against a slow backend its
+//     record ends at the cap, and the calls it would have made after it, made
+//     at replay, where the wait ends at the bound, are not in the recording.
+//   - The cap counts the time a call is in flight: a page whose calls keep
+//     it from going quiet for QUIET_CAP_MS at record, and not at replay (a
+//     slow backend), leaves different calls to its test at the two.
 //   - The wait knows only the calls the browser has reported: a page whose
 //     scripts do not run for QUIET_MS with no call in flight has gone quiet,
 //     even when only a starved machine held them, and a call it makes after
@@ -47,12 +63,21 @@ import type { BrowserContext, Frame, Page, Request } from '@playwright/test';
 export const QUIET_MS = 500;
 /** The most time with no call in flight a test waits for its pages to go quiet. */
 export const QUIET_MAX_MS = 3000;
+/** The most wall time, from the start of the wait, a test waits for its pages to go quiet. */
+export const QUIET_CAP_MS = 5000;
 
 /** What a test says when its pages did not go quiet within QUIET_MAX_MS with no call in flight. */
 export function busyLine(name: string): string {
   return `keploy: ${name} ended with its pages still making calls: they did not go ${QUIET_MS} ms without a call starting or ending ` +
     `in ${QUIET_MAX_MS} ms with no call in flight, from the start of its browser context's teardown, so a call they would have made later is ` +
     'not the test\'s, at record or at replay (each call in flight was waited for to its end).';
+}
+
+/** What a test says when QUIET_CAP_MS cut its wait before its pages went quiet or reached QUIET_MAX_MS. */
+export function cutLine(name: string): string {
+  return `keploy: ${name}: settle cut at ${QUIET_CAP_MS / 1000} s: calls never went quiet for ${QUIET_MS} ms; the page's calls kept it busy ` +
+    'from the start of its browser context\'s teardown. Each call in flight at the cut was waited for to its end; a call a page starts ' +
+    'later is not waited for, at record or at replay.';
 }
 
 /** The step title of a wait on calls in flight: it names them, five at most. */
@@ -64,15 +89,13 @@ export function waitTitle(calls: Request[]): string {
 
 /**
  * quiet()'s named(): a wait on calls in flight that has lasted, run as
- * step(title, body). It names the calls in flight when it is made and waits
- * for those: a call that starts before step() runs its body (Playwright's
- * step can wait on the browser first) is left to a wait of its own.
+ * step(title, body). It names the calls it is given, by default the calls in
+ * flight when it is made, and waits for those: a call that starts before
+ * step() runs its body (Playwright's step can wait on the browser first) is
+ * left to a wait of its own.
  */
-export function namedWait(inflight: Inflight, step: (title: string, body: () => Promise<void>) => Promise<void>): () => Promise<void> {
-  return () => {
-    const calls = inflight.inFlight();
-    return step(waitTitle(calls), () => inflight.settled(calls));
-  };
+export function namedWait(inflight: Inflight, step: (title: string, body: () => Promise<void>) => Promise<void>): (calls?: Request[]) => Promise<void> {
+  return (calls = inflight.inFlight()) => step(waitTitle(calls), () => inflight.settled(calls));
 }
 
 export class Inflight {
@@ -150,43 +173,66 @@ export class Inflight {
   }
 
   /**
-   * Resolves true once the context's pages have gone quietMs with no call
-   * starting or ending and none in flight; false once maxMs with no call in
-   * flight have passed first. Each call that starts or ends restarts the
-   * window. A call in flight is waited for until it ends, and that time
-   * counts toward neither; once the pages have had a call in flight for
-   * quietMs without a break, the wait is named(), which resolves once the
-   * calls then in flight have ended (settled(), in a step that names them).
-   * A call still in flight after it is named in a wait of its own.
+   * Resolves 'quiet' once the context's pages have gone quietMs with no call
+   * starting or ending and none in flight; 'bound' once maxMs with no call in
+   * flight have passed first; 'cut' once capMs of wall time from its start
+   * have passed first and the calls in flight then have ended. Each call that
+   * starts or ends restarts the window. A call in flight is waited for until
+   * it ends, and that time counts toward the cap only; once the pages have
+   * had a call in flight for quietMs without a break, the wait is named(),
+   * which resolves once the calls then in flight have ended (settled(), in a
+   * step that names them). A call still in flight after it is named in a wait
+   * of its own. Once the cap has passed, only the calls in flight then are
+   * waited for, by name once they have been in flight for quietMs: a call
+   * that starts after it is not.
    */
-  async quiet(quietMs: number, maxMs: number, named: () => Promise<void>): Promise<boolean> {
+  async quiet(quietMs: number, maxMs: number, capMs: number, named: (calls?: Request[]) => Promise<void>): Promise<'quiet' | 'bound' | 'cut'> {
+    const until = this.now() + capMs;
     let left = maxMs;
     for (;;) {
       if (this.open.size === 0) {
         const from = this.now();
-        const ended = await this.idle(quietMs, left);
-        if (ended !== 'busy') return ended === 'quiet';
+        const ended = await this.idle(quietMs, left, until - from);
+        if (ended !== 'busy') return ended;
         left -= this.now() - from;
-      } else if (await this.busy(quietMs)) {
-        await named();
+        continue;
       }
+      let ended = await this.busy(quietMs, until - this.now());
+      if (ended === 'idle') continue;
+      if (ended === 'long') {
+        const cut = await this.during(named, until);
+        if (cut === null) continue;
+        ended = await this.busy(quietMs, 0, cut);
+      }
+      // The cap has passed: these are the calls in flight then that are still
+      // in flight after quietMs, if any.
+      if (ended.length > 0) await named(ended);
+      return 'cut';
     }
+  }
+
+  /** named(), and the calls in flight when the cap (at until) passed while it ran, or null. */
+  private async during(named: () => Promise<void>, until: number): Promise<Request[] | null> {
+    const passed: { calls: Request[] | null } = { calls: null };
+    const cap = setTimeout(() => { passed.calls = this.inFlight(); }, Math.max(0, until - this.now()));
+    try { await named(); } finally { clearTimeout(cap); }
+    return passed.calls;
   }
 
   /**
    * While no call is in flight: 'quiet' once quietMs pass with no call
-   * starting or ending, 'bound' once maxMs pass, 'busy' once a call starts.
-   * A timer that fires says only that this process saw no call for that
-   * long: while its event loop was held (a loaded machine), the browser's
-   * events wait unread, and a timer runs before them. So the wait asks the
-   * browser first (ask()) and ends only once it has answered: a call started
-   * before the answer makes it 'busy', and a call that ended before it, for
-   * 'quiet', restarts the window.
+   * starting or ending, 'bound' once maxMs pass, 'cut' once capMs pass,
+   * 'busy' once a call starts. A timer that fires says only that this
+   * process saw no call for that long: while its event loop was held (a
+   * loaded machine), the browser's events wait unread, and a timer runs
+   * before them. So the wait asks the browser first (ask()) and ends only
+   * once it has answered: a call started before the answer makes it 'busy',
+   * and a call that ended before it, for 'quiet', restarts the window.
    */
-  private idle(quietMs: number, maxMs: number): Promise<'quiet' | 'bound' | 'busy'> {
+  private idle(quietMs: number, maxMs: number, capMs: number): Promise<'quiet' | 'bound' | 'cut' | 'busy'> {
     return new Promise((resolve) => {
       let stirred = 0;
-      const ask = (verdict: 'quiet' | 'bound'): void => {
+      const ask = (verdict: 'quiet' | 'bound' | 'cut'): void => {
         const seen = stirred;
         // Once the wait has ended, end() again changes nothing.
         const then = (): void => {
@@ -202,15 +248,17 @@ export class Inflight {
       // before its answer was then waited for. Node warns, in the test's own
       // output, of a timer set for a negative time.
       const bound = setTimeout(() => ask('bound'), Math.max(0, maxMs));
+      const cap = setTimeout(() => ask('cut'), Math.max(0, capMs));
       const stir = (): void => {
         stirred++;
         if (this.open.size > 0) { end('busy'); return; }
         clearTimeout(window);
         window = setTimeout(() => ask('quiet'), quietMs);
       };
-      const end = (verdict: 'quiet' | 'bound' | 'busy'): void => {
+      const end = (verdict: 'quiet' | 'bound' | 'cut' | 'busy'): void => {
         clearTimeout(window);
         clearTimeout(bound);
+        clearTimeout(cap);
         this.stirs.delete(stir);
         resolve(verdict);
       };
@@ -219,19 +267,32 @@ export class Inflight {
   }
 
   /**
-   * While a call is in flight: false once none is, true once the calls have
-   * been in flight for quietMs without a break.
+   * While a call is in flight: 'idle' once none is, 'long' once the calls
+   * have been in flight for quietMs without a break. Once capMs have passed
+   * (or from the start, given cut: the calls in flight when it passed), only
+   * the calls in flight then count: [] once they have ended, or those still
+   * in flight once quietMs have passed.
    */
-  private busy(quietMs: number): Promise<boolean> {
+  private busy(quietMs: number, capMs: number): Promise<'idle' | 'long' | Request[]>;
+  private busy(quietMs: number, capMs: number, cut: Request[]): Promise<Request[]>;
+  private busy(quietMs: number, capMs: number, cut: Request[] | null = null): Promise<'idle' | 'long' | Request[]> {
     return new Promise((resolve) => {
-      const long = setTimeout(() => end(true), quietMs);
-      const stir = (): void => { if (this.open.size === 0) end(false); };
-      const end = (lasted: boolean): void => {
+      const at: { cut: Request[] | null } = { cut };
+      const left = (calls: Request[]): Request[] => calls.filter((r) => this.open.has(r));
+      const long = setTimeout(() => end(at.cut === null ? 'long' : left(at.cut)), quietMs);
+      const stir = (): void => {
+        if (at.cut === null) { if (this.open.size === 0) end('idle'); } else if (left(at.cut).length === 0) end([]);
+      };
+      const cap = at.cut === null ? setTimeout(() => { at.cut = this.inFlight(); stir(); }, Math.max(0, capMs)) : undefined;
+      const end = (ended: 'idle' | 'long' | Request[]): void => {
         clearTimeout(long);
+        clearTimeout(cap);
         this.stirs.delete(stir);
-        resolve(lasted);
+        resolve(ended);
       };
       this.stirs.add(stir);
+      // Given calls that have all ended already, the wait for them ends now.
+      stir();
     });
   }
 
