@@ -198,7 +198,10 @@ export class Inflight {
         Promise.resolve().then(this.ask).then(then, then);
       };
       let window = setTimeout(() => ask('quiet'), quietMs);
-      const bound = setTimeout(() => ask('bound'), maxMs);
+      // The bound can have passed already: a call the browser reported
+      // before its answer was then waited for. Node warns, in the test's own
+      // output, of a timer set for a negative time.
+      const bound = setTimeout(() => ask('bound'), Math.max(0, maxMs));
       const stir = (): void => {
         stirred++;
         if (this.open.size > 0) { end('busy'); return; }

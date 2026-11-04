@@ -379,6 +379,50 @@ test('quiet: a window or bound that has passed ends the wait only once the brows
   assert.equal(asks.length, 0);
 });
 
+// The bound can pass while the browser's answer is pending, and a call it
+// reported first is then in flight: the wait waits for that call and, the
+// bound passed, ends at the next answer. It sets no timer for a negative
+// time, which Node 24 warns of in the test's own output.
+test('quiet: a call reported after the bound has passed is waited for, then the wait ends at the bound, with no timer set for a negative time', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+  const delays = [];
+  const mocked = globalThis.setTimeout;
+  globalThis.setTimeout = (f, ms, ...a) => { delays.push(ms); return mocked(f, ms, ...a); };
+  t.after(() => { globalThis.setTimeout = mocked; });
+  const ctx = fakeContext();
+  const answers = [];
+  const inflight = new Inflight(ctx, () => Date.now(), () => new Promise((r) => answers.push(r)));
+  const page = new EventEmitter();
+  ctx.emit('page', page);
+  let named = 0;
+  let res = 'waiting';
+  inflight.quiet(QUIET_MS, QUIET_MAX_MS, () => { named++; return inflight.settled(); }).then((v) => { res = v; });
+  // A poller: a call every 400 ms, each ended at once, 2800 ms of them.
+  for (let i = 0; i < 7; i++) {
+    await after(t, 400);
+    const r = fakeRequest(page);
+    ctx.emit('request', r);
+    ctx.emit('requestfinished', r);
+  }
+  await after(t, QUIET_MAX_MS - 2800);
+  assert.equal(answers.length, 1, 'the bound has passed: the wait asks the browser');
+  // Before the answer, a call 50 ms past the bound, reported first.
+  await after(t, 50);
+  const late = fakeRequest(page);
+  ctx.emit('request', late);
+  answers[0]();
+  await after(t, 100);
+  assert.equal(res, 'waiting', 'a call in flight is waited for');
+  ctx.emit('requestfinished', late);
+  await after(t, 0);
+  assert.equal(answers.length, 2, 'the bound passed: the wait asks at once');
+  answers[1]();
+  await ticks();
+  assert.equal(res, false);
+  assert.equal(named, 0);
+  assert.ok(delays.every((d) => d >= 0), `timers set for ${delays.join(', ')} ms`);
+});
+
 test('quiet: a call that starts restarts the window and holds it while in flight, by name once it has lasted 500 ms; its end, answered or failed, restarts it', async (t) => {
   for (const ending of ['requestfinished', 'requestfailed']) {
     for (const flight of [QUIET_MS - 1, QUIET_MS + 100]) {
