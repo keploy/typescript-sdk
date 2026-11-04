@@ -711,7 +711,7 @@ for (const engine of ENGINES) {
     let kept = {};
     const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
       ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
-    const names = ['frames', 'popupfromblank', 'ownctxinit', 'shadow', 'removed', 'nostorage'];
+    const names = ['frames', 'popupfromblank', 'ownctxinit', 'shadow', 'nostorage', 'removed'];
     const unplaced = (r, n) => r.tests[n].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${n}, `)).map((l) => l.replace(/:\d+\//, ':<port>/')).sort();
     const env = (url) => ({ ...keployEnv(url), PW_BROWSER: engine });
     try {

@@ -125,6 +125,10 @@ test('cost', async ({ page, browser }) => {
   // The same workloads in the test's page (seeded) and in a page of a
   // context the test made itself (not seeded), taken in turn; the least
   // time of two runs each, and the walks of the seeded page's runs.
+  // WebKit takes 3 to 6 s for one 'grow' run, seeded or not, so on a
+  // busy machine the twelve runs (four of them 'grow') can take more
+  // than the 30 s a test gets by default.
+  test.setTimeout(120_000);
   const own = await browser.newContext();
   try {
     const mine = await own.newPage();
