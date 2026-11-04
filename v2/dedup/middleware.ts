@@ -10,13 +10,11 @@ const filePath = 'dedupData.yaml';
 export default function middleware(): (req: Request, res: Response, next: NextFunction) => void {
   // console.log("Inside middleware...");
 
-  // @ts-ignore
-  fs.access(filePath, fs.constants.F_OK, (err) => {
-    if (err) {
-      // Create the file if it doesn't exist
-      fs.writeFileSync(filePath, '', 'utf-8');
-    }
-  });
+  // Create the file if it does not exist, now, with an append of nothing,
+  // which never empties it; a file that exists is not written. Checking for
+  // it asynchronously and then writing it empty, as before, dropped the
+  // entries of requests that finished between the check and its callback.
+  if (!fs.existsSync(filePath)) fs.appendFileSync(filePath, '', 'utf-8');
   return (req: Request, res: Response, next: NextFunction) => {
     res.on("finish", () => {
       afterMiddleware(req, res);

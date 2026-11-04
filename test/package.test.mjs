@@ -91,10 +91,14 @@ const ADDED = `- id: test-set-0/test-3
       - 4
 `;
 
+// The coverage of a run with lines 1 and 4 of each file in files run.
+const COVERAGE = (files) => `
+  global.__coverage__ = Object.fromEntries(${JSON.stringify(files)}.map((f) => [f, { statementMap: { 0: { start: { line: 1 } }, 1: { start: { line: 4 } }, 2: { start: { line: 9 } } }, s: { 0: 1, 1: 2, 2: 0 } }]));
+`;
+
 // The middleware's request: test-set-0/test-3, with lines 1 and 4 of each
 // file in files run.
-const REQUEST = (files) => `
-  global.__coverage__ = Object.fromEntries(${JSON.stringify(files)}.map((f) => [f, { statementMap: { 0: { start: { line: 1 } }, 1: { start: { line: 4 } }, 2: { start: { line: 9 } } }, s: { 0: 1, 1: 2, 2: 0 } }]));
+const REQUEST = (files) => COVERAGE(files) + `
   const res = new (require('events').EventEmitter)();
   const h = { 'KEPLOY-TEST-ID': 'test-3', 'KEPLOY-TEST-SET-ID': 'test-set-0' };
   require('@keploy/sdk/dist/v2/dedup/middleware')()({ get: (n) => h[n] }, res, () => {});
@@ -134,42 +138,99 @@ test('the middleware leaves what the file holds as it is, and loads none of it',
   assert.equal(request(tags), tags + ADDED);
 });
 
-test('on a file of 1000 entries, a request reads nothing from it and writes only its own entry', () => {
+test('on a file of 1000 entries, the setup only checks that it exists, and a request only appends its own entry', () => {
   const cwd = mkdtempSync(join(app, 'big-'));
-  // 1000 tests, each with 60 lines run in each of 40 files: 28 MiB.
+  // 1000 tests, each with 60 lines run in each of 40 files: 26 MiB (27,558,890 bytes).
   const body = Array.from({ length: 40 }, (_, f) => `    /home/runner/app/src/file-${f}.js:\n` + Array.from({ length: 60 }, (_, l) => `      - ${l + 1}\n`).join('')).join('');
   const seed = Array.from({ length: 1000 }, (_, t) => `- id: test-set-0/test-${t}\n  executedLinesByFile:\n${body}`).join('');
   writeFileSync(join(cwd, 'dedupData.yaml'), seed);
-  // Every call into fs the request makes (not those one of them makes), with
-  // its first argument and the size of its second.
-  const r = spawnSync(process.execPath, ['-e', REQUEST(['/home/runner/app/src/index.js']) + `
+  // Every call into fs from the setup on, until the process exits (not those
+  // one of them makes), logged to calls.jsonl as it is made, with its first
+  // argument and the size of its second: to fs's functions, and to those of
+  // fs.promises, which require('fs/promises') is too. They are wrapped before
+  // the middleware loads, so that one it binds then is wrapped too; only the
+  // load is not logged.
+  const r = spawnSync(process.execPath, ['-e', `
     const fs = require('fs');
-    const calls = [];
-    const saved = {};
+    const log = fs.appendFileSync;
     let depth = 0;
-    for (const k of Object.keys(fs)) {
-      if (typeof fs[k] !== 'function' || /^[A-Z]/.test(k)) continue;
-      const f = (saved[k] = fs[k]);
-      fs[k] = function (...a) {
-        if (depth === 0) calls.push([k, a[0], typeof a[1] === 'string' ? Buffer.byteLength(a[1]) : a[1] && a[1].length]);
-        depth++;
-        try { return f.apply(this, a); } finally { depth--; }
-      };
+    for (const [api, o] of [['', fs], ['promises.', fs.promises]]) {
+      for (const k of Object.keys(o)) {
+        if (typeof o[k] !== 'function' || /^[A-Z]/.test(k)) continue;
+        const f = o[k];
+        o[k] = function (...a) {
+          if (depth++ === 0) log('calls.jsonl', JSON.stringify([api + k, a[0], typeof a[1] === 'string' ? Buffer.byteLength(a[1]) : a[1] && a[1].length]) + '\\n');
+          try { return f.apply(this, a); } finally { depth--; }
+        };
+      }
     }
+    depth++;
+    const middleware = require('@keploy/sdk/dist/v2/dedup/middleware');
+    depth--;
+  ` + COVERAGE(['/home/runner/app/src/index.js']) + `
+    const res = new (require('events').EventEmitter)();
+    const h = { 'KEPLOY-TEST-ID': 'test-3', 'KEPLOY-TEST-SET-ID': 'test-set-0' };
+    middleware()({ get: (n) => h[n] }, res, () => {});
     res.emit('finish');
-    Object.assign(fs, saved);
-    process.stdout.write(JSON.stringify(calls));
   `], { cwd, encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
-  assert.deepEqual(JSON.parse(r.stdout), [['appendFileSync', 'dedupData.yaml', Buffer.byteLength(ADDED)]]);
+  const logged = join(cwd, 'calls.jsonl');
+  const calls = existsSync(logged) ? readFileSync(logged, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+  assert.deepEqual(calls, [['existsSync', 'dedupData.yaml', null], ['appendFileSync', 'dedupData.yaml', Buffer.byteLength(ADDED)]]);
   assert.ok(readFileSync(join(cwd, 'dedupData.yaml'), 'utf8') === seed + ADDED, 'the file is the seed, then the new entry');
+});
+
+test('requests that finish in the tick that set the middleware up keep their entries', () => {
+  // No dedupData.yaml yet. The app sets the middleware up and, in that same
+  // tick, 40 requests finish. The tick sleeps 200 ms first, as start-up work
+  // would take, so that what the setup started in the thread pool has run:
+  // 2.0.10's check found the file missing there and, once the tick ended,
+  // wrote it empty, after the 40 had written their entries.
+  const cwd = mkdtempSync(join(app, 'setup-'));
+  const r = spawnSync(process.execPath, ['-e', COVERAGE(['/home/runner/app/src/index.js']) + `
+    const handle = require('@keploy/sdk/dist/v2/dedup/middleware')();
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+    for (let i = 0; i < 40; i++) {
+      const res = new (require('events').EventEmitter)();
+      const h = { 'KEPLOY-TEST-ID': 'test-' + i, 'KEPLOY-TEST-SET-ID': 'test-set-0' };
+      handle({ get: (n) => h[n] }, res, () => {});
+      res.emit('finish');
+    }
+  `], { cwd, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const file = readFileSync(join(cwd, 'dedupData.yaml'), 'utf8');
+  const ids = Array.from({ length: 40 }, (_, i) => `test-set-0/test-${i}`);
+  for (const v of [3, 4]) assert.deepEqual((reader(v).load(file) || []).map((e) => e.id), ids, `js-yaml ${v}`);
+  // The first ran lines 1 and 4; the others, nothing new.
+  assert.equal(file, ids.map((id, i) => `- id: ${id}\n  executedLinesByFile:\n    /home/runner/app/src/index.js:${i ? ' []\n' : '\n      - 1\n      - 4\n'}`).join(''));
+  // With no request, the setup leaves the file there, empty.
+  const idle = mkdtempSync(join(app, 'setup-'));
+  const s = spawnSync(process.execPath, ['-e', "require('@keploy/sdk/dist/v2/dedup/middleware')()"], { cwd: idle, encoding: 'utf8' });
+  assert.equal(s.status, 0, s.stderr);
+  assert.ok(existsSync(join(idle, 'dedupData.yaml')), 'the setup creates the file');
+  assert.equal(readFileSync(join(idle, 'dedupData.yaml'), 'utf8'), '');
+});
+
+test('the setup writes nothing to a dedupData.yaml that exists', () => {
+  // As 2.0.10's: an app whose dedupData.yaml it may not write (here a folder
+  // of that name, which no user may write, root included) starts, and a
+  // request with no test id leaves it alone.
+  const cwd = mkdtempSync(join(app, 'setup-'));
+  mkdirSync(join(cwd, 'dedupData.yaml'));
+  const r = spawnSync(process.execPath, ['-e', `
+    const res = new (require('events').EventEmitter)();
+    require('@keploy/sdk/dist/v2/dedup/middleware')()({ get: () => undefined }, res, () => {});
+    res.emit('finish');
+  `], { cwd, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /No test ID found in the request headers/);
 });
 
 // Names and ids a coverage tool and a request can give, YAML's own words,
 // indicators and escapes among them, and lines.
 const NAMES = ['/home/runner/app/src/index.js', String.raw`C:\Users\dev\app\src\index.js`, '/a b/c.js', '/app/ünïcode/日本.js', '/x/😀.js',
   'a#b', 'a #b', 'a: b', 'a:b', 'a:', 'a ', ' a', ' ', ':', '-a', '- a', '?a', ':a', ',a', '[a]', '{a}', '#a', '&a', '*a', '!a', '|a', '=a', '>a', "'a", '"a', '%a', '@a', '`a',
-  "it's", 'a"b', 'a\\b', 'no', 'No', 'NO', 'yes', 'y', 'n', 'on', 'off', 'OFF', 'true', 'True', 'false', 'null', 'Null', 'NULL', '~', '', '<<', '0o12', '+0o7', '1_000', '+.5', '.5', '08',
+  "it's", 'a"b', 'a\\b', 'no', 'No', 'NO', 'yes', 'y', 'n', 'on', 'off', 'OFF', 'true', 'True', 'false', 'null', 'Null', 'NULL', '~', '', '<<', '0o12', '+0o7', '1_000', '+.5', '._1', '._97', '._e0', '.5', '08',
   '0x1F', '0b101', '1:20', '_:_', '1:20.5', '2026-11-04', '2026-11-04T10:00:00Z', '.inf', '-.inf', '.NaN', '.nan', '1e5', '123', '-1', '...', '---',
   'a\tb', 'a\nb', 'a\rb', '\x00', '\x7f', '\x85', 'a\xa0b', '\u2028', 'a\u2029b', 'a\ufeffb', '\ufeffa', 'a\ud800b', '\ud83d', 'a\x1fb', 'a~b', 'a\xa1b', 'a\ud7ffb', 'a\ue000b',
   'a\ufffdb', 'a\ufffeb', 'a\x80b', 'a\x01b', 'a\t"\\b', '\x1b\x07\x08\x0b\x0c',
@@ -197,9 +258,11 @@ test('each entry is the text js-yaml 4 wrote but where the limits say, and js-ya
     }
     if (text !== theirs) differ.push(label);
   }
-  // The limits: names that start like a number, ids js-yaml 4 writes as a
-  // block, and lines that are not numbers.
+  // The limits: names that start like a number or with `._` (js-yaml 3 reads
+  // js-yaml 4's plain `._1` as 0.1 and `._e0` as NaN), ids js-yaml 4 writes
+  // as a block, and lines that are not numbers.
+  const quoted = ['1_000', '+.5', '._1', '._97', '._e0'].flatMap((s) => [`key "${s}"`, `empty "${s}"`, `id "${s}"`]);
   const x = `id "${'x'.repeat(23)}`;
-  assert.deepEqual(differ, ['key "1_000"', 'empty "1_000"', 'id "1_000"', 'key "+.5"', 'empty "+.5"', 'id "+.5"', 'id "a\\nb"',
+  assert.deepEqual(differ, [...quoted, 'id "a\\nb"',
     x, x, x, `id "${"'".repeat(23)}`, 'id "/p/qqqqqqqqqqqqqqqqqqqq', 'not numbers', 'id of 77']);
 });

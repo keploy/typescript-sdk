@@ -5,8 +5,9 @@
 // Limits, each written another way that every YAML 1.1 and 1.2 reader
 // (js-yaml 3 and 4 among them) reads back as the same value:
 // - a name that starts like a number (a sign, then a digit, or a dot and a
-//   digit), or is ~, null, <<, .inf, .nan or a YAML 1.1 or 1.2 boolean, in
-//   any letter case, is single-quoted where js-yaml 4 may leave it plain;
+//   digit), or with a dot and an underscore (js-yaml 3 reads `._1` as 0.1),
+//   or is ~, null, <<, .inf, .nan or a YAML 1.1 or 1.2 boolean, in any
+//   letter case, is single-quoted where js-yaml 4 may leave it plain;
 // - an id with a line break, which js-yaml 4 writes as a block, is
 //   double-quoted, and one over 76 characters, which it folds, stays on one
 //   line;
@@ -19,8 +20,10 @@ const ESCAPES: { [c: number]: string } = {
 // js-yaml 4 single-quotes these, for YAML 1.1 readers, at any length.
 const BASE60 = /^[-+]?[0-9_]+(?::[0-9_]+)+(?:\.[0-9_]*)?$/;
 // Every text a YAML 1.1 or 1.2 reader takes for a null, boolean, number,
-// timestamp or merge key matches this, in js-yaml 3 and 4 too.
-const NOT_A_STRING = /^(?:~|null|true|false|y|yes|n|no|on|off|<<|[-+]?\.(?:inf|nan))$|^[-+]?\.?[0-9]/i;
+// timestamp or merge key matches this, in js-yaml 3 and 4 too. js-yaml 3's
+// float takes a dot then digits or underscores, so it reads plain `._1` as
+// 0.1 and `._e0` as NaN: a name that starts with `._` is quoted.
+const NOT_A_STRING = /^(?:~|null|true|false|y|yes|n|no|on|off|<<|[-+]?\.(?:inf|nan))$|^\._|^[-+]?\.?[0-9]/i;
 // The characters a plain scalar may not start with: space and YAML's indicators.
 const NOT_FIRST = ' -?:,[]{}#&*!|=>\'"%@`';
 

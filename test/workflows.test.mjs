@@ -37,6 +37,23 @@ function matches(p, path) {
 const ALL_ROWS = { name: 'Rows', run: 'node --test test/*.test.mjs', cwd: undefined };
 const WORKFLOW_ROWS = { name: 'Workflow rows', run: 'npm ci --ignore-scripts\nnode --test test/workflows.test.mjs\n', cwd: '.' };
 
+// The keys a workflow, and a job that packs, checks or publishes, may have:
+// none of them sets the environment of every step (env), or runs the steps
+// somewhere else (container). A NODE_OPTIONS that preloads process.exit(0),
+// on the workflow or on a job, would pass every node in the job, the license
+// check and these rows among them.
+const WORKFLOW_KEYS = ['name', 'on', 'permissions', 'jobs'];
+const JOB_KEYS = ['name', 'if', 'needs', 'runs-on', 'timeout-minutes', 'permissions', 'defaults', 'steps'];
+// In such a job: the actions a step may run, each pinned by commit, and their
+// inputs (an action may set any variable for the steps after it); and the
+// variables a step may set for itself.
+const ACTIONS = ['actions/checkout@11d5960a326750d5838078e36cf38b85af677262', 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020'];
+const ACTION_INPUTS = ['node-version', 'registry-url', 'scope'];
+// The registry and scope setup-node writes into npm's config, where present:
+// the license check installs from that registry.
+const ACTION_VALUES = { 'registry-url': 'https://registry.npmjs.org', scope: '@keploy' };
+const STEP_ENV = ['TARBALL', 'NPM_TOKEN', 'NODE_AUTH_TOKEN'];
+
 const workflows = [
   // [file, tag, folder, publishing job, pull request job, the rows step, the gate's path from the folder]
   ['sdk-publish.yml', 'sdk-v*', undefined, 'publish', 'check', ALL_ROWS, 'scripts/license-gate.mjs'],
@@ -81,20 +98,35 @@ for (const [file, tag, folder, publish, pr, rows, gate] of workflows) {
 
   test(`${file}: nothing skips the license check or the rows, or lets them fail`, () => {
     const wf = load(file);
+    assert.deepEqual(Object.keys(wf).filter((k) => !WORKFLOW_KEYS.includes(k)), [], 'the workflow\'s keys');
+    for (const [name, j] of Object.entries(wf.jobs)) assert.equal(j.env, undefined, `${name}: env`);
     for (const [job, event] of [[publish, 'push'], [pr, 'pull_request']]) {
       const j = wf.jobs[job];
+      assert.deepEqual(Object.keys(j).filter((k) => !JOB_KEYS.includes(k)), [], `${job}: its keys`);
+      assert.equal(j['runs-on'], 'ubuntu-latest', `${job}: runs-on`);
       // The job runs on its event, and on nothing narrower.
       assert.equal(j.if, `github.event_name == '${event}'`, `${job}: if`);
       assert.equal(j['continue-on-error'], undefined, `${job}: continue-on-error`);
-      assert.equal(j.defaults.run['working-directory'], folder, `${job}: its folder`);
+      // Its steps run in bash (-eo pipefail), in its folder, and nothing else.
+      assert.deepEqual(j.defaults, { run: { shell: 'bash', ...(folder ? { 'working-directory': folder } : {}) } }, `${job}: defaults`);
       const s = steps(j);
       for (const x of s) {
         assert.equal(x.if, undefined, `${job}: ${x.name}: if`);
         assert.equal(x.continueOnError, undefined, `${job}: ${x.name}: continue-on-error`);
+        // No step sets a variable or a path for the steps after it.
+        assert.doesNotMatch(x.run, /\bGITHUB_(?:ENV|PATH)\b|::(?:set-env|add-path)\b/i, `${job}: ${x.name}: sets a variable or a path for later steps`);
+        assert.deepEqual(Object.keys(x.env).filter((k) => !STEP_ENV.includes(k)), [], `${job}: ${x.name}: env`);
+      }
+      for (const st of j.steps.filter((st) => st.uses)) {
+        assert.ok(ACTIONS.includes(st.uses), `${job}: ${st.uses}: an action pinned here`);
+        assert.deepEqual(Object.keys(st.with || {}).filter((k) => !ACTION_INPUTS.includes(k)), [], `${job}: ${st.uses}: its inputs`);
+        for (const [k, v] of Object.entries(ACTION_VALUES)) if (st.with && k in st.with) assert.equal(st.with[k], v, `${job}: ${st.uses}: ${k}`);
       }
       const r = s.findIndex((x) => x.name === rows.name);
       assert.ok(r >= 0, `${job}: a ${rows.name} step`);
       assert.deepEqual([s[r].run, s[r].cwd], [rows.run, rows.cwd], `${job}: ${rows.name} runs from the root`);
+      // Nothing else on the rows step: no env, no shell of its own.
+      assert.deepEqual(Object.keys(j.steps[r]).sort(), rows.cwd ? ['name', 'run', 'working-directory'] : ['name', 'run'], `${job}: the ${rows.name} step's keys`);
       assert.ok(r < s.findIndex((x) => x.name === 'Licenses'), `${job}: ${rows.name} before Licenses`);
     }
     // A tag of this package's name starts the publish; any pull request that

@@ -31,7 +31,7 @@
 // Accepting a flagged file with a notice is not enough, so there is no
 // exception list: a finding fails the publish.
 //
-// Limits, until licensegate's npm mode replaces this script:
+// Limits, until a fuller license scanner replaces this script:
 //   - a license that FLAGGED does not name passes when only a file's text
 //     names it (the Artistic License, say); a license field naming it fails.
 //   - the id Unicode-3.0 is matched only in an SPDX-License-Identifier line
