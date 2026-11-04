@@ -195,10 +195,12 @@ test('text read a piece at a time is matched as it would be whole', () => {
   assert.deepEqual(s.end(), []);
   // A long license URL cut across pieces is found whole.
   const page = `choosealicense.com/licenses/${'a'.repeat(64)}`;
-  const u = new Scanner();
-  u.push(`${'x'.repeat(5000)} https://${page}`);
-  u.push(' and more');
-  assert.deepEqual(u.end(), [`a license that is not allowed (${JSON.stringify(page)})`]);
+  for (const after of [0, 50, 63]) {
+    const u = new Scanner();
+    u.push(`${'x'.repeat(5000)} https://${page}${' '.repeat(after)}`);
+    u.push(' and more');
+    assert.deepEqual(u.end(), [`a license that is not allowed (${JSON.stringify(page)})`], `${after}`);
+  }
   // Nor is a word whose start was cut off before the window.
   const t = new Scanner();
   t.push(`${'b'.repeat(1000)}agpl ${'c'.repeat(KEEP - 4)}`);
