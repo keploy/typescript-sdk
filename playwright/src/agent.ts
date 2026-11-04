@@ -31,6 +31,7 @@ export interface Answer {
   instance?: string;
   timeFile?: string;
   variable?: string;
+  seed?: string;
 }
 
 /** An answer this package cannot trust, or the agent's own refusal. */
@@ -135,21 +136,38 @@ export class AgentClient {
     return a;
   }
 
-  /** Asks the agent to open a test. */
-  async begin(test: TestRef): Promise<Answer> {
-    const a = await this.post(PATH_BEGIN, { ...test, canSkip: true });
+  /**
+   * Asks the agent to open a test. random says how the test's browser means
+   * to draw its random numbers, so a finding that the test's calls vary
+   * between runs can say whether seeding them is left to try. seed, sent
+   * when it means to seed them, is one drawn afresh for this begin; the
+   * answer's seed is the one to draw from: in a record the begin's own (or
+   * the first attempt's, for a retry), in a replay the one the test's
+   * recording kept, and none when it kept none. An agent from before either
+   * field ignores it and answers no seed.
+   */
+  async begin(test: TestRef, random?: Random, seed?: string): Promise<Answer> {
+    const a = await this.post(PATH_BEGIN, { ...test, canSkip: true, ...(random ? { random } : {}), ...(seed ? { seed } : {}) });
     if (a.status !== 'ok') {
       throw new KeployError(`keploy: the keploy agent answered the begin of ${test.name} with status ${JSON.stringify(a.status ?? '')}`);
     }
     if (a.action && a.action !== ACTION_SKIP) {
       throw new KeployError(`keploy: the keploy agent answered the begin of ${test.name} with the unknown action ${JSON.stringify(a.action)}`);
     }
+    if (a.seed !== undefined && (typeof a.seed !== 'string' || (a.seed !== '' && !SEED.test(a.seed)))) {
+      throw new KeployError(`keploy: the keploy agent answered the begin of ${test.name} with the seed ${quoted(typeof a.seed === 'string' ? a.seed : String(JSON.stringify(a.seed)))}, ` +
+        'which is no seed keploy keeps (8 to 64 lower-case hex digits)');
+    }
     return a;
   }
 
-  /** Tells the agent the test ended, with its outcome. */
-  async end(test: TestRef, outcome: Outcome): Promise<Answer> {
-    const a = await this.post(PATH_END, { ...test, outcome });
+  /**
+   * Tells the agent the test ended, with its outcome, and, when it is known,
+   * how its browser drew its random numbers (random), which replaces what its
+   * begin meant to do.
+   */
+  async end(test: TestRef, outcome: Outcome, random?: Random): Promise<Answer> {
+    const a = await this.post(PATH_END, { ...test, outcome, ...(random ? { random } : {}) });
     if (a.status !== 'ok') {
       throw new KeployError(`keploy: the keploy agent answered the end of ${test.name} with status ${JSON.stringify(a.status ?? '')}`);
     }
@@ -191,6 +209,20 @@ export interface TestRef {
 }
 
 export type Outcome = 'passed' | 'failed' | 'skipped';
+
+/**
+ * How a test's browser draws its random numbers: RANDOM_SEEDED from the
+ * seed keploy answered its begin with, RANDOM_OWN the browser's own
+ * (KEPLOY_SEED_RANDOM=off, the keploySeedRandom option false, or keploy
+ * answered no seed). Sent with the begin, it is what the test means to do;
+ * with the end, what its pages did.
+ */
+export type Random = typeof RANDOM_SEEDED | typeof RANDOM_OWN;
+export const RANDOM_SEEDED = 'seeded';
+export const RANDOM_OWN = 'own';
+
+/** A seed as keploy keeps and answers one: 8 to 64 lower-case hex digits. */
+export const SEED = /^[0-9a-f]{8,64}$/;
 
 async function readBounded(res: Response): Promise<string> {
   if (!res.body) return '';
