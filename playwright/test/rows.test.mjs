@@ -410,6 +410,8 @@ async function drawsServer() {
   const page = (body) => `<html><head><script>window.__draws = ${DRAWS};</script></head><body>${body}</body></html>`;
   const srv = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x');
+    // /csp is served with a CSP sandbox: an opaque origin, no session storage.
+    if (u.pathname === '/csp') { res.writeHead(200, { 'content-type': 'text/html', 'content-security-policy': 'sandbox allow-scripts' }); res.end(page('csp')); return; }
     res.writeHead(200, { 'content-type': 'text/html' });
     if (u.pathname === '/draws') { res.end(page(`<iframe src="http://localhost:${srv.address().port}/frame"></iframe>`)); return; }
     if (u.pathname === '/frame') { res.end(page('frame')); return; }
@@ -703,18 +705,18 @@ test('seeded: a page\'s first document, before its first goto and as setContent 
 const ENGINES = ['chromium', 'firefox', 'webkit'];
 
 for (const engine of ENGINES) {
-  test(`seeded, in ${engine}: frames of a first document each draw their own numbers, never their parent's, numbered at the path their element asks for, one put where a removed frame was, one in an open shadow root and one drawn from after its removal too; one in a closed shadow root has no place; a first document's popup is placed in Chromium only, else named; the test's own context init script is named as the test's`, async () => {
+  test(`seeded, in ${engine}: frames of a first document each draw their own numbers, never their parent's, numbered at the path their element asks for, one put where a removed frame was, one in an open shadow root and one drawn from after its removal too; one in a closed shadow root has no place; a first document's popup is named in every engine; a top document with no session storage but the page's first draws its own and is named; the test's own context init script is named as the test's`, async () => {
     const j = journal();
     const rec = await fakeAgent(j);
     let kept = {};
     const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
       ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
-    const names = ['frames', 'popupfromblank', 'ownctxinit', 'shadow', 'removed'];
+    const names = ['frames', 'popupfromblank', 'ownctxinit', 'shadow', 'removed', 'nostorage'];
     const unplaced = (r, n) => r.tests[n].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${n}, `)).map((l) => l.replace(/:\d+\//, ':<port>/')).sort();
     const env = (url) => ({ ...keployEnv(url), PW_BROWSER: engine });
     try {
       const r = await drawRun(j, env(rec.url), ['engines.spec.ts'], names);
-      const at = (id, where, seed = r.seeds.frames) => JSON.parse(JSON.stringify(documentAt(initScript(seed), where, null, id).run(BLANK_DRAWS)));
+      const at = (id, where, seed = r.seeds.frames) => JSON.parse(JSON.stringify(documentAt(initScript(seed), where, new Map(), id).run(BLANK_DRAWS)));
       // The first document, its srcdoc frames, a frame inside one, its
       // about:blank frame, and the frame put in after that one's removal:
       // each its own numbers, a frame in its parent document's place at
@@ -737,18 +739,33 @@ for (const engine of ENGINES) {
       const docs = [f.top, f.n.draws, f.nn.draws, f.s.draws, f.b.draws, f.c].map((d) => JSON.stringify(d));
       assert.equal(new Set(docs).size, 6, docs.join('\n'));
       assert.deepEqual(unplaced(r, 'frames'), []);
-      // A popup the first document opens with window.open('about:blank'):
-      // Chromium places it; Firefox and WebKit begin its document before
-      // window.open returns, so it has no place there, and is named.
+      // A popup the first document opens with window.open('about:blank')
+      // draws its own in every engine, and is named: Chromium places it,
+      // but it has no session storage (its opener's origin is opaque);
+      // Firefox and WebKit begin its document before window.open returns,
+      // so it has no place there.
       const pop = r.drew.popupfromblank;
       assert.equal(pop.url, 'about:blank');
-      const placed = engine === 'chromium';
-      if (placed) assert.deepEqual(pop.draws, at(`${r.seeds.popupfromblank}\nt0\nblank\n0\nw0`, 'blank', r.seeds.popupfromblank));
-      assert.deepEqual(unplaced(r, 'popupfromblank'), placed ? [] : [unplacedLine('popupfromblank', 'about:blank', 'popup')]);
+      assert.deepEqual(unplaced(r, 'popupfromblank'), [unplacedLine('popupfromblank', 'about:blank', engine === 'chromium' ? 'nostorage' : 'popup')]);
+      // Top documents with no session storage: the page's first draws in
+      // its place; about:blank loaded after it (twice), a srcdoc frame of
+      // its origin in the first of those (its own reason, at its address), a page served with a CSP sandbox
+      // (twice) and a data: URL (twice) each draw their own, named once for
+      // each address, with why.
+      const ns = r.drew.nostorage;
+      if (model) assert.deepEqual(ns.first, at('t0', 'blank', r.seeds.nostorage));
+      assert.ok(ns.csp.every((d) => d && typeof d.uuid === 'string'), JSON.stringify(ns.csp));
+      const nsDocs = [ns.first, ...ns.blank, ns.inner, ...ns.csp, ...ns.data].map((d) => JSON.stringify(d));
+      assert.equal(new Set(nsDocs).size, 8, nsDocs.join('\n'));
+      assert.deepEqual(unplaced(r, 'nostorage'), ['about:blank', 'about:srcdoc', 'data:text/html,d', 'http://127.0.0.1:<port>/csp'].map((a) => unplacedLine('nostorage', a, 'nostorage')).sort());
       // The test's own context init script draws first in each document of
       // its page, its first about:blank too: named as the test's, with the
       // reason.
-      assert.deepEqual(unplaced(r, 'ownctxinit'), ['about:blank', 'http://127.0.0.1:<port>/draws', 'http://localhost:<port>/frame'].map((a) => unplacedLine('ownctxinit', a, 'own')).sort());
+      // A popup that first document opens is at about:blank too, and has no
+      // place since its opener has none: named again there, as a page the
+      // app opened (a line for each address and reason).
+      assert.deepEqual(unplaced(r, 'ownctxinit'), [...['about:blank', 'http://127.0.0.1:<port>/draws', 'http://localhost:<port>/frame'].map((a) => unplacedLine('ownctxinit', a, 'own')),
+        unplacedLine('ownctxinit', 'about:blank', 'popup')].sort());
       // A frame in an open shadow root, which no engine lists among its
       // parent's frames, is placed by its element; one in a closed shadow
       // root, which its parent document cannot reach, has no place, and is
@@ -771,8 +788,10 @@ for (const engine of ENGINES) {
       kept = r.seeds;
       const p = await drawRun(j, env(rep.url), ['engines.spec.ts'], names);
       assert.deepEqual(p.drew.frames, f);
-      if (placed) assert.deepEqual(p.drew.popupfromblank, pop);
-      else assert.notDeepEqual(p.drew.popupfromblank.draws, pop.draws);
+      assert.notDeepEqual(p.drew.popupfromblank.draws, pop.draws);
+      assert.deepEqual(p.drew.nostorage.first, ns.first);
+      assert.notDeepEqual(p.drew.nostorage.inner, ns.inner);
+      for (const k of ['blank', 'csp', 'data']) for (const i of [0, 1]) assert.notDeepEqual(p.drew.nostorage[k][i], ns[k][i], `${k}${i}`);
       assert.notEqual(p.drew.ownctxinit.early, r.drew.ownctxinit.early);
       assert.deepEqual({ ...p.drew.shadow, closed: null }, { ...sh, closed: null });
       assert.notDeepEqual(p.drew.shadow.closed, sh.closed);

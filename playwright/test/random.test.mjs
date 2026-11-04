@@ -2,7 +2,7 @@
 // init script run in a Node vm context in place of a page. No browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DOC_KEY, ENV_SEED_RANDOM, LOADS_KEY, PAGE_KEY, SEEDED_LINE, freshSeed, initScript, pageAddress, pageScript, placePages, seedingFromEnv, unplacedLine, unseededLine } from '../dist/random.js';
+import { DOC_KEY, ENV_SEED_RANDOM, LOADS_KEY, PAGE_KEY, SEEDED_LINE, firstScript, freshSeed, initScript, pageAddress, pageScript, placePages, seedingFromEnv, unplacedLine, unseededLine } from '../dist/random.js';
 import { SEED } from '../dist/agent.js';
 import { OTHER, documentAt } from './draws.mjs';
 
@@ -36,7 +36,7 @@ test('the lines say what is seeded, what is not, where the seed lives, and how t
     'or the test was pulled from a Keploy branch, which keeps no seed, or this keploy predates seeds.');
   assert.equal(unplacedLine('g › t', 'http://h/p'), 'keploy: in g › t, the document at http://h/p drew the browser\'s own random numbers, so its draws may differ at replay: ' +
     'it is in a page the app opened that keploy cannot place in the test\'s order (a popup opened with noopener, as a link with target=_blank opens one, ' +
-    'or at another origin than its opener\'s page, or after that page moved on; or a frame of another origin in one).');
+    'or at another origin than its opener\'s page, or after that page moved on, or by a document keploy could not place; or a frame of another origin in one).');
   assert.equal(unplacedLine('g › t', 'http://h/p', 'popup'), unplacedLine('g › t', 'http://h/p'));
   assert.equal(unplacedLine('g › t', 'about:blank', 'own'), 'keploy: in g › t, the document at about:blank drew the browser\'s own random numbers, so its draws may differ at replay: ' +
     'it is in a page the test opened, and it drew before keploy named that page: a script the test added with context.addInitScript ' +
@@ -54,6 +54,11 @@ test('the lines say what is seeded, what is not, where the seed lives, and how t
   assert.equal(unplacedLine('g › t', 'about:blank', 'frame'), 'keploy: in g › t, the document at about:blank drew the browser\'s own random numbers, so its draws may differ at replay: ' +
     'it is a frame keploy cannot place among its parent\'s frames (one in a closed shadow root or in an object or embed element, ' +
     'which its parent document cannot list, or one whose document began after its removal), or a frame inside one.');
+  assert.equal(unplacedLine('g › t', 'about:blank', 'nostorage', 3), 'keploy: in g › t, the document at about:blank drew the browser\'s own random numbers, so its draws may differ at replay: ' +
+    'it is a top document with no session storage that keploy can keep its count in (a document of an opaque origin has none: an about:blank loaded after ' +
+    'its page\'s first document, a data: URL, a page served with a CSP sandbox without allow-same-origin, or a popup that a page\'s first document opened; ' +
+    'or the app has filled it), or a frame of its origin inside one: keploy cannot count the documents loaded at its path in the tab, so seeded, ' +
+    'the next one there (a reload, or another visit to that path) could draw the same numbers.');
 });
 
 test('an address a page sends is shown on one line, each control character a ?, cut to 512 characters', () => {
@@ -164,9 +169,71 @@ test('a document loaded again in the same tab draws new numbers, the same ones e
   assert.deepEqual(JSON.parse(tab.get(LOADS_KEY)), { '/p': 2 });
 });
 
-test('without session storage, or with an unreadable count, a document still draws seeded numbers', () => {
+test('a top document with no session storage draws the browser\'s own numbers and says why, once, but for a page\'s first document, which its mark seeds; with an unreadable count, a document still draws seeded numbers', () => {
   const s = initScript(S1);
-  assert.deepEqual(documentAt(s, '/p', null).draws(), documentAt(s, '/p').draws());
+  const r = initScript(S1, 'rep', 'MK');
+  // A page's document, then a popup its opener places: never seeded with no
+  // session storage, each told once, with why; seeded with it.
+  const opener = { [DOC_KEY]: { opened: () => ({ indexOf: () => 0 }), key: () => 'K\n' } };
+  for (const [page, o, as] of [['t0', undefined, 't0'], [null, opener, 'K\nw0']]) {
+    const told = [];
+    const d = documentAt(r, '/p', null, page, { report: 'rep', told, opener: o });
+    const a = d.draws();
+    d.draws();
+    assert.deepEqual(told, [['http://h/p', 'nostorage']], as);
+    assert.notDeepEqual(a, documentAt(s, '/p', new Map(), as).draws(), as);
+    assert.notDeepEqual(documentAt(s, '/p', null, page, { opener: o }).draws(), documentAt(s, '/p', null, page, { opener: o }).draws(), as);
+    const kept = [];
+    assert.deepEqual(documentAt(r, '/p', new Map(), page, { report: 'rep', told: kept, opener: o }).draws(), documentAt(s, '/p', new Map(), as).draws(), as);
+    assert.deepEqual(kept, [], as);
+  }
+  // Session storage the app has filled (setItem throws): its loads cannot be
+  // counted, so the same.
+  const full = new (class extends Map { set() { throw new Error('QuotaExceededError'); } })();
+  const fullTold = [];
+  assert.notDeepEqual(documentAt(r, '/p', full, 't0', { report: 'rep', told: fullTold }).draws(), documentAt(s, '/p', new Map(), 't0').draws());
+  assert.deepEqual(fullTold, [['http://h/p', 'nostorage']]);
+  // A page's first document, marked by firstScript as newPage returns, is
+  // seeded with no count, the same each run; a document that takes its
+  // window over after the mark is not, and says why.
+  const first = () => {
+    const told = [];
+    const d = documentAt(r, 'blank', null, null, { report: 'rep', told, origin: 'null', href: 'about:blank', doc: { querySelectorAll: () => [] } });
+    d.run(firstScript('t0', 'MK'));
+    return { d, told };
+  };
+  const f = first();
+  // The mark is the seeding's state for the document: the window holds no
+  // property of it beside the page's name and the document's place.
+  assert.deepEqual(JSON.parse(f.d.run(`JSON.stringify(Object.getOwnPropertyNames(globalThis).filter((k) => k.startsWith('__keploy')).sort())`)), [DOC_KEY, PAGE_KEY].sort());
+  const a = f.d.draws();
+  assert.deepEqual(a, documentAt(s, 'blank', new Map(), 't0').draws());
+  assert.deepEqual(first().d.draws(), a);
+  assert.deepEqual(f.told, []);
+  const later = first();
+  later.d.ctx.document = { querySelectorAll: () => [] };
+  assert.notDeepEqual(later.d.draws(), a);
+  assert.deepEqual(later.told, [['about:blank', 'nostorage']]);
+  // The mark is for the document it runs in: one that took the window over
+  // before the mark ran in it is the one marked.
+  const over = documentAt(r, 'blank', null, null, { origin: 'null', href: 'about:blank', doc: { querySelectorAll: () => [] } });
+  over.ctx.document = { querySelectorAll: () => [] };
+  over.run(firstScript('t0', 'MK'));
+  assert.deepEqual(over.draws(), a);
+  // A page's own script that marks its document with another value, or
+  // with none, does not seed it; nor does the right one in a script given
+  // no mark.
+  for (const [script, m] of [[r, 'other'], [r, undefined], [r, ''], [initScript(S1, 'rep'), '']]) {
+    const told = [];
+    const d = documentAt(script, 'blank', null, null, { report: 'rep', told, origin: 'null', href: 'about:blank', doc: { querySelectorAll: () => [] } });
+    d.run(pageScript('t0') + `globalThis[${JSON.stringify(DOC_KEY)}].first(${m === undefined ? '' : JSON.stringify(m)});`);
+    assert.notDeepEqual(d.draws(), a, String(m));
+    assert.deepEqual(told, [['about:blank', 'nostorage']], String(m));
+  }
+  // The page's name alone, with no mark: not its first document.
+  const named = [];
+  assert.notDeepEqual(documentAt(r, 'blank', null, 't0', { report: 'rep', told: named, origin: 'null', href: 'about:blank', doc: { querySelectorAll: () => [] } }).draws(), a);
+  assert.deepEqual(named, [['about:blank', 'nostorage']]);
   for (const junk of ['not json', '[1,2]', 'null', '{"/p":"x"}']) {
     assert.deepEqual(documentAt(s, '/p', new Map([[LOADS_KEY, junk]])).draws(), documentAt(s, '/p').draws(), junk);
   }
@@ -226,7 +293,7 @@ test('a page the test asked for is the test\'s own when its first document tells
     const scripts = [];
     return { scripts, addInitScript: async (s) => { scripts.push(s.content); }, evaluate: async (s) => { scripts.push(s); } };
   };
-  const placing = placePages(context);
+  const placing = placePages(context, 'MK');
   const first = fakePage(), second = fakePage(), popup = fakePage();
   const a = context.newPage(), b = context.newPage();
   // Both first documents tell before either newPage has come.
@@ -237,8 +304,11 @@ test('a page the test asked for is the test\'s own when its first document tells
   assert.equal(await a, first);
   assert.equal(await b, second);
   assert.deepEqual([await firstOwn, await secondOwn, await popupOwn], [true, true, false]);
-  assert.deepEqual(first.scripts, [pageScript('t0'), pageScript('t0')]);
-  assert.deepEqual(second.scripts, [pageScript('t1'), pageScript('t1')]);
+  // Its later documents' script, then its first document's, which marks it
+  // with the context's mark.
+  assert.deepEqual(first.scripts, [pageScript('t0'), firstScript('t0', 'MK')]);
+  assert.deepEqual(second.scripts, [pageScript('t1'), firstScript('t1', 'MK')]);
+  assert.ok(firstScript('t1', 'MK').startsWith(pageScript('t1')) && firstScript('t1', 'MK').includes(`${JSON.stringify(DOC_KEY)}].first("MK")`));
   // After they came, and with none coming.
   assert.deepEqual([await placing.opened(first), await placing.opened(second), await placing.opened(popup), await placing.opened(null)], [true, true, false, false]);
   placing.restore();
@@ -246,7 +316,7 @@ test('a page the test asked for is the test\'s own when its first document tells
   // A context whose newPage is its prototype's gets the prototype's back.
   const proto = { newPage: original };
   const inherited = Object.create(proto);
-  placePages(inherited).restore();
+  placePages(inherited, 'MK').restore();
   assert.equal(Object.prototype.hasOwnProperty.call(inherited, 'newPage'), false);
   assert.equal(inherited.newPage, original);
 });
@@ -541,7 +611,7 @@ test('a frame of its parent\'s origin draws in its parent document\'s key and it
   }
   // A frame placed in a parent with no place: no place, its parent's
   // reason.
-  for (const why of ['', 'frame', 'uncounted']) {
+  for (const why of ['', 'frame', 'uncounted', 'nostorage']) {
     const told = [];
     documentAt(initScript(S1, 'rep'), '/f', new Map(), 't0', { parent: { [DOC_KEY]: { enter: () => ['f/f\n0', 0], key: () => null, why: () => why, others: () => 3 } }, report: 'rep', told }).draws();
     assert.deepEqual(told, [why === 'uncounted' ? [at, why, 3] : why ? [at, why] : at], why);

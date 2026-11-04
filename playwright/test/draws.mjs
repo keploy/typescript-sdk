@@ -29,10 +29,11 @@ export const BLANK_DRAWS = '({ random: [Math.random(), Math.random()], bytes: Ar
  * how many frames a parent of another origin says it holds (its length,
  * which another origin may read); undefined: reading it throws too. element
  * is the window's frameElement, read through a getter. doc is its document
- * (with URL beside it), for a document whose frames the row makes.
+ * (with URL beside it), for a document whose frames the row makes. opener
+ * is the window's opener (none when undefined).
  */
 export const OTHER = Symbol('a parent of another origin');
-export function documentAt(script, path = '/p', storage = new Map(), page = 't0', { report = '', told = [], origin = 'http://h', href = undefined, parent = undefined, doc = undefined, frames = undefined, element = undefined } = {}) {
+export function documentAt(script, path = '/p', storage = new Map(), page = 't0', { report = '', told = [], origin = 'http://h', href = undefined, parent = undefined, doc = undefined, frames = undefined, element = undefined, opener = undefined } = {}) {
   // As the browser's: a this that is no Crypto is refused.
   class Crypto {
     getRandomValues(a) { if (!(this instanceof Crypto)) throw new TypeError('Illegal invocation'); return webcrypto.getRandomValues(a); }
@@ -47,6 +48,7 @@ export function documentAt(script, path = '/p', storage = new Map(), page = 't0'
   if (report) ctx[report] = (at, why, others) => { told.push(why === 'uncounted' ? [at, why, others] : why ? [at, why] : at); return Promise.resolve(); };
   if (element !== undefined) Object.defineProperty(ctx, 'frameElement', { get() { return element; }, configurable: true, enumerable: true });
   if (doc !== undefined) { ctx.document = doc; ctx.URL = URL; }
+  if (opener !== undefined) ctx.opener = opener;
   vm.createContext(ctx);
   // A top window: its own parent and top.
   vm.runInContext('globalThis.parent = globalThis; globalThis.top = globalThis;', ctx);

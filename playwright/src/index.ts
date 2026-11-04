@@ -157,21 +157,27 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
     let restore = (): void => {};
     if (s.seed !== '') {
       // A document the seeding cannot place draws the browser's own numbers
-      // and says so here, once for each address in the test.
+      // and says so here, once for each address and reason in the test.
       const report = `__keploy_random_unplaced_${++reports}`;
       const told = new Set<string>();
       let opened: (page: Page | null | undefined) => Promise<boolean> = async () => false;
       await context.exposeBinding(report, async (source, at: unknown, why: unknown, others: unknown) => {
         const a = pageAddress(at);
-        if (told.has(a)) return;
-        told.add(a);
-        const w: Unplaced = why === 'frame' || why === 'uncounted' ? why : (await opened(source.page)) ? 'own' : 'popup';
+        const w: Unplaced = why === 'frame' || why === 'uncounted' || why === 'nostorage' ? why : (await opened(source.page)) ? 'own' : 'popup';
+        // Once for each address and reason: two documents at one address
+        // (about:blank) may have no place for two reasons.
+        const k = `${w}\n${a}`;
+        if (told.has(k)) return;
+        told.add(k);
         process.stdout.write(`${unplacedLine(name, a, w, Number(others))}\n`);
       });
       // Before the test's first page: an init script runs in every frame's
       // document before its own scripts.
-      await context.addInitScript({ content: initScript(s.seed, report) });
-      const placing = placePages(context);
+      // The value by which the page fixture's script marks a page's first
+      // document; the page's own scripts do not know it.
+      const mark = freshSeed();
+      await context.addInitScript({ content: initScript(s.seed, report, mark) });
+      const placing = placePages(context, mark);
       restore = placing.restore;
       opened = placing.opened;
       if (!saidSeeded) {

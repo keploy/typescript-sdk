@@ -8,8 +8,9 @@ import { test } from '../../dist';
 // removing it; a popup the first document opens with
 // window.open('about:blank'); the test's own context init script, which
 // draws in each document before keploy names the page; a frame in an open
-// shadow root and one in a closed one; and a frame's Math.random drawn from
-// once the frame is removed. Each test keeps what its pages drew.
+// shadow root and one in a closed one; a frame's Math.random drawn from
+// once the frame is removed; and top documents with no session storage.
+// Each test keeps what its pages drew.
 const base = process.env.DRAWS_BASE ?? '';
 const keep = (name: string, v: unknown): void => fs.writeFileSync(`${process.env.MARKER_DIR}/${name}.json`, JSON.stringify(v));
 // test/draws.mjs's BLANK_DRAWS: about:blank is no secure context, so it has
@@ -48,6 +49,10 @@ test('ownctxinit', async ({ context }) => {
   await context.addInitScript('window.__early = Math.random();');
   const p = await context.newPage();
   const early = await p.evaluate(() => (window as unknown as { __early: number }).__early);
+  // A popup its first document opens: at about:blank too, with another
+  // reason (its opener has no place).
+  const [q] = await Promise.all([context.waitForEvent('page'), p.evaluate(() => { window.open('about:blank'); })]);
+  await q.waitForLoadState('load');
   await p.goto(`${base}/draws`);
   keep('ownctxinit', { early, url: p.url() });
 });
@@ -66,6 +71,32 @@ test('shadow', async ({ page }) => {
   const f = frame(page, 'w');
   const index = await f.evaluate(() => Array.from({ length: parent.length }, (_, j) => parent[j]).indexOf(window));
   keep('shadow', { index, open: await f.evaluate(BLANK_DRAWS), closed: await frame(page, 'v').evaluate(BLANK_DRAWS) });
+});
+
+test('nostorage', async ({ page }) => {
+  // The page's first document draws; then, after a page of its origin,
+  // about:blank loaded twice, a srcdoc frame of its origin in the first, a page
+  // served with a CSP sandbox (/csp) loaded twice, and a data: URL loaded
+  // twice: none has session storage.
+  const drew: Record<string, unknown> = { first: await page.evaluate(BLANK_DRAWS), blank: [], csp: [], data: [] };
+  await page.goto(`${base}/fa`);
+  for (let i = 0; i < 2; i++) {
+    await page.goto('about:blank');
+    (drew.blank as unknown[]).push(await page.evaluate(BLANK_DRAWS));
+    if (i === 0) {
+      await page.evaluate(() => new Promise((done) => { const f = document.createElement('iframe'); f.name = 'in'; f.srcdoc = '<p>in</p>'; f.onload = done; document.body.appendChild(f); }));
+      drew.inner = await frame(page, 'in').evaluate(BLANK_DRAWS);
+    }
+  }
+  for (let i = 0; i < 2; i++) {
+    await page.goto(`${base}/csp`);
+    (drew.csp as unknown[]).push(await page.evaluate(() => (window as unknown as { __draws: unknown }).__draws));
+  }
+  for (let i = 0; i < 2; i++) {
+    await page.goto('data:text/html,d');
+    (drew.data as unknown[]).push(await page.evaluate(BLANK_DRAWS));
+  }
+  keep('nostorage', drew);
 });
 
 test('removed', async ({ page }) => {

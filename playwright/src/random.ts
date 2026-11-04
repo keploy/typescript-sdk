@@ -67,9 +67,11 @@ export function pageAddress(at: unknown): string {
  * it cannot place among its parent's frames (initScript), 'popup' for one
  * in a page the app opened, 'uncounted' for a frame under a parent of
  * another origin that has no session storage to count its documents in, or
- * a frame inside one.
+ * a frame inside one, 'nostorage' for a top document with no session
+ * storage to count its documents in (other than a page's first document),
+ * or a frame of its origin inside one.
  */
-export type Unplaced = 'own' | 'frame' | 'popup' | 'uncounted';
+export type Unplaced = 'own' | 'frame' | 'popup' | 'uncounted' | 'nostorage';
 
 const UNPLACED: Record<Exclude<Unplaced, 'uncounted'>, string> = {
   own: 'it is in a page the test opened, and it drew before keploy named that page: a script the test added with context.addInitScript ' +
@@ -77,13 +79,17 @@ const UNPLACED: Record<Exclude<Unplaced, 'uncounted'>, string> = {
   frame: 'it is a frame keploy cannot place among its parent\'s frames (one in a closed shadow root or in an object or embed element, ' +
     'which its parent document cannot list, or one whose document began after its removal), or a frame inside one.',
   popup: 'it is in a page the app opened that keploy cannot place in the test\'s order (a popup opened with noopener, as a link with target=_blank opens one, ' +
-    'or at another origin than its opener\'s page, or after that page moved on; or a frame of another origin in one).',
+    'or at another origin than its opener\'s page, or after that page moved on, or by a document keploy could not place; or a frame of another origin in one).',
+  nostorage: 'it is a top document with no session storage that keploy can keep its count in (a document of an opaque origin has none: an about:blank loaded after ' +
+    'its page\'s first document, a data: URL, a page served with a CSP sandbox without allow-same-origin, or a popup that a page\'s first document opened; ' +
+    'or the app has filled it), or a frame of its origin inside one: keploy cannot count the documents loaded at its path in the tab, so seeded, ' +
+    'the next one there (a reload, or another visit to that path) could draw the same numbers.',
 };
 
 /**
- * The line a test shows, once for each address, when a document of its
- * seeded context drew the browser's own random numbers because the seeding
- * could not place it among the test's pages (initScript); others: for
+ * The line a test shows, once for each address and reason, when a document
+ * of its seeded context drew the browser's own random numbers because the
+ * seeding could not place it among the test's pages (initScript); others: for
  * 'uncounted', how many other frames are beside the frame with no session
  * storage (under its parent): the document's own frame, or the one it is in.
  */
@@ -130,15 +136,31 @@ export function pageScript(id: string): string {
 }
 
 /**
+ * pageScript for the page's first document (its about:blank, which
+ * setContent writes into), run in it as newPage returns: it also tells the
+ * seeding in that document (initScript) that the document is the page's
+ * first, with mark, the value the context's init script was given, which
+ * the page's own scripts do not know. No engine gives that document session
+ * storage, and it is the one document of its kind in its tab, so it is
+ * seeded with no count; any other top document with no session storage is
+ * not.
+ */
+export function firstScript(id: string, mark: string): string {
+  return `${pageScript(id)}try { globalThis[${JSON.stringify(DOC_KEY)}].first(${JSON.stringify(mark)}); } catch (e) {}\n`;
+}
+
+/**
  * Names each page the test opens in context (context.newPage(), the page
  * fixture's among them) by its place in the order the test opened them, in
  * every document of the page, its first about:blank included, before
  * newPage returns: two tabs of a test draw their own numbers, the same ones
  * at replay. A popup is placed by its opener's document in the page itself
- * (initScript). Returns what undoes it, and whether a page is one the test
- * opened, once every newPage the test has asked for has come.
+ * (initScript). mark: the value the context's init script was given, by
+ * which it knows a page's first document (firstScript). Returns what undoes
+ * it, and whether a page is one the test opened, once every newPage the
+ * test has asked for has come.
  */
-export function placePages(context: BrowserContext): { restore: () => void; opened: (page: Page | null | undefined) => Promise<boolean> } {
+export function placePages(context: BrowserContext, mark: string): { restore: () => void; opened: (page: Page | null | undefined) => Promise<boolean> } {
   const had = Object.prototype.hasOwnProperty.call(context, 'newPage');
   const newPage = context.newPage;
   let made = 0;
@@ -161,7 +183,7 @@ export function placePages(context: BrowserContext): { restore: () => void; open
     // The documents the page loads, and the one it has: an init script
     // does not run in a document that already exists.
     await p.addInitScript({ content: pageScript(id) });
-    await p.evaluate(pageScript(id));
+    await p.evaluate(firstScript(id, mark));
     return p;
   };
   return {
@@ -188,7 +210,12 @@ export function placePages(context: BrowserContext): { restore: () => void; open
  * browser-made tab ID or idempotency key reaches a real server in a record),
  * and is the same at replay:
  *   - a page the test opened is named by pageScript: its place in the order
- *     the test opened its pages;
+ *     the test opened its pages. A top document with no session storage to
+ *     count its documents in (an opaque origin) is never seeded, but for
+ *     the page's first document, which firstScript marks: it draws the
+ *     browser's own numbers and is named, since seeded, the next document
+ *     at its path in the tab (a reload, another visit) could draw its
+ *     numbers;
  *   - a popup is the window its opener's document opened with window.open,
  *     in the order that document opened them, read when the popup's
  *     document begins (or, for a document that took over its window's
@@ -217,18 +244,23 @@ export function placePages(context: BrowserContext): { restore: () => void; open
  * report, the name of a function the fixture exposed ('' for none), at its
  * first draw, with its address, why ('frame' for a frame its parent
  * cannot place, 'uncounted' for a frame under a parent of another origin
- * with no session storage, or one in such a frame, else '') and, for
- * 'uncounted', how many other frames are beside that frame.
+ * with no session storage, or one in such a frame, 'nostorage' for a top
+ * document with no session storage, or a frame of its origin in one, else
+ * '') and, for 'uncounted', how many other frames are beside that frame.
  *
  * The path alone names the document in its frame: a replay may serve the
  * app at another host or port than its record did, and a query often
  * carries a time. A stream for each function keeps one's draws from
  * shifting another's: a timer's Math.random does not move the next
  * crypto.randomUUID.
+ *
+ * mark: the value by which firstScript marks a page's first document ('' for
+ * none, so no document is marked).
  */
-export function initScript(seed: string, report = ''): string {
+export function initScript(seed: string, report = '', mark = ''): string {
   return `(() => {
   const seed = ${JSON.stringify(seed)};
+  const mark = ${JSON.stringify(mark)};
   const g = globalThis;
   const imul = Math.imul;
   // cyrb128: a string's 128-bit hash, a stream's four words.
@@ -439,8 +471,9 @@ export function initScript(seed: string, report = ''): string {
         counted = true;
       } catch (e) {
         // No session storage here (a sandboxed frame, an opaque origin): every
-        // document of this path in the tab would draw the same numbers, so a
-        // frame under a parent of another origin is not seeded (pageOf).
+        // document of this path in the tab would draw the same numbers, so
+        // neither a frame under a parent of another origin nor a top
+        // document (but a page's first) is seeded (pageOf).
       }
     }
     // A top document's opener, read as the document begins: an opener may
@@ -458,7 +491,7 @@ export function initScript(seed: string, report = ''): string {
       // An opener of another origin.
       given = null;
     }
-    const s = { doc, place, loads, counted, par, kind, up, frame, given, page: undefined, uncounted: false, others: 0, opened: [], els: new WM(), held: 0, bound: new WM(), mo: null, numbers: new Mp(), counts: new Mp(), streams: null };
+    const s = { doc, place, loads, counted, par, kind, up, frame, given, page: undefined, first: false, uncounted: false, others: 0, opened: [], els: new WM(), held: 0, bound: new WM(), mo: null, numbers: new Mp(), counts: new Mp(), streams: null };
     watch(s);
     return s;
   };
@@ -512,6 +545,12 @@ export function initScript(seed: string, report = ''): string {
       if (s.kind === 'top') {
         p = named();
         if (p === null) p = s.given;
+        // A top document whose loads session storage did not count (an
+        // opaque origin) is not seeded: nothing tells it apart from the next
+        // document at its path in the tab (a reload, another visit, a popup
+        // opened again), and seeded they would draw the same numbers. A
+        // page's first document is the one of its kind in its tab.
+        if (p !== null && !s.counted && !s.first) { s.uncounted = true; p = null; }
       } else if (s.kind === 'other') {
         const t = named();
         if (t !== null && !s.counted) { s.uncounted = true; s.others = othersOf(s); }
@@ -526,10 +565,13 @@ export function initScript(seed: string, report = ''): string {
   };
   // Why a document with no page has none: 'frame' for a frame its parent
   // cannot place, 'uncounted' for a frame under a parent of another origin
-  // with no session storage, or one in such a frame, else ''. othersFor:
-  // how many other frames are beside that frame, under its parent.
+  // with no session storage, or one in such a frame, 'nostorage' for a top
+  // document with no session storage, or a frame of its origin in one, else
+  // ''. othersFor: how many other frames are beside that frame, under its
+  // parent.
   const whyOf = () => {
     const s = now();
+    if (s.kind === 'top') return s.uncounted ? 'nostorage' : '';
     if (s.kind === 'other') return s.uncounted ? 'uncounted' : '';
     if (s.kind !== 'frame') return '';
     return s.frame === null ? 'frame' : s.up.why();
@@ -542,7 +584,11 @@ export function initScript(seed: string, report = ''): string {
   const key = () => { const p = pageOf(); const s = now(); return p === null ? null : seed + '\\n' + p + '\\n' + s.place + '\\n' + s.loads + '\\n'; };
   let mine;
   try {
-    const d = Object.freeze({ key, why: whyOf, others: othersFor, enter, opened: () => now().opened });
+    // first: firstScript, in a page's first document, marks it as such
+    // (its state, so a later document that takes over the window is not),
+    // with the mark the fixture gave this script, which a page's own script
+    // does not know.
+    const d = Object.freeze({ key, why: whyOf, others: othersFor, enter, opened: () => now().opened, first: (m) => { if (mark !== '' && m === mark) now().first = true; } });
     Object.defineProperty(g, ${JSON.stringify(DOC_KEY)}, { value: d, enumerable: false, writable: false, configurable: true });
     mine = d;
   } catch (e) {
@@ -567,9 +613,9 @@ export function initScript(seed: string, report = ''): string {
       };
       if (s.streams === false && tell !== null) {
         // Its address: origin and path, or for an opaque origin (about:blank,
-        // about:srcdoc, a sandboxed frame) its URL, with no query or
-        // fragment. A window's first document has no URL yet while Firefox
-        // runs its init scripts: it is about:blank. Why: whyOf.
+        // about:srcdoc, a data: URL, a sandboxed frame or page) its URL, with
+        // no query or fragment. A window's first document has no URL yet
+        // while Firefox runs its init scripts: it is about:blank. Why: whyOf.
         let at = '';
         try {
           const o = location.origin;
