@@ -13,8 +13,10 @@ name: "@keploy/sdk publish"
 # The package is packed once, and that tarball is checked and then published,
 # so what ships is what was checked. The license check
 # (scripts/license-gate.mjs) installs the tarball as a user's `npm install`
-# does and refuses it when any installed package's license field, or any
-# installed file, names a license outside its allow-list.
+# does, for each platform users run, and refuses it when any installed
+# package's license field, or any installed file, names a license outside
+# its allow-list. test/workflows.test.mjs holds every publish workflow to
+# this: the tarball the Licenses step checked is the one published.
 #
 # Push sdk-vX.Y.Z as a plain git tag, never as a GitHub release: a published
 # GitHub release starts any workflow of this repository that runs on
@@ -43,6 +45,7 @@ jobs:
     name: publish to npm
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       id-token: write # npm --provenance signs the package with this run's identity
@@ -109,6 +112,7 @@ jobs:
     name: pack and license check
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash # -eo pipefail: a failed command before a pipe fails the step

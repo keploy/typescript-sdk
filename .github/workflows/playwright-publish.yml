@@ -15,14 +15,23 @@ name: "@keploy/playwright publish"
 # try to publish that package under this tag's name. playwright/README.md,
 # "Releasing", says the same.
 #
-# On a pull request the same package is published as a dry run, with no
-# token, so a package that would ship without its build shows before a tag.
+# The package is built and packed once, and that tarball is checked and then
+# published, so what ships is what was checked. The license check
+# (scripts/license-gate.mjs, as in sdk-publish.yml) installs the tarball as a
+# user's `npm install` does and refuses it when anything it installs names a
+# license outside its allow-list. test/workflows.test.mjs holds this
+# workflow to that.
+#
+# On a pull request the same tarball is packed, checked and published as a
+# dry run, with no token, so a package that would ship without its build, or
+# with a license it may not carry, shows before a tag.
 on:
   push:
     tags: ["playwright-v*"]
   pull_request:
     paths:
       - "playwright/**"
+      - "scripts/license-gate.mjs"
       - ".github/workflows/playwright-publish.yml"
       - ".github/workflows/playwright-sdk.yml"
 
@@ -39,6 +48,7 @@ jobs:
     if: github.event_name == 'push'
     needs: rows
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       id-token: write # npm --provenance signs the package with this run's identity
@@ -69,6 +79,26 @@ jobs:
           got=$(npm config get @keploy:registry)
           test "$got" = https://registry.npmjs.org/ || { echo "::error::@keploy:registry is '$got', not https://registry.npmjs.org/; refusing to publish"; exit 1; }
       - run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Pack
+        id: pack
+        run: |
+          name=$(npm pack --pack-destination "$RUNNER_TEMP" | tail -n 1)
+          test -f "$RUNNER_TEMP/$name" || { echo "::error::npm pack wrote no $name"; exit 1; }
+          echo "tarball=$RUNNER_TEMP/$name" >> "$GITHUB_OUTPUT"
+      - name: The package carries its build
+        env:
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: |
+          tar -tzf "$TARBALL" > "$RUNNER_TEMP/files.txt"
+          for f in dist/index.js dist/index.d.ts package.json README.md; do
+            grep -qx "package/$f" "$RUNNER_TEMP/files.txt" || { echo "::error::the package would ship without $f"; exit 1; }
+          done
+      - name: Licenses
+        env:
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: node ../scripts/license-gate.mjs "$TARBALL"
       - name: The token authenticates
         # Fails here, named, on a token that is expired, revoked or pasted
         # with a stray character, before anything is uploaded.
@@ -76,15 +106,16 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm whoami --registry https://registry.npmjs.org/
       - name: Publish
-        # prepublishOnly builds dist/ first.
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public --provenance
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: npm publish "$TARBALL" --access public --provenance
 
   dry-run:
     name: publish dry run
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash # -eo pipefail: a failed command before a pipe fails the step
@@ -95,11 +126,27 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
-      - name: Publish, dry run
-        run: npm publish --dry-run --access public 2>&1 | tee "$RUNNER_TEMP/publish.log"
-      - name: The package carries its build
-        # A fresh checkout has no dist/; only prepublishOnly puts it there.
+      - name: Build
+        run: npm run build
+      - name: Pack
+        id: pack
         run: |
+          name=$(npm pack --pack-destination "$RUNNER_TEMP" | tail -n 1)
+          test -f "$RUNNER_TEMP/$name" || { echo "::error::npm pack wrote no $name"; exit 1; }
+          echo "tarball=$RUNNER_TEMP/$name" >> "$GITHUB_OUTPUT"
+      - name: The package carries its build
+        env:
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: |
+          tar -tzf "$TARBALL" > "$RUNNER_TEMP/files.txt"
           for f in dist/index.js dist/index.d.ts package.json README.md; do
-            grep -qE "npm notice [0-9.]+[kMG]?B +$f\$" "$RUNNER_TEMP/publish.log" || { echo "::error::the package would ship without $f"; exit 1; }
+            grep -qx "package/$f" "$RUNNER_TEMP/files.txt" || { echo "::error::the package would ship without $f"; exit 1; }
           done
+      - name: Licenses
+        env:
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: node ../scripts/license-gate.mjs "$TARBALL"
+      - name: Publish, dry run
+        env:
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: npm publish "$TARBALL" --dry-run --access public
