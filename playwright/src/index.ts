@@ -25,8 +25,12 @@
 //     "seeded" or "own") and, when they are, with a seed drawn afresh; keploy
 //     answers the seed to draw from; a test keploy set aside is skipped with
 //     keploy's reason;
-//   - before the test's browser context closes, the test waits until none of
-//     its pages' calls is in flight (settle), so its calls end inside it;
+//   - before the test's browser context closes, the test waits until its
+//     pages have gone 500 ms with no call starting or ending, counted from
+//     the end of its body and its afterEach hooks, for at most 3 s, so a call
+//     a page makes after the test's last line (a side panel that loads after
+//     an answer) is the test's at record and at replay alike; then until none
+//     of its pages' calls is in flight (settle), so its calls end inside it;
 //   - the test ends (POST /agent/scope/end) after its last teardown, with
 //     its outcome and what its context's pages drew their random numbers
 //     from (random); when keploy saw a call with no recorded answer, or a
@@ -56,7 +60,7 @@ import type { Outcome, Random, TestRef } from './agent';
 import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
 import { OFF_LINE, SEEDED_LINE, freshSeed, initScript, pageScript, processRandom, seatRandom, seedingFromEnv, setAside, unplacedLine, unseededLine } from './random';
-import { Inflight } from './settle';
+import { Inflight, QUIET_MAX_MS, QUIET_MS, busyLine } from './settle';
 
 export { expect, KeployError };
 export type { TestRef, Outcome };
@@ -207,15 +211,21 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
     if (context.pages().length > 0) opened();
     context.on('page', opened);
     const inflight = new Inflight(context);
+    // A wait on calls in flight that has lasted: a step that names them and
+    // waits for them.
+    const named = (): Promise<void> => {
+      const calls = inflight.inFlight();
+      const names = calls.map((r) => `${r.method()} ${r.url()}`);
+      const shown = names.slice(0, 5).join(', ') + (names.length > 5 ? `, and ${names.length - 5} more` : '');
+      return base.step(`keploy: wait for the test's ${calls.length} call(s) in flight before its browser context closes: ${shown}`, () => inflight.settled(calls));
+    };
     try {
       await use(context);
+      // The test ends once its pages have gone quiet and their calls have
+      // ended (settle.ts), the same at record and at replay.
+      if (!(await inflight.quiet(QUIET_MS, QUIET_MAX_MS, named))) process.stdout.write(`${busyLine(name)}\n`);
     } finally {
       restore();
-    }
-    if (inflight.size > 0) {
-      const calls = inflight.describe();
-      const shown = calls.slice(0, 5).join(', ') + (calls.length > 5 ? `, and ${calls.length - 5} more` : '');
-      await base.step(`keploy: wait for the test's ${calls.length} call(s) in flight before its browser context closes: ${shown}`, () => inflight.settled());
     }
   },
 
