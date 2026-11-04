@@ -309,8 +309,9 @@ export function initScript(seed: string, report = ''): string {
   // Numbers a document's frames as the app puts them in (at the end of the
   // task that put them), so that the order their documents load in (the
   // network's) does not decide their numbers; enter numbers them too, as a
-  // frame's document begins (one in a shadow root already in the page is
-  // numbered only then).
+  // frame's document begins. The observer does not see into shadow roots:
+  // a frame put into one already in the page is numbered at the next
+  // numbering, either way.
   const watch = (s) => {
     try {
       new MO(() => { number(s); }).observe(s.doc, { childList: true, subtree: true });

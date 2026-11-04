@@ -80,7 +80,7 @@ Any answer from the agent that this package cannot trust fails the test. That co
 
   Two frames at one path can still trade numbers, unnamed, where the order they are counted in is not the app's:
   - frames under a parent of another origin are counted by their origin in the tab, so two of one origin at one path take their numbers in the order their documents begin, which may change at replay;
-  - a frame put into a shadow root already in the page is numbered only when a document of one of its parent's frames begins, so one put there before another frame at its path, at a moment that varies run to run, may take that frame's number.
+  - a frame put into a shadow root already in the page is not seen as it is put in: it is numbered at its parent document's next numbering (when the app next changes the page outside its shadow roots, or a document of one of its parent's frames begins), so one put there before another frame at its path, at a moment that varies run to run, may take that frame's number.
 - Seeding cannot place these documents, so they draw the browser's own numbers and are named (above):
   - a popup opened with noopener, as a link with `target="_blank"` opens one, or opened other than by `window.open` (a form, or a link with `rel="opener"`, that targets a new window);
   - a popup at another origin than its opener's page, or whose opener's page has loaded another document by the time the popup's begins;
