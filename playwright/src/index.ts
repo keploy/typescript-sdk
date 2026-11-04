@@ -63,7 +63,7 @@ import type { Outcome, Random, TestRef } from './agent';
 import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
 import { OFF_LINE, SEEDED_LINE, freshSeed, initScript, pageScript, processRandom, seatRandom, seedingFromEnv, setAside, unplacedLine, unseededLine } from './random';
-import { Inflight, QUIET_MAX_MS, QUIET_MS, busyLine } from './settle';
+import { Inflight, QUIET_MAX_MS, QUIET_MS, busyLine, namedWait } from './settle';
 
 export { expect, KeployError };
 export type { TestRef, Outcome };
@@ -216,12 +216,7 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
     const inflight = new Inflight(context);
     // A wait on calls in flight that has lasted: a step that names them and
     // waits for them.
-    const named = (): Promise<void> => {
-      const calls = inflight.inFlight();
-      const names = calls.map((r) => `${r.method()} ${r.url()}`);
-      const shown = names.slice(0, 5).join(', ') + (names.length > 5 ? `, and ${names.length - 5} more` : '');
-      return base.step(`keploy: wait for the test's ${calls.length} call(s) in flight before its browser context closes: ${shown}`, () => inflight.settled(calls));
-    };
+    const named = namedWait(inflight, (title, body) => base.step(title, body));
     try {
       await use(context);
       // The test ends once its pages have gone quiet and their calls have

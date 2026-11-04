@@ -46,6 +46,26 @@ export function busyLine(name: string): string {
     'not the test\'s, at record or at replay (each call in flight was waited for to its end).';
 }
 
+/** The step title of a wait on calls in flight: it names them, five at most. */
+export function waitTitle(calls: Request[]): string {
+  const names = calls.map((r) => `${r.method()} ${r.url()}`);
+  const shown = names.slice(0, 5).join(', ') + (names.length > 5 ? `, and ${names.length - 5} more` : '');
+  return `keploy: wait for the test's ${calls.length} call(s) in flight before its browser context closes: ${shown}`;
+}
+
+/**
+ * quiet()'s named(): a wait on calls in flight that has lasted, run as
+ * step(title, body). It names the calls in flight when it is made and waits
+ * for those: a call that starts before step() runs its body (Playwright's
+ * step can wait on the browser first) is left to a wait of its own.
+ */
+export function namedWait(inflight: Inflight, step: (title: string, body: () => Promise<void>) => Promise<void>): () => Promise<void> {
+  return () => {
+    const calls = inflight.inFlight();
+    return step(waitTitle(calls), () => inflight.settled(calls));
+  };
+}
+
 export class Inflight {
   private readonly open = new Map<Request, { frame: Frame | null; nav: boolean }>();
   /** settled()'s waits: each for the calls it was given. */

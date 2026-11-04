@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { AgentClient, KeployError } from '../dist/agent.js';
 import { decide } from '../dist/join.js';
-import { Inflight, QUIET_MAX_MS, QUIET_MS, busyLine } from '../dist/settle.js';
+import { Inflight, QUIET_MAX_MS, QUIET_MS, busyLine, namedWait } from '../dist/settle.js';
 import { EventEmitter } from 'node:events';
 import { testRef, outcomeOf, sourceOf, keployText } from '../dist/index.js';
 
@@ -338,6 +338,33 @@ test('quiet: calls in flight one after another, with no break, keep the wait in 
   await after(t, QUIET_MS);
   assert.equal(q.res.value, true);
   assert.equal(q.res.named, 1);
+});
+
+// The fixture's named wait (namedWait), with a step that, as Playwright's
+// may, lets a call start before it runs its body.
+test('quiet: a named wait is a step that names the calls in flight, five at most, and waits for those, not for a call that starts before the step runs its body', async () => {
+  for (const n of [1, 5, 6]) {
+    const ctx = fakeContext();
+    const inflight = new Inflight(ctx);
+    const page = new EventEmitter();
+    ctx.emit('page', page);
+    const req = (i) => ({ ...fakeRequest(page), url: () => `http://localhost/c${i}` });
+    const calls = Array.from({ length: n }, (_, i) => req(i + 1));
+    calls.forEach((r) => ctx.emit('request', r));
+    const late = req(0);
+    const titles = [];
+    let ended = false;
+    const step = async (title, body) => { titles.push(title); ctx.emit('request', late); await ticks(); return body(); };
+    namedWait(inflight, step)().then(() => { ended = true; });
+    await ticks();
+    const shown = calls.slice(0, 5).map((r) => `GET ${r.url()}`).join(', ') + (n > 5 ? `, and ${n - 5} more` : '');
+    assert.deepEqual(titles, [`keploy: wait for the test's ${n} call(s) in flight before its browser context closes: ${shown}`], `${n} calls`);
+    assert.equal(ended, false, `${n} calls: the wait waits for the calls it names`);
+    calls.forEach((r) => ctx.emit('requestfinished', r));
+    await ticks();
+    assert.equal(ended, true, `${n} calls: the wait ends once they have ended, the later call still in flight`);
+    assert.deepEqual(inflight.inFlight(), [late], `${n} calls`);
+  }
 });
 
 test('quiet: a named wait waits for the calls it names; a call begun during it, still in flight after them, is named in a wait of its own', async (t) => {
