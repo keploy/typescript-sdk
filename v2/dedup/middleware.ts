@@ -2,7 +2,10 @@
 import { log } from "console";
 import { Request, Response, NextFunction } from "express";
 const fs = require('fs');
-const yaml = require('js-yaml');
+// yaml (ISC, no dependencies). The file is written as js-yaml 4 wrote it
+// (single quotes, and YAML 1.1's quoting of y, no and dates); the files
+// js-yaml 3 and 4 wrote are read the same; no js/ tag loads as code.
+const yaml = require('yaml');
 
 const filePath = 'dedupData.yaml';
 
@@ -43,7 +46,7 @@ export function afterMiddleware(req: Request, res: Response) {
 
   try {
     const fileContent = fs.readFileSync(filePath, 'utf-8');
-    existingData = yaml.load(fileContent) || [];
+    existingData = yaml.parse(fileContent) || [];
   } catch (error) {
     // Handle the case where the file doesn't exist or is not valid YAML
     console.error("Error reading existing file:", error);
@@ -58,7 +61,7 @@ export function afterMiddleware(req: Request, res: Response) {
   existingData.push(currentData);
 
   // Convert the array to YAML format
-  const yamlData = yaml.dump(existingData);
+  const yamlData = yaml.stringify(existingData, { singleQuote: true, version: '1.1' });
 
   // Write the updated YAML data back to the file
   fs.writeFileSync(filePath, yamlData, 'utf-8');

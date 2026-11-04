@@ -81,14 +81,15 @@ test('optional dependencies, those of other platforms, and the peers of dependen
   const peer = dep('redpeer', { license: 'EPL-2.0' });
   const mid = dep('mid', { license: 'MIT', peerDependencies: { redpeer: `file:${peer}` } });
   // The user's own peer needs redpeer too: it is checked all the same.
-  const own = dep('ownpeer', { license: 'SSPL-1.0', dependencies: { redpeer: `file:${peer}` } });
+  const own = dep('jest', { license: 'SSPL-1.0', dependencies: { redpeer: `file:${peer}` } });
   const tgz = pack('top', {
     'package.json': {
       name: 'top', version: '1.0.0', license: 'MIT',
       dependencies: { mid: `file:${mid}` },
       optionalDependencies: { redopt: `file:${opt}`, reddarwin: `file:${darwin}`, redwin: `file:${win}` },
-      // The package's own peer is the user's: named, not checked.
-      peerDependencies: { ownpeer: `file:${own}` },
+      // The package's own peer (one of USER_PEERS) is the user's: named,
+      // not checked.
+      peerDependencies: { jest: `file:${own}` },
     },
   });
   const r = run([tgz]);
@@ -100,8 +101,36 @@ test('optional dependencies, those of other platforms, and the peers of dependen
     '  node_modules/redpeer (redpeer@1.0.0): license "EPL-2.0" is not allowed (field "EPL-2.0")',
     '  node_modules/redwin (redwin@1.0.0): license "MPL-2.0" is not allowed (field "MPL-2.0") (on win32/x64)',
   ]);
-  assert.match(r.stderr, /\nchecked linux\/x64: 4 packages, \d+ files; linux\/arm64: 4 packages, \d+ files; darwin\/arm64: 5 packages, \d+ files; darwin\/x64: 4 packages, \d+ files; win32\/x64: 5 packages, \d+ files; not checked, the user's own: 1 packages its peerDependencies install \(ownpeer@1\.0\.0\)\n$/);
+  assert.match(r.stderr, /\nchecked linux\/x64: 4 packages, \d+ files; linux\/arm64: 4 packages, \d+ files; darwin\/arm64: 5 packages, \d+ files; darwin\/x64: 4 packages, \d+ files; win32\/x64: 5 packages, \d+ files; not checked, the user's own: 1 packages its peerDependencies install \(jest@1\.0\.0\)\n$/);
   assert.deepEqual(r.left, []);
+});
+
+test('an npm config that leaves optional or peer dependencies out changes nothing', () => {
+  const dep = (name, extra) => pack(name, { 'package.json': { name, version: '1.0.0', ...extra } });
+  const opt = dep('envopt', { license: 'GPL-3.0' });
+  const peer = dep('envpeer', { license: 'EPL-2.0' });
+  const mid = dep('envmid', { license: 'MIT', peerDependencies: { envpeer: `file:${peer}` } });
+  const tgz = pack('envtop', { 'package.json': { name: 'envtop', version: '1.0.0', license: 'MIT', dependencies: { envmid: `file:${mid}` }, optionalDependencies: { envopt: `file:${opt}` } } });
+  for (const omit of ['optional', 'peer']) {
+    const r = run([tgz], { npm_config_omit: omit, npm_config_legacy_peer_deps: 'true' });
+    assert.equal(r.status, 1, r.stderr);
+    assert.deepEqual(r.stderr.split('\n').filter((l) => / is not allowed /.test(l)).sort(), [
+      '  node_modules/envopt (envopt@1.0.0): license "GPL-3.0" is not allowed (field "GPL-3.0")',
+      '  node_modules/envpeer (envpeer@1.0.0): license "EPL-2.0" is not allowed (field "EPL-2.0")',
+    ], `npm_config_omit=${omit}`);
+  }
+});
+
+test('a peerDependency of the package other than those left to the user fails, and is checked', () => {
+  const other = pack('otherpeer', { 'package.json': { name: 'otherpeer', version: '1.0.0', license: 'MPL-2.0' } });
+  const tgz = pack('peertop', { 'package.json': { name: 'peertop', version: '1.0.0', license: 'MIT', peerDependencies: { otherpeer: `file:${other}` } } });
+  const r = run([tgz]);
+  assert.equal(r.status, 1, r.stderr);
+  assert.deepEqual(r.stderr.split('\n').filter((l) => /^  /.test(l)), [
+    '  peertop: peerDependency "otherpeer" is not one left to the user (USER_PEERS), so it fails until it is added there',
+    '  node_modules/otherpeer (otherpeer@1.0.0): license "MPL-2.0" is not allowed (field "MPL-2.0")',
+    '  node_modules/otherpeer/package.json: MPL ("mpl 2 0")',
+  ]);
 });
 
 test('a file that is not a package fails at the install', () => {

@@ -22,7 +22,7 @@ name: "@keploy/jest publish"
 # (scripts/license-gate.mjs, as in sdk-publish.yml) installs the tarball as a
 # user's `npm install` does and refuses it when anything it installs names a
 # license outside its allow-list. test/workflows.test.mjs holds this
-# workflow to that.
+# workflow to that, and both of its jobs run those rows first.
 #
 # On a pull request the same tarball is packed, checked and published as a
 # dry run, with no token, so a package that would ship without its build, or
@@ -67,6 +67,15 @@ jobs:
           # scope to it (@keploy:registry), in the runner's own npmrc.
           registry-url: https://registry.npmjs.org
           scope: "@keploy"
+      - name: Workflow rows
+        # test/workflows.test.mjs, from the repository's root, so that every
+        # tag and pull request this workflow runs on checks that it still
+        # publishes only the tarball its Licenses step passed. The root's
+        # install, with no scripts, is only for the rows' YAML parser.
+        working-directory: .
+        run: |
+          npm ci --ignore-scripts
+          node --test test/workflows.test.mjs
       - name: The tag names package.json's version
         run: node scripts/release-version.mjs "$GITHUB_REF_NAME"
       - name: The npm token is set
@@ -127,6 +136,15 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
+      - name: Workflow rows
+        # test/workflows.test.mjs, from the repository's root, so that every
+        # tag and pull request this workflow runs on checks that it still
+        # publishes only the tarball its Licenses step passed. The root's
+        # install, with no scripts, is only for the rows' YAML parser.
+        working-directory: .
+        run: |
+          npm ci --ignore-scripts
+          node --test test/workflows.test.mjs
       - run: npm ci
       - name: Build
         run: npm run build

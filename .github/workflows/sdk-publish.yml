@@ -36,6 +36,10 @@ on:
       - "scripts/**"
       - "test/**"
       - ".github/workflows/sdk-publish.yml"
+      # The rows (test/workflows.test.mjs) hold these two to the license
+      # check as well: a change to either runs them here too.
+      - ".github/workflows/jest-publish.yml"
+      - ".github/workflows/playwright-publish.yml"
 
 permissions:
   contents: read

@@ -1,10 +1,11 @@
 // license-gate.mjs TARBALL: the publish workflows' license check.
 //
 // TARBALL is the file `npm pack` wrote, the one the workflow then publishes.
-// The check installs it into an empty project the way a user does (`npm
-// install`: no devDependencies; optional and peer dependencies in), once for
-// each platform in PLATFORMS (npm's --os and --cpu), so that a dependency npm
-// installs only on another platform is checked too. It refuses the package
+// The check installs it into an empty project the way a user's `npm install`
+// does, with install scripts off (no devDependencies; optional and peer
+// dependencies in, whatever an npmrc or an npm_config_ variable says), once
+// for each platform in PLATFORMS (npm's --os and --cpu), so that a dependency
+// npm installs only on one of those platforms is checked too. It refuses the package
 // when anything those installs put on disk for it names a license outside the
 // allow-list below:
 //   - each installed package's package.json license field (or the old
@@ -20,11 +21,13 @@
 //     "CC-BY-4.0" and "cc_by_4.0" are one spelling. A gzip file is read
 //     decompressed; a file that starts with a UTF-16 byte order mark is read
 //     as UTF-16, any other as UTF-8.
-// What the package's own peerDependencies install is the user's: a package
-// that peers on jest is installed beside the user's own jest, and ships none
-// of it. Those packages are named in the output and not checked, unless the
-// package or one of its dependencies needs them too (peers of a dependency
-// are checked: the package is what brings them).
+// A package's own peerDependencies are the user's install, not ours: the
+// user's own jest or playwright tree is already in their project whatever we
+// ship. The gate names them, and does not judge them. Peers of our
+// dependencies are still judged, and so is anything the package or one of
+// its dependencies needs too. Only the peers in USER_PEERS are left to the
+// user: any other peerDependency of the package fails, until it is added
+// there.
 // Accepting a flagged file with a notice is not enough, so there is no
 // exception list: a finding fails the publish.
 //
@@ -32,14 +35,20 @@
 //   - a license that FLAGGED does not name passes when only a file's text
 //     names it (the Artistic License, say); a license field naming it fails.
 //   - the id Unicode-3.0 is matched only in an SPDX-License-Identifier line
-//     (js-yaml's code, for one, cites "Unicode 3.0", the standard).
+//     (code that cites "Unicode 3.0" most often names the standard).
 //   - a name or id is matched only when what splits it is a separator above:
 //     one split by markup, a comment marker or an escape, or spelt in other
 //     than ASCII letters, is not.
+//   - a license text in a language other than English (the Creative Commons
+//     ports to German, French, Dutch, Austrian or Japanese law, say) passes
+//     unless it also names a flagged id, English name or URL.
 //   - only gzip is decompressed, one level deep: zip, xz, bzip2 and brotli
 //     data, and UTF-16 text with no byte order mark, are read as their bytes.
 //   - npm cannot install for another C library: an optional dependency for
 //     musl (Alpine) Linux only is not installed, so not checked.
+//   - only the platforms in PLATFORMS are installed for: an optional
+//     dependency only for another (win32/arm64, linux/arm, ia32, the BSDs,
+//     AIX, say) is not installed, so not checked.
 //
 // Exit 0 and print what was checked when the package is clean; exit 1 and
 // list every finding when not, or when an install fails.
@@ -55,6 +64,10 @@ export const ALLOWED = new Set([
   'MIT', 'BSD-2-Clause', 'BSD-3-Clause', '0BSD', 'Apache-2.0', 'ISC', 'Zlib',
   'BSL-1.0', 'CC0-1.0', 'Unlicense', 'PostgreSQL', 'OFL-1.1',
 ]);
+
+// The peerDependencies of a package that are left to the user (see the
+// header): those @keploy/jest and @keploy/playwright peer on.
+export const USER_PEERS = new Set(['jest', 'jest-environment-node', '@playwright/test']);
 
 // The platforms the tarball is installed for: the runner's, and those of
 // other users, as npm's --os and --cpu name them.
@@ -95,7 +108,9 @@ const LICENSES = [
   ['CPL or CPAL', { ids: ['cpl v? \\d', 'cpal'], names: ['common public (?:attribution )?licen[cs]e'] }],
   ['Creative Commons', {
     ids: ['cc by(?: (?:nc|nd|sa)){0,3}'],
-    names: ['creative commons (?:attribution|by|non commercial|share alike|no derivatives|noderivs)', 'attribution (?:non commercial|share alike|no derivatives|noderivs)'],
+    // The 3.0 Unported legal code opens "Creative Commons Legal Code /
+    // Attribution 3.0 Unported" (BY and its NC, ND and SA variants).
+    names: ['creative commons (?:attribution|by|non commercial|share alike|no derivatives|noderivs|legal code attribution)', 'attribution (?:non commercial|share alike|no derivatives|noderivs)'],
     urls: ['creativecommons org/licenses'],
   }],
   ['ODbL', { ids: ['odbl'], names: ['open database licen[cs]e'] }],
@@ -292,8 +307,8 @@ function needs(pkg, fields) {
 // node_modules/@SCOPE/NAME, at any depth) and every file under node_modules
 // is read, whichever package it belongs to, but for npm's own record of the
 // tree (node_modules/.package-lock.json: the package.json files it copies are
-// read where they are) and the packages only root's peerDependencies need
-// (see the header), which are returned as user (and those peers as peers).
+// read where they are) and the packages only root's peerDependencies in
+// USER_PEERS need (see the header), which are returned as user (and those peers as peers).
 // A link is not read: npm
 // makes links only in .bin folders, to files read where they are, so any
 // other link, or anything that is not a file or a folder, is a finding.
@@ -359,7 +374,9 @@ export async function check(project, root) {
   if (!packages.has(top)) findings.push(`${root}: not installed`);
   else {
     const ours = reach([top], new Set([top]));
-    peers = needs(packages.get(top).pkg, ['peerDependencies']).map((n) => find(top, n)).filter(Boolean);
+    const own = needs(packages.get(top).pkg, ['peerDependencies']);
+    for (const n of own) if (!USER_PEERS.has(n)) findings.push(`${root}: peerDependency ${JSON.stringify(n)} is not one left to the user (USER_PEERS), so it fails until it is added there`);
+    peers = own.filter((n) => USER_PEERS.has(n)).map((n) => find(top, n)).filter(Boolean);
     user = new Set([...reach(peers, new Set())].filter((d) => !ours.has(d)));
   }
 
@@ -386,12 +403,13 @@ export async function check(project, root) {
 
 // Installs tarball into the empty project, as a user's `npm install` does on
 // platform ([os, cpu]) (npm never installs a dependency's devDependencies;
-// no install script runs), and returns the package's name: the one
+// no install script runs; the flags put optional and peer dependencies in
+// over any npmrc or npm_config_ variable), and returns the package's name: the one
 // dependency npm saved to the project's package.json. Throws, saying why, on
 // a failure.
 export function install(tarball, project, [os, cpu] = PLATFORMS[0]) {
   writeFileSync(join(project, 'package.json'), JSON.stringify({ name: 'license-gate', version: '0.0.0', private: true }));
-  const args = ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--no-package-lock', `--os=${os}`, `--cpu=${cpu}`, resolve(tarball)];
+  const args = ['install', '--ignore-scripts', '--include=optional', '--include=peer', '--legacy-peer-deps=false', '--no-audit', '--no-fund', '--no-package-lock', `--os=${os}`, `--cpu=${cpu}`, resolve(tarball)];
   const r = spawnSync('npm', args, { cwd: project, encoding: 'utf8' });
   if (r.status !== 0) throw new Error(`npm install ${tarball} for ${os}/${cpu} failed (${r.error ? r.error.message : `exit ${r.status}`}): ${(r.stderr || '').trim()}`);
   const names = needs(JSON.parse(readFileSync(join(project, 'package.json'), 'utf8')), ['dependencies']);

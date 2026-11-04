@@ -4,11 +4,11 @@
 // license-gate-cli.test.mjs.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { ALLOWED, FLAGGED, KEEP, PLATFORMS, Scanner, check, expressionIds, fileFindings, licenseFindings, normalise, textFindings } from '../scripts/license-gate.mjs';
+import { ALLOWED, FLAGGED, KEEP, PLATFORMS, Scanner, USER_PEERS, check, expressionIds, fileFindings, licenseFindings, normalise, textFindings } from '../scripts/license-gate.mjs';
 
 test('every allowed SPDX id passes, alone and in an expression', () => {
   const ids = ['MIT', 'BSD-2-Clause', 'BSD-3-Clause', '0BSD', 'Apache-2.0', 'ISC', 'Zlib', 'BSL-1.0', 'CC0-1.0', 'Unlicense', 'PostgreSQL', 'OFL-1.1'];
@@ -88,6 +88,10 @@ const flagged = [
   ['/* SPDX-License-Identifier: Unicode-3.0 */', ['license "unicode-3.0" is not allowed (SPDX-License-Identifier)']],
   ['// spdx-license-identifier:\t(MIT OR Artistic-2.0).', ['license "artistic-2.0" is not allowed (SPDX-License-Identifier)']],
   ['# SPDX-License-Identifier: BSD-3-Clause\nSPDX-License-Identifier: WTFPL AND ISC', ['license "wtfpl" is not allowed (SPDX-License-Identifier)']],
+  ['SPDX-License-Identifier:  Foo-1.0', ['license "foo-1.0" is not allowed (SPDX-License-Identifier)']],
+  // Up to 8 spaces or tabs after the colon are not counted in the
+  // expression's 80 characters.
+  [`SPDX-License-Identifier:${' '.repeat(76)}Foo-1.0`, ['license "foo-1.0" is not allowed (SPDX-License-Identifier)']],
   ['UNICODE, INC. LICENSE AGREEMENT - DATA FILES AND SOFTWARE', ['Unicode terms ("unicode, inc license agreement")']],
   ['Unicode, Inc. Terms of Use', ['Unicode terms ("unicode, inc terms of use")']],
   ['Data Files and Software: Unicode Terms of Use apply', ['Unicode terms ("unicode terms of use")']],
@@ -122,6 +126,10 @@ const flagged = [
   ['Attribution-NonCommercial-ShareAlike', ['Creative Commons ("attribution noncommercial")']],
   ['Attribution-ShareAlike 4.0 International', ['Creative Commons ("attribution sharealike")']],
   ['https://creativecommons.org/licenses/by/4.0/', ['Creative Commons ("creativecommons org/licenses")']],
+  // The first lines of the 3.0 Unported legal code, as SPDX has it: they say
+  // neither "Creative Commons Attribution" nor "CC BY".
+  ['Creative Commons Legal Code\n\nAttribution 3.0 Unported\n\n    CREATIVE COMMONS CORPORATION IS NOT A LAW FIRM AND DOES NOT PROVIDE\n    LEGAL SERVICES.', ['Creative Commons ("creative commons legal code attribution")']],
+  ['Creative Commons Legal Code\n\nAttribution-ShareAlike 3.0 Unported', ['Creative Commons ("creative commons legal code attribution")', 'Creative Commons ("attribution sharealike")']],
   ['ODbL-1.0', ['ODbL ("odbl 1 0")']],
   ['Open Database License', ['ODbL ("open database license")']],
   ['Elastic-2.0', ['Elastic ("elastic 2 0")']],
@@ -160,6 +168,8 @@ const clean = [
   '// SPDX-License-Identifier: (MIT OR Apache-2.0) */ and <!-- SPDX-License-Identifier: CC0-1.0 --> and SPDX-License-Identifier: 0BSD.',
   '// Check for surrogate pairs (reference Unicode 3.0 section "3.7 Surrogates").',
   'elastic band; Unicode 15 tables; the commons; creative work; attribution required',
+  // CC0's legal code opens as the attribution licenses' do.
+  'Creative Commons Legal Code\n\nCC0 1.0 Universal\n\n    CREATIVE COMMONS CORPORATION IS NOT A LAW FIRM AND DOES NOT PROVIDE',
 ];
 
 test('a file naming allowed licenses only is clean', () => {
@@ -269,7 +279,7 @@ test('the walk reads every package folder and file but the user\'s own peers, sc
     'node_modules/.cache/x/data.json': '{}', // a dot folder is read, and is not a package
     'node_modules/.cache/package.json': { name: 'cache' },
     'node_modules/stray.txt': 'Mozilla Public License', // a file outside any package is read too
-    'node_modules/top/package.json': { name: 'top', version: '1.0.0', license: 'MIT', dependencies: { a: '1', '@s/b': '2' }, optionalDependencies: { d: '4', ghost: '9' }, peerDependencies: { p: '1', a: '1' } },
+    'node_modules/top/package.json': { name: 'top', version: '1.0.0', license: 'MIT', dependencies: { a: '1', '@s/b': '2' }, optionalDependencies: { d: '4', ghost: '9' }, peerDependencies: { jest: '1', a: '1' } },
     'node_modules/a/package.json': { name: 'a', version: '1.0.0', license: 'MIT' },
     // Every file is read, whatever its extension or size.
     'node_modules/a/index.js': 'module.exports = "ODbL-1.0";',
@@ -297,13 +307,14 @@ test('the walk reads every package folder and file but the user\'s own peers, sc
     'node_modules/a/test/fixture/node_modules/util/index.js': '// a fixture folder, not a package',
     'node_modules/f/package.json': 'not json{',
     // The peer of a dependency is the package's to ship: checked, though the
-    // user's peer p needs it too.
+    // user's peer jest needs it too.
     'node_modules/r/package.json': { name: 'r', version: '1.0.0', license: 'EPL-2.0' },
-    // top's own peer, and what only it needs, are the user's: not checked.
-    // What top needs too (a) is checked all the same.
-    'node_modules/p/package.json': { name: 'p', version: '1.0.0', license: 'GPL-3.0', dependencies: { q: '1', a: '1', r: '1' } },
-    'node_modules/p/COPYING': 'GNU General Public License',
-    'node_modules/p/node_modules/q/package.json': { name: 'q', version: '1.0.0', license: 'MPL-2.0' },
+    // top's own peer jest (one of USER_PEERS), and what only it needs, are
+    // the user's: not checked. What top needs too (a) is checked all the
+    // same, and a, a peer of top's not in USER_PEERS, is a finding.
+    'node_modules/jest/package.json': { name: 'jest', version: '1.0.0', license: 'GPL-3.0', dependencies: { q: '1', a: '1', r: '1' } },
+    'node_modules/jest/COPYING': 'GNU General Public License',
+    'node_modules/jest/node_modules/q/package.json': { name: 'q', version: '1.0.0', license: 'MPL-2.0' },
   });
   // npm's bin links are not read (the files they name are, where they are);
   // any other link is a finding.
@@ -311,12 +322,13 @@ test('the walk reads every package folder and file but the user\'s own peers, sc
   symlinkSync('../a/index.js', join(root, 'node_modules/.bin/tool'));
   symlinkSync('../a/index.js', join(root, 'node_modules/d/linked'));
   const { findings, packages, files, user, peers } = await check(root, 'top');
-  assert.deepEqual(user, ['p@1.0.0', 'q@1.0.0']);
-  assert.deepEqual(peers, ['p@1.0.0']);
+  assert.deepEqual(user, ['jest@1.0.0', 'q@1.0.0']);
+  assert.deepEqual(peers, ['jest@1.0.0']);
   assert.equal(packages, 8);
   assert.equal(files, 28);
   assert.deepEqual(findings.sort(), [
     'node_modules/stray.txt: MPL ("mozilla public license")',
+    'top: peerDependency "a" is not one left to the user (USER_PEERS), so it fails until it is added there',
     'node_modules/a/.package-lock.json: MPL ("mozilla public license")',
     'node_modules/a/index.js: ODbL ("odbl 1 0")',
     'node_modules/a/lib/x.cjs: GPL, LGPL or AGPL ("gpl 2 0")',
@@ -340,9 +352,16 @@ test('the walk reads every package folder and file but the user\'s own peers, sc
   ].sort());
 });
 
+test('the peers left to the user are those @keploy/jest and @keploy/playwright peer on, and no others', () => {
+  const peers = (dir) => Object.keys(JSON.parse(readFileSync(new URL(`../${dir}/package.json`, import.meta.url), 'utf8')).peerDependencies);
+  assert.deepEqual([...USER_PEERS].sort(), [...peers('jest'), ...peers('playwright')].sort());
+  assert.deepEqual([...USER_PEERS].sort(), ['@playwright/test', 'jest', 'jest-environment-node']);
+});
+
 test('a clean tree has no findings; a package that is not there is one', async () => {
   const root = tree({
-    'node_modules/a/package.json': { name: 'a', version: '1.0.0', license: 'MIT', peerDependencies: { gone: '1' } },
+    // A peer left to the user that is not installed is no finding.
+    'node_modules/a/package.json': { name: 'a', version: '1.0.0', license: 'MIT', peerDependencies: { jest: '1' } },
     'node_modules/a/LICENSE': 'MIT License\n\nPermission is hereby granted',
   });
   const empty = tree({ 'package.json': { name: 'license-gate' } });
