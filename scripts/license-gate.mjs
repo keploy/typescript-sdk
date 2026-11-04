@@ -4,7 +4,7 @@
 // The check installs it into an empty project the way a user's `npm install`
 // does, with install scripts off (no devDependencies; optional and peer
 // dependencies in, whatever an npmrc or an npm_config_ variable says), once
-// for each platform in PLATFORMS (npm's --os and --cpu), so that a dependency
+// for each platform in PLATFORMS (npm's --os, --cpu and --libc), so that a dependency
 // npm installs only on one of those platforms is checked too. It refuses the package
 // when anything those installs put on disk for it names a license outside the
 // allow-list below:
@@ -44,8 +44,6 @@
 //     unless it also names a flagged id, English name or URL.
 //   - only gzip is decompressed, one level deep: zip, xz, bzip2 and brotli
 //     data, and UTF-16 text with no byte order mark, are read as their bytes.
-//   - npm cannot install for another C library: an optional dependency for
-//     musl (Alpine) Linux only is not installed, so not checked.
 //   - only the platforms in PLATFORMS are installed for: an optional
 //     dependency only for another (win32/arm64, linux/arm, ia32, the BSDs,
 //     AIX, say) is not installed, so not checked.
@@ -70,9 +68,12 @@ export const ALLOWED = new Set([
 export const USER_PEERS = new Set(['jest', 'jest-environment-node', '@playwright/test']);
 
 // The platforms the tarball is installed for: the runner's, and those of
-// other users, as npm's --os and --cpu name them.
+// other users, as npm's --os, --cpu and (on Linux) --libc name them: glibc
+// and musl (Alpine) Linux both, so that an optional dependency for one C
+// library only (sharp's LGPL libvips for musl, say) is checked.
 export const PLATFORMS = [
-  ['linux', 'x64'], ['linux', 'arm64'], ['darwin', 'arm64'], ['darwin', 'x64'], ['win32', 'x64'],
+  ['linux', 'x64', 'glibc'], ['linux', 'x64', 'musl'], ['linux', 'arm64', 'glibc'], ['linux', 'arm64', 'musl'],
+  ['darwin', 'arm64'], ['darwin', 'x64'], ['win32', 'x64'],
 ];
 
 // Text as it is matched: lower case, with each run of spaces, hyphens (any
@@ -402,18 +403,19 @@ export async function check(project, root) {
 }
 
 // Installs tarball into the empty project, as a user's `npm install` does on
-// platform ([os, cpu]) (npm never installs a dependency's devDependencies;
+// platform ([os, cpu, libc]) (npm never installs a dependency's devDependencies;
 // no install script runs; the flags put optional and peer dependencies in
-// over any npmrc or npm_config_ variable), and returns the package's name: the one
+// over any npmrc or npm_config_ variable, the C library too), and returns the package's name: the one
 // dependency npm saved to the project's package.json. Throws, saying why, on
 // a failure.
-export function install(tarball, project, [os, cpu] = PLATFORMS[0]) {
+export function install(tarball, project, platform = PLATFORMS[0]) {
+  const [os, cpu, libc] = platform;
   writeFileSync(join(project, 'package.json'), JSON.stringify({ name: 'license-gate', version: '0.0.0', private: true }));
-  const args = ['install', '--ignore-scripts', '--include=optional', '--include=peer', '--legacy-peer-deps=false', '--no-audit', '--no-fund', '--no-package-lock', `--os=${os}`, `--cpu=${cpu}`, resolve(tarball)];
+  const args = ['install', '--ignore-scripts', '--include=optional', '--include=peer', '--legacy-peer-deps=false', '--no-audit', '--no-fund', '--no-package-lock', `--os=${os}`, `--cpu=${cpu}`, ...(libc ? [`--libc=${libc}`] : []), resolve(tarball)];
   const r = spawnSync('npm', args, { cwd: project, encoding: 'utf8' });
-  if (r.status !== 0) throw new Error(`npm install ${tarball} for ${os}/${cpu} failed (${r.error ? r.error.message : `exit ${r.status}`}): ${(r.stderr || '').trim()}`);
+  if (r.status !== 0) throw new Error(`npm install ${tarball} for ${platform.join('/')} failed (${r.error ? r.error.message : `exit ${r.status}`}): ${(r.stderr || '').trim()}`);
   const names = needs(JSON.parse(readFileSync(join(project, 'package.json'), 'utf8')), ['dependencies']);
-  if (names.length !== 1) throw new Error(`installing ${tarball} for ${os}/${cpu} saved ${names.length} packages to the project, not 1`);
+  if (names.length !== 1) throw new Error(`installing ${tarball} for ${platform.join('/')} saved ${names.length} packages to the project, not 1`);
   return names[0];
 }
 

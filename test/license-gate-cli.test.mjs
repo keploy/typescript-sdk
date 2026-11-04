@@ -35,7 +35,7 @@ function run(args, env = {}, cwd = undefined) {
 }
 
 const quote = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const counts = (n) => ['linux/x64', 'linux/arm64', 'darwin/arm64', 'darwin/x64', 'win32/x64'].map((p) => `${p}: ${n} packages, \\d+ files`).join('; ');
+const counts = (n) => ['linux/x64/glibc', 'linux/x64/musl', 'linux/arm64/glibc', 'linux/arm64/musl', 'darwin/arm64', 'darwin/x64', 'win32/x64'].map((p) => `${p}: ${n} packages, \\d+ files`).join('; ');
 
 test('a clean package passes on every platform, and the projects it was installed into are gone', () => {
   const tgz = pack('clean', { 'package.json': { name: 'clean', version: '1.0.0', license: 'Apache-2.0' }, 'index.js': 'module.exports = 1;' });
@@ -101,8 +101,23 @@ test('optional dependencies, those of other platforms, and the peers of dependen
     '  node_modules/redpeer (redpeer@1.0.0): license "EPL-2.0" is not allowed (field "EPL-2.0")',
     '  node_modules/redwin (redwin@1.0.0): license "MPL-2.0" is not allowed (field "MPL-2.0") (on win32/x64)',
   ]);
-  assert.match(r.stderr, /\nchecked linux\/x64: 4 packages, \d+ files; linux\/arm64: 4 packages, \d+ files; darwin\/arm64: 5 packages, \d+ files; darwin\/x64: 4 packages, \d+ files; win32\/x64: 5 packages, \d+ files; not checked, the user's own: 1 packages its peerDependencies install \(jest@1\.0\.0\)\n$/);
+  assert.match(r.stderr, /\nchecked linux\/x64\/glibc: 4 packages, \d+ files; linux\/x64\/musl: 4 packages, \d+ files; linux\/arm64\/glibc: 4 packages, \d+ files; linux\/arm64\/musl: 4 packages, \d+ files; darwin\/arm64: 5 packages, \d+ files; darwin\/x64: 4 packages, \d+ files; win32\/x64: 5 packages, \d+ files; not checked, the user's own: 1 packages its peerDependencies install \(jest@1\.0\.0\)\n$/);
   assert.deepEqual(r.left, []);
+});
+
+test('an optional dependency for one C library only is installed and checked, whatever npm_config_libc says', () => {
+  const dep = (name, extra) => pack(name, { 'package.json': { name, version: '1.0.0', ...extra } });
+  const musl = dep('redmusl', { license: 'LGPL-3.0-or-later', os: ['linux'], libc: ['musl'] });
+  const glibc = dep('redglibc', { license: 'GPL-2.0', os: ['linux'], libc: ['glibc'] });
+  const tgz = pack('libctop', { 'package.json': { name: 'libctop', version: '1.0.0', license: 'MIT', optionalDependencies: { redmusl: `file:${musl}`, redglibc: `file:${glibc}` } } });
+  for (const env of [{}, { npm_config_libc: 'musl' }, { npm_config_libc: 'glibc' }]) {
+    const r = run([tgz], env);
+    assert.equal(r.status, 1, r.stderr);
+    assert.deepEqual(r.stderr.split('\n').filter((l) => / is not allowed /.test(l)).sort(), [
+      '  node_modules/redglibc (redglibc@1.0.0): license "GPL-2.0" is not allowed (field "GPL-2.0") (on linux/x64/glibc, linux/arm64/glibc)',
+      '  node_modules/redmusl (redmusl@1.0.0): license "LGPL-3.0-or-later" is not allowed (field "LGPL-3.0-or-later") (on linux/x64/musl, linux/arm64/musl)',
+    ], JSON.stringify(env));
+  }
 });
 
 test('an npm config that leaves optional or peer dependencies out changes nothing', () => {
@@ -138,7 +153,7 @@ test('a file that is not a package fails at the install', () => {
   writeFileSync(bad, 'not a tarball');
   const r = run([bad]);
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /^license gate: npm install .*not-a-package\.tgz for linux\/x64 failed \(exit \d+\): /);
+  assert.match(r.stderr, /^license gate: npm install .*not-a-package\.tgz for linux\/x64\/glibc failed \(exit \d+\): /);
   assert.deepEqual(r.left, []);
 });
 
@@ -158,6 +173,6 @@ test('an install that puts nothing on disk fails: nothing checked is not clean',
   const tgz = pack('dry', { 'package.json': { name: 'dry', version: '1.0.0', license: 'MIT' } });
   const r = run([tgz], { npm_config_dry_run: 'true' });
   assert.equal(r.status, 1);
-  assert.equal(r.stderr, `license gate: installing ${tgz} for linux/x64 saved 0 packages to the project, not 1\n`);
+  assert.equal(r.stderr, `license gate: installing ${tgz} for linux/x64/glibc saved 0 packages to the project, not 1\n`);
   assert.deepEqual(r.left, []);
 });

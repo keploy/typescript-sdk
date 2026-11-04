@@ -63,6 +63,11 @@ for (const [file, tag, folder, publish, pr, rows, gate] of workflows) {
       assert.ok(lic > pack, `${job}: a Licenses step after Pack`);
       assert.equal(s[lic].run, `node ${gate} "$TARBALL"`);
       assert.equal(s[lic].env.TARBALL, TARBALL);
+      // Nothing else on the step: no shell of its own, and no other variable
+      // (one that preloads code, say).
+      const raw = wf.jobs[job].steps[lic];
+      assert.deepEqual(Object.keys(raw).sort(), ['env', 'name', 'run'], `${job}: the Licenses step's keys`);
+      assert.deepEqual(Object.keys(raw.env), ['TARBALL'], `${job}: the Licenses step's env`);
       // npm packs or publishes nothing else.
       assert.deepEqual(s.filter((x) => /\bnpm (?:pack|publish)\b/.test(x.run)).map((x) => x.name), job === publish ? ['Pack', 'Publish'] : file === 'sdk-publish.yml' ? ['Pack'] : ['Pack', 'Publish, dry run']);
       const pub = s.findIndex((x) => /\bnpm publish\b/.test(x.run));

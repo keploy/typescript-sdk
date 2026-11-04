@@ -370,5 +370,8 @@ test('a clean tree has no findings; a package that is not there is one', async (
 });
 
 test('the tarball is installed for the runner and for other users\' platforms', () => {
-  assert.deepEqual(PLATFORMS, [['linux', 'x64'], ['linux', 'arm64'], ['darwin', 'arm64'], ['darwin', 'x64'], ['win32', 'x64']]);
+  assert.deepEqual(PLATFORMS, [
+    ['linux', 'x64', 'glibc'], ['linux', 'x64', 'musl'], ['linux', 'arm64', 'glibc'], ['linux', 'arm64', 'musl'],
+    ['darwin', 'arm64'], ['darwin', 'x64'], ['win32', 'x64'],
+  ]);
 });

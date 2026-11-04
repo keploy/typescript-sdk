@@ -2,10 +2,7 @@
 import { log } from "console";
 import { Request, Response, NextFunction } from "express";
 const fs = require('fs');
-// yaml (ISC, no dependencies). The file is written as js-yaml 4 wrote it
-// (single quotes, and YAML 1.1's quoting of y, no and dates); the files
-// js-yaml 3 and 4 wrote are read the same; no js/ tag loads as code.
-const yaml = require('yaml');
+import { entryYaml } from "./entry";
 
 const filePath = 'dedupData.yaml';
 
@@ -37,34 +34,10 @@ export function afterMiddleware(req: Request, res: Response) {
   }
   let executedLinesByFile = GetCoverage();
 
-  let currentData = {
-    id: testSet + "/" + id,
-    executedLinesByFile: executedLinesByFile
-  };
-
-  let existingData = [];
-
-  try {
-    const fileContent = fs.readFileSync(filePath, 'utf-8');
-    existingData = yaml.parse(fileContent) || [];
-  } catch (error) {
-    // Handle the case where the file doesn't exist or is not valid YAML
-    console.error("Error reading existing file:", error);
-  }
-
-  if (!Array.isArray(existingData)) {
-    console.error('Expected an array for existingData, but got:', typeof existingData);
-    existingData = []; // Reset to an empty array or handle accordingly
-  }
-
-  // Add or update the entry for the current id
-  existingData.push(currentData);
-
-  // Convert the array to YAML format
-  const yamlData = yaml.stringify(existingData, { singleQuote: true, version: '1.1' });
-
-  // Write the updated YAML data back to the file
-  fs.writeFileSync(filePath, yamlData, 'utf-8');
+  // The file is a list that only grows: append this request's entry, as
+  // js-yaml 4 wrote it, rather than read, parse and rewrite the whole file,
+  // which cost each request time and memory in proportion to the file.
+  fs.appendFileSync(filePath, entryYaml(testSet + "/" + id, executedLinesByFile), 'utf-8');
 
   // Log to the console
   // console.log("Executed lines by file:", executedLinesByFile);
