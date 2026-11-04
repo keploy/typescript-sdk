@@ -271,7 +271,14 @@ test('the walk reads every package folder and file but the user\'s own peers, sc
     'node_modules/stray.txt': 'Mozilla Public License', // a file outside any package is read too
     'node_modules/top/package.json': { name: 'top', version: '1.0.0', license: 'MIT', dependencies: { a: '1', '@s/b': '2' }, optionalDependencies: { d: '4', ghost: '9' }, peerDependencies: { p: '1', a: '1' } },
     'node_modules/a/package.json': { name: 'a', version: '1.0.0', license: 'MIT' },
-    'node_modules/a/index.js': 'module.exports = 1;',
+    // Every file is read, whatever its extension or size.
+    'node_modules/a/index.js': 'module.exports = "ODbL-1.0";',
+    'node_modules/a/lib/x.cjs': '// SPDX-License-Identifier: GPL-2.0-only',
+    'node_modules/a/lib/x.mjs': 'export const l = "EUPL-1.2";',
+    'node_modules/a/lib/x.d.ts': '// Eclipse Public License',
+    'node_modules/a/lib/x.js.map': '{"sources":["CDDL-1.0"]}',
+    'node_modules/a/README.md': 'Licensed under the Elastic License',
+    'node_modules/a/dist/big.min.js': `${'x'.repeat(300 << 10)} Sleepycat`,
     'node_modules/a/.package-lock.json': 'Mozilla Public License', // a package's own file of that name is read
     'node_modules/a/@x/y/z.js': '// a folder named @x inside a package is not a scope',
     'node_modules/a/@x/y/package.json': { name: 'y' },
@@ -307,10 +314,18 @@ test('the walk reads every package folder and file but the user\'s own peers, sc
   assert.deepEqual(user, ['p@1.0.0', 'q@1.0.0']);
   assert.deepEqual(peers, ['p@1.0.0']);
   assert.equal(packages, 8);
-  assert.equal(files, 22);
+  assert.equal(files, 28);
   assert.deepEqual(findings.sort(), [
     'node_modules/stray.txt: MPL ("mozilla public license")',
     'node_modules/a/.package-lock.json: MPL ("mozilla public license")',
+    'node_modules/a/index.js: ODbL ("odbl 1 0")',
+    'node_modules/a/lib/x.cjs: GPL, LGPL or AGPL ("gpl 2 0")',
+    'node_modules/a/lib/x.cjs: license "gpl-2.0-only" is not allowed (SPDX-License-Identifier)',
+    'node_modules/a/lib/x.mjs: EUPL ("eupl 1 2")',
+    'node_modules/a/lib/x.d.ts: EPL ("eclipse public license")',
+    'node_modules/a/lib/x.js.map: CDDL ("cddl 1 0")',
+    'node_modules/a/README.md: Elastic ("elastic license")',
+    'node_modules/a/dist/big.min.js: APSL, NPL, RPL, MS-RL or Sleepycat ("sleepycat")',
     'node_modules/@s/stray: SSPL ("sspl")',
     'node_modules/@s/b/node_modules/c (c@3.0.0): license "LGPL-3.0" is not allowed (field "LGPL-3.0")',
     'node_modules/@s/b/node_modules/c/NOTICE: MPL ("mozilla public license")',
