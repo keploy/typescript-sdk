@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const script = fileURLToPath(new URL('../scripts/license-gate.mjs', import.meta.url));
@@ -26,9 +26,9 @@ function pack(name, files) {
 }
 
 // Runs the script with its own TMPDIR, so a row can see what it leaves there.
-function run(args, env = {}) {
+function run(args, env = {}, cwd = undefined) {
   const tmp = mkdtempSync(join(work, 'tmp-'));
-  const r = spawnSync(process.execPath, [script, ...args], { encoding: 'utf8', env: { ...process.env, TMPDIR: tmp, ...env } });
+  const r = spawnSync(process.execPath, [script, ...args], { cwd, encoding: 'utf8', env: { ...process.env, TMPDIR: tmp, ...env } });
   // npm keeps caches of its own there (node-compile-cache): only the script's
   // projects count.
   return { ...r, left: readdirSync(tmp).filter((n) => n.startsWith('license-gate-')) };
@@ -43,6 +43,12 @@ test('a clean package passes on every platform, and the projects it was installe
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, new RegExp(`^license gate: ${quote(tgz)}: ${counts(1)}; every license allowed\n$`));
   assert.deepEqual(r.left, []);
+});
+
+test('a tarball named by a relative path is found', () => {
+  const tgz = pack('relative', { 'package.json': { name: 'relative', version: '1.0.0', license: 'MIT' } });
+  const r = run([basename(tgz)], {}, work);
+  assert.equal(r.status, 0, r.stderr);
 });
 
 test('a package whose license field is not allowed fails, named', () => {
