@@ -72,15 +72,22 @@ test('the lines say what is held, how to keep the real clock, and why a test ask
 
 test('seated: this file\'s reads read the held clock, one millisecond later at each; a Date is a Date; putting back gives the real one, but keeps a stub put there after', () => {
   const Real = Date;
+  const limit = Error.stackTraceLimit;
   const start = Date.UTC(2026, 0, 2, 3, 4, 5, 6);
-  const unseat = seatClock(start);
+  let unseat;
   try {
+    // Playwright's worker sets the stack's limit to 200; a held read leaves it so.
+    Error.stackTraceLimit = 200;
+    unseat = seatClock(start);
     assert.notEqual(globalThis.Date, Real);
     assert.equal(Date.now(), start);
+    assert.equal(Error.stackTraceLimit, 200);
     assert.equal(new Date().getTime(), start + 1);
     assert.equal(Date(), new Real(start + 2).toString());
-    // With an argument it is the real Date's.
+    // With an argument it is the real Date's, undefined's too (an Invalid
+    // Date), and takes no held millisecond.
     assert.equal(new Date(5).getTime(), 5);
+    assert.ok(Number.isNaN(new Date(undefined).getTime()));
     assert.equal(new Date('2020-01-01T00:00:00Z').getTime(), Real.UTC(2020, 0, 1));
     assert.equal(Date.UTC(2020, 0, 1), Real.UTC(2020, 0, 1));
     assert.equal(Date.parse('2020-01-01T00:00:00Z'), Real.UTC(2020, 0, 1));
@@ -95,7 +102,7 @@ test('seated: this file\'s reads read the held clock, one millisecond later at e
     assert.equal(m.getTime(), start + 4);
     // A read through a callback of a native function is the caller's.
     assert.deepEqual([0, 0].map(() => Date.now()), [start + 5, start + 6]);
-  } finally { unseat(); }
+  } finally { Error.stackTraceLimit = limit; unseat?.(); }
   assert.equal(globalThis.Date, Real);
   assert.ok(Math.abs(Date.now() - Real.now()) < 1000);
   const again = seatClock(start);

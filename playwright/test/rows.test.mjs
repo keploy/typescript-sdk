@@ -962,13 +962,22 @@ function stampsHeld(sd, s) {
   const f = () => Math.floor(next() * 1000);
   return [s, `${s + 1}-${f()}`, `${s + 2}-${f()}`, [true, true, true, Date.UTC(2020, 0, 1), 0], new Date(s + 4).toString(), [true, true], true, s + 5];
 }
-// Whether every read of a test is the real clock's: each a time near now.
+// Whether a test's reads are the real clock's: its first, its last and its
+// first suffix's a time near now; and stamps' first and last reads at least
+// 150 ms apart, under the real time it waits between them (a 20 ms timer,
+// then a poll that gives up about 200 ms in), where a clock held from the
+// test's begin, one millisecond later at each read, reads them 5 ms apart.
+// The other tests read too fast to tell; where they are checked, stamps is
+// checked in the same run and takes the same branch of the hold as they do,
+// except free under KEPLOY_HOLD_CLOCK=on, whose branch (not held, no start)
+// is stamps' in the opt-in-off row.
 const near = (v) => typeof v === 'number' && Math.abs(v - Date.now()) < 600000;
 function realReads(r, n) {
   const v = r.read[n];
   assert.ok(Array.isArray(v) && v.length > 0, `${n}: ${JSON.stringify(v)}`);
   assert.ok(near(v[0]) && near(v.at(-1)), `${n}: ${JSON.stringify(v)}`);
   if (typeof v[1] === 'string' && v[1].includes('-')) assert.ok(near(Number(v[1].split('-')[0])), `${n}: ${JSON.stringify(v)}`);
+  if (n === 'stamps') assert.ok(v.at(-1) - v[0] >= 150, `stamps read no real time passing: ${JSON.stringify(v)}`);
 }
 
 test('held clock, opt-in off: with KEPLOY_HOLD_CLOCK unset each begin sends a seed as before (32 hex digits) and the test reads the real clock; only a group that sets keployHoldClock: true is held', async () => {
@@ -981,8 +990,6 @@ test('held clock, opt-in off: with KEPLOY_HOLD_CLOCK unset each begin sends a se
       assert.match(r.seeds[n], /^[0-9a-f]{32}$/, n);
       realReads(r, n);
     }
-    // Real reads one after another, not one millisecond apart from a start.
-    assert.notEqual(r.read.stamps.at(-1), r.read.stamps[0] + 5);
     const sd = r.seeds.held;
     const s = startOf(sd);
     assert.ok(s !== null && near(s), sd);
