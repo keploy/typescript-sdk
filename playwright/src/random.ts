@@ -195,6 +195,14 @@ export function setAside(): () => void {
   return () => { held.delete(hold); };
 }
 
+/**
+ * The holds setAside gives under the seat in place now: while it holds any,
+ * a worker fixture is being set up, and what runs is the worker's.
+ */
+export function asideSet(): ReadonlySet<object> {
+  return asideNow;
+}
+
 // A key of the page's session storage: how many documents of each path the
 // tab has loaded from the document's origin, so that a document loaded again
 // in the same tab (a reload, a second visit) draws new numbers, as it would

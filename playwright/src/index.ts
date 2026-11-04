@@ -45,6 +45,12 @@
 //     stamped with Math.random()) is the recording's; KEPLOY_SEED_RANDOM=off
 //     or the option keploySeedRandom: false turns it off, and the worker
 //     says once what that costs.
+//   - asked for (KEPLOY_HOLD_CLOCK=on, or the option keployHoldClock:
+//     true), the clock the test's own code reads in the test process
+//     (Date.now(), new Date(), Date()) is held: its begin's seed carries the
+//     start, and the test reads the start keploy answers, one millisecond
+//     later at each read, so data it stamps with the time is the
+//     recording's; Node's and Playwright's own reads keep the real clock.
 // Any answer of the agent this package cannot trust fails the test.
 
 import { test as base, expect } from '@playwright/test';
@@ -57,6 +63,8 @@ import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
 import { OFF_LINE, SEEDED_LINE, freshSeed, initScript, pageScript, processRandom, seatRandom, seedingFromEnv, setAside, unplacedLine, unseededLine } from './random';
 import { Inflight } from './settle';
+import { HELD_LINE, heldBeforeLine, holdingFromEnv, holds, seatClock, seedWithStart, startOf, unheldLine, wallNow } from './clock';
+import type { Holding } from './clock';
 
 export { expect, KeployError };
 export type { TestRef, Outcome };
@@ -82,6 +90,10 @@ let saidOff = false;
 // How many contexts this worker seeded: each one's report function has its
 // own name.
 let reports = 0;
+// What the environment says of the test process's held clock.
+let holding: Holding = { mode: 'unset' };
+// Whether this worker has said that it holds each test's clock.
+let saidHeld = false;
 
 /**
  * Names each page the test opens in context (context.newPage(), the page
@@ -145,6 +157,17 @@ export type KeployOptions = {
    * KEPLOY_SEED_RANDOM=off does so for the whole run.
    */
   keploySeedRandom: boolean;
+  /**
+   * Hold the clock the test's own code reads in the test process per test
+   * under keploy (default off): Date.now(), new Date() and Date() read the
+   * test's recorded start, one millisecond later at each read, so data a
+   * test stamps with the time is its recording's at replay. The start
+   * travels in the test's seed, so it needs keploySeedRandom too. Set true,
+   * for record and replay alike, to hold a project's, a file's or a group's
+   * tests; KEPLOY_HOLD_CLOCK=on does so for the whole run, false keeps a
+   * test's real clock there, and KEPLOY_HOLD_CLOCK=off keeps every test's.
+   */
+  keployHoldClock: boolean | undefined;
 };
 
 type WorkerFixtures = { keployWorker: void };
@@ -158,6 +181,9 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
       const s = seedingFromEnv(process.env);
       if (s.mode === 'refused') throw new KeployError(s.refusal);
       seedingOn = s.mode === 'seeded';
+      const h = holdingFromEnv(process.env);
+      if (h.mode === 'refused') throw new KeployError(h.refusal);
+      holding = h;
       const c = new AgentClient(j.url, j.token);
       projectDir = realpath(j.project || process.cwd());
       // The claim's key names the slice of the recording this worker's
@@ -174,6 +200,7 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
   }, { scope: 'worker', auto: true }],
 
   keploySeedRandom: [true, { option: true }],
+  keployHoldClock: [undefined, { option: true }],
 
   // After keployTest: its begin's answer holds the seed.
   context: async ({ context, keployTest }, use) => {
@@ -219,7 +246,7 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
     }
   },
 
-  keployTest: [async ({ keployWorker, keploySeedRandom }, use, testInfo) => {
+  keployTest: [async ({ keployWorker, keploySeedRandom, keployHoldClock }, use, testInfo) => {
     void keployWorker;
     const c = client;
     if (c === null) {
@@ -228,7 +255,8 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
     }
     const ref = testRef(testInfo);
     const asked = seedingOn && keploySeedRandom;
-    const b = await c.begin(ref, asked ? RANDOM_SEEDED : RANDOM_OWN, asked ? freshSeed() : undefined);
+    const hold = holds(holding, keployHoldClock);
+    const b = await c.begin(ref, asked ? RANDOM_SEEDED : RANDOM_OWN, asked ? (hold ? seedWithStart(freshSeed(), wallNow()) : freshSeed()) : undefined);
     if (b.action === ACTION_SKIP) {
       // The framework's own skip, with keploy's reason; no end follows.
       testInfo.skip(true, keployText(b.reason, 'keploy: set aside (the agent gave no reason)'));
@@ -249,11 +277,26 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
     open = ref;
     seeding = s;
     // The test process draws Math.random from the test's seed from here, its
-    // beforeEach hooks included, until its afterEach hooks and fixtures end.
+    // beforeEach hooks included, until its afterEach hooks and fixtures end;
+    // and, held, its code reads the clock at the start its seed carries.
     const unseat = s.seed !== '' ? seatRandom(processRandom(s.seed)) : null;
+    const start = startOf(s.seed);
+    let unhold: (() => void) | null = null;
+    if (hold && start !== null) {
+      unhold = seatClock(start);
+      if (!saidHeld) {
+        saidHeld = true;
+        process.stdout.write(`${HELD_LINE}\n`);
+      }
+    } else if (hold) {
+      process.stdout.write(`${unheldLine(ref.name, !asked ? 'unseeded' : s.seed === '' ? 'no seed' : 'no start')}\n`);
+    } else if (start !== null) {
+      process.stdout.write(`${heldBeforeLine(ref.name)}\n`);
+    }
     try {
       await use();
     } finally {
+      unhold?.();
       unseat?.();
     }
     open = null;
