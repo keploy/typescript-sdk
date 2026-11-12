@@ -21,7 +21,11 @@
 //     project folder (KEPLOY_MOCK_PROJECT), which its test files are named
 //     from; the current folder only when keploy names none;
 //   - each test begins (POST /agent/scope/begin) before its beforeEach hooks;
-//     a test keploy set aside is skipped with keploy's reason;
+//     a test keploy set aside is skipped with keploy's reason, which the
+//     test's output shows;
+//   - a test Playwright runs again in the run (a retry, a --repeat-each
+//     repeat) fails without beginning, and keploy is told (POST
+//     /agent/refusal), since keploy runs each test once in a run;
 //   - before the test's browser context closes, the test waits until none of
 //     its pages' calls is in flight (settle), so its calls end inside it;
 //   - the test ends (POST /agent/scope/end) after its last teardown, with
@@ -104,10 +108,28 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       return;
     }
     const ref = testRef(testInfo);
+    const again = runAgain(ref, testInfo);
+    if (again !== null) {
+      // keploy runs each test once in a run: a second run of it is failed
+      // before its begin, and keploy is told, so its verdict names the test.
+      // The message names no attempt, so the agent keeps one refusal for a
+      // test however often it is run again (each retry is a new worker).
+      let told = '';
+      try {
+        await c.refuse(REFUSE_RUN_AGAIN, again.message, again.remedy);
+      } catch (err) {
+        told = `; keploy could not be told: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      throw new KeployError(`keploy: ${again.message} (${again.remedy})${told}`);
+    }
     const b = await c.begin(ref);
     if (b.action === ACTION_SKIP) {
       // The framework's own skip, with keploy's reason; no end follows.
-      testInfo.skip(true, keployText(b.reason, 'keploy: set aside (the agent gave no reason)'));
+      // Playwright's list, line and dot reporters print a test's output but
+      // not its skip's reason, so the reason is printed as well.
+      const why = keployText(b.reason, 'keploy: set aside (the agent gave no reason)');
+      process.stderr.write(`${why} (keploy skipped ${ref.name})\n`);
+      testInfo.skip(true, why);
       return;
     }
     open = ref;
@@ -158,6 +180,28 @@ export function testRef(ti: Pick<TestInfo, 'file' | 'titlePath' | 'project'>, di
 export function keployText(reason: string | undefined, fallback: string): string {
   if (!reason) return fallback;
   return reason.startsWith('keploy: ') ? reason : `keploy: ${reason}`;
+}
+
+/** The code of the refusal of a test Playwright runs again in one run. */
+export const REFUSE_RUN_AGAIN = 'test_run_again';
+
+/**
+ * Why this run of the test is refused, or null for its first run: keploy
+ * charges a test's calls to its one window in a run (scope protocol v1,
+ * section 4), so a Playwright retry, or a repeat of --repeat-each, is not
+ * begun.
+ */
+export function runAgain(ref: TestRef, ti: Pick<TestInfo, 'retry' | 'repeatEachIndex'>): { message: string; remedy: string } | null {
+  const id = `${ref.project ? `${ref.project}::` : ''}${ref.file}::${ref.name}`;
+  if (ti.retry > 0) {
+    return { message: `Playwright retried ${id}, and keploy runs each test once in a run`,
+      remedy: 'run the suite with --retries=0, and with no retries in its config or its test.describe.configure' };
+  }
+  if (ti.repeatEachIndex > 0) {
+    return { message: `Playwright ran ${id} again for --repeat-each, and keploy runs each test once in a run`,
+      remedy: 'run the suite without --repeat-each, and with no repeatEach in its config' };
+  }
+  return null;
 }
 
 /** The test's own verdict, as keploy's end takes it. */

@@ -115,14 +115,21 @@ async function playwright(specs, env, cwd = PKG) {
   const walk = (suite, titles) => {
     for (const s of suite.suites ?? []) walk(s, s.file && s.title === s.file ? titles : [...titles, s.title]);
     for (const spec of suite.specs ?? []) {
-      const t = spec.tests[0];
-      const r = t.results[t.results.length - 1] ?? {};
-      tests[[...titles, spec.title].join(' › ')] = {
-        status: r.status ?? 'none',
-        error: (r.errors ?? []).map((e) => e.message ?? '').join('\n'),
-        annotations: r.annotations ?? t.annotations ?? [],
-        steps: steps.filter((x) => x.test === spec.title).map((x) => x.step),
-      };
+      // Each run of the test (--repeat-each lists one spec for each), its
+      // last attempt.
+      const runs = spec.tests.map((t) => {
+        const r = t.results[t.results.length - 1] ?? {};
+        return {
+          status: r.status ?? 'none',
+          error: (r.errors ?? []).map((e) => e.message ?? '').join('\n'),
+          annotations: r.annotations ?? t.annotations ?? [],
+          stderr: (r.stderr ?? []).map((e) => e.text ?? '').join(''),
+          attempts: t.results.length,
+        };
+      });
+      const key = [...titles, spec.title].join(' › ');
+      if (tests[key]) tests[key].runs.push(...runs);
+      else tests[key] = { ...runs[0], runs, steps: steps.filter((x) => x.test === spec.title).map((x) => x.step) };
     }
   };
   for (const s of JSON.parse(fs.readFileSync(report, 'utf8')).suites) walk(s, []);
@@ -184,6 +191,10 @@ test('keploy skips a set-aside test with its reason, fails a judged-red one, and
     const { tests, tmp } = await playwright(['agent-says.spec.ts'], keployEnv(a.url));
     assert.equal(tests['set aside'].status, 'skipped');
     assert.deepEqual(tests['set aside'].annotations.filter((x) => x.type === 'skip').map((x) => x.description), ['keploy: flaky/request_changed: the body changed']);
+    // Playwright's terminal reporters show a test's output, not its skip's
+    // reason: the reason is in the output.
+    assert.equal(tests['set aside'].stderr, 'keploy: flaky/request_changed: the body changed (keploy skipped set aside)\n');
+    assert.equal(tests['judged red'].stderr, '');
     assert.ok(!fs.existsSync(path.join(tmp, 'set-aside-ran')), 'the set-aside test ran');
     assert.equal(tests['judged red'].status, 'failed');
     // The agent's judging reason already starts with "keploy: "; the test shows it once (gap13 showed it twice).
@@ -194,6 +205,93 @@ test('keploy skips a set-aside test with its reason, fails a judged-red one, and
     assert.ok(!fs.existsSync(path.join(tmp, 'refused-ran')), 'the refused test ran');
     // No end for a skipped test, nor for one whose begin was refused.
     assert.deepEqual(calls(j).filter((c) => c.path === '/agent/scope/end').map((c) => c.body.name), ['judged red']);
+  } finally { await a.close(); }
+});
+
+test('keploy\'s skip reason is in the output Playwright\'s list reporter prints', async () => {
+  const j = journal();
+  const a = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.name === 'set aside'
+    ? { body: { v: 1, status: 'ok', action: 'skip', reason: 'flaky/request_changed: the body changed' } } : undefined));
+  try {
+    const { tests, out } = await playwright(['agent-says.spec.ts', '-g', 'set aside', '--reporter=list,json'], keployEnv(a.url));
+    assert.equal(tests['set aside'].status, 'skipped', out);
+    assert.match(out, /keploy: flaky\/request_changed: the body changed \(keploy skipped set aside\)/);
+  } finally { await a.close(); }
+});
+
+// retry.spec.ts's test fails its first attempt, and its group retries it
+// once whatever the command line says.
+const retried = 'retried › fails its first attempt';
+const retryRefusal = {
+  code: 'test_run_again',
+  message: `Playwright retried p1::test/fixtures/retry.spec.ts::${retried}, and keploy runs each test once in a run`,
+  remedy: 'run the suite with --retries=0, and with no retries in its config or its test.describe.configure',
+};
+
+test('a test Playwright retries is not begun again: the retry fails, saying why, and keploy is told', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  try {
+    const { tests, tmp, out } = await playwright(['retry.spec.ts'], keployEnv(a.url));
+    const t = tests[retried];
+    assert.equal(t.attempts, 2, out);
+    assert.equal(t.status, 'failed');
+    assert.equal(t.error.split('\n')[0], `KeployError: keploy: ${retryRefusal.message} (${retryRefusal.remedy})`);
+    // The retry's body did not run.
+    assert.ok(fs.existsSync(path.join(tmp, 'attempt-0')));
+    assert.ok(!fs.existsSync(path.join(tmp, 'attempt-1')), 'the retry ran');
+    const r = ref('retry.spec.ts', retried);
+    const claim = { key: 'p1', dir: fs.realpathSync(PKG) };
+    assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
+      ['/agent/instance', claim],
+      ['/agent/scope/begin', { ...r, canSkip: true }], ['/agent/scope/end', { ...r, outcome: 'failed' }],
+      // The retry runs in a new worker, which claims the run again.
+      ['/agent/instance', claim],
+      ['/agent/refusal', retryRefusal],
+    ]);
+  } finally { await a.close(); }
+});
+
+test('a retry keploy could not be told of still fails, saying why and what the agent answered', async () => {
+  const j = journal();
+  const a = await fakeAgent(j, (c) => (c.path === '/agent/refusal' ? { status: 500, body: 'boom' } : undefined));
+  try {
+    const { tests, tmp, out } = await playwright(['retry.spec.ts'], keployEnv(a.url));
+    const t = tests[retried];
+    assert.equal(t.attempts, 2, out);
+    assert.equal(t.status, 'failed');
+    assert.equal(t.error.split('\n')[0], `KeployError: keploy: ${retryRefusal.message} (${retryRefusal.remedy}); keploy could not be told: ` +
+      'keploy: the keploy agent answered 500 Internal Server Error to /agent/refusal: "\\"boom\\""');
+    assert.ok(!fs.existsSync(path.join(tmp, 'attempt-1')), 'the retry ran');
+    assert.equal(calls(j).filter((c) => c.path === '/agent/scope/begin').length, 1);
+  } finally { await a.close(); }
+});
+
+test('without keploy a retried test is retried as written', async () => {
+  const { tests, tmp, out } = await playwright(['retry.spec.ts'], { KEPLOY_MOCK_AGENT: undefined, KEPLOY_TEST_PID: undefined });
+  assert.equal(tests[retried].attempts, 2, out);
+  assert.equal(tests[retried].status, 'passed');
+  assert.ok(fs.existsSync(path.join(tmp, 'attempt-1')));
+});
+
+test('a test --repeat-each runs again is not begun again: the repeat fails, saying why, and keploy is told', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  try {
+    const { tests, out } = await playwright(['agent-says.spec.ts', '-g', 'judged red', '--repeat-each=2'], keployEnv(a.url));
+    assert.deepEqual(tests['judged red'].runs.map((t) => t.status), ['passed', 'failed'], out);
+    const message = 'Playwright ran p1::test/fixtures/agent-says.spec.ts::judged red again for --repeat-each, and keploy runs each test once in a run';
+    const remedy = 'run the suite without --repeat-each, and with no repeatEach in its config';
+    assert.equal(tests['judged red'].runs[1].error.split('\n')[0], `KeployError: keploy: ${message} (${remedy})`);
+    const r = ref('agent-says.spec.ts', 'judged red');
+    const claim = { key: 'p1', dir: fs.realpathSync(PKG) };
+    assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
+      ['/agent/instance', claim],
+      ['/agent/scope/begin', { ...r, canSkip: true }], ['/agent/scope/end', { ...r, outcome: 'passed' }],
+      // Playwright runs each repeat in a worker of its own.
+      ['/agent/instance', claim],
+      ['/agent/refusal', { code: 'test_run_again', message, remedy }],
+    ]);
   } finally { await a.close(); }
 });
 

@@ -10,7 +10,7 @@ import { AgentClient, KeployError } from '../dist/agent.js';
 import { decide } from '../dist/join.js';
 import { Inflight } from '../dist/settle.js';
 import { EventEmitter } from 'node:events';
-import { testRef, outcomeOf, sourceOf, keployText } from '../dist/index.js';
+import { testRef, outcomeOf, sourceOf, keployText, runAgain } from '../dist/index.js';
 
 // One fake agent answering every call with answer(path, body).
 async function agent(answer) {
@@ -131,6 +131,63 @@ test('a claim answered with a plain 404 names the route and the switch keploy sp
   try {
     await rejects(new AgentClient(a.url, '').claim('p', '/d'), /^keploy: the keploy agent answered 500 Internal Server Error to \/agent\/instance: "boom"$/);
   } finally { await a.close(); }
+});
+
+test('a begin, an end or a refusal answered with a plain 404 names the route and the switch, as the claim does; keploy\'s own 404 shows keploy\'s reason', async () => {
+  const t = { name: 'g › a', file: 'a.spec.ts' };
+  const proven = (route, what) => new RegExp(`^keploy: this keploy agent answered 404 to POST ${route.replace(/\//g, '\\/')}, so ${what}: ` +
+    'keploy speaks @keploy\\/playwright\'s wire, scope protocol v1, only when it runs with KEPLOY_PROVEN=1 ' +
+    '\\(KEPLOY_PROVEN=1 keploy mock record\\|replay -c "npx playwright test --workers=1 --retries=0"\\); ' +
+    'a keploy run without KEPLOY_PROVEN=1, or one from before scope protocol v1, answers 404 there$');
+  const calls = [
+    [(c) => c.begin(t), proven('/agent/scope/begin', 'g › a cannot begin')],
+    [(c) => c.end(t, 'passed'), proven('/agent/scope/end', 'g › a cannot end')],
+    [(c) => c.refuse('test_run_again', 'm', 'r'), proven('/agent/refusal', 'keploy cannot be told of the refusal')],
+  ];
+  for (const [call, re] of calls) {
+    let a = await agent(() => ({ status: 404, body: '404 page not found' }));
+    try {
+      await rejects(call(new AgentClient(a.url, '')), re);
+    } finally { await a.close(); }
+    a = await agent(() => ({ status: 404, body: { error: 'not_open', message: 'g › a is not open', remedy: 'begin it first' } }));
+    try {
+      await rejects(call(new AgentClient(a.url, '')), /^keploy: g › a is not open \(begin it first\)$/);
+    } finally { await a.close(); }
+    // Any other plain answer keeps the generic text.
+    a = await agent(() => ({ status: 500, body: 'boom' }));
+    try {
+      await rejects(call(new AgentClient(a.url, '')), /^keploy: the keploy agent answered 500 Internal Server Error to \/agent\/[a-z/]+: "boom"$/);
+    } finally { await a.close(); }
+  }
+});
+
+test('refuse sends the code, the message and the remedy, and takes only ok', async () => {
+  let a = await agent(() => ({ body: { v: 1, status: 'ok' } }));
+  try {
+    await new AgentClient(a.url, 'tok').refuse('test_run_again', 'Playwright retried a', 'run with --retries=0');
+    assert.deepEqual(a.calls.map((x) => [x.path, x.auth, x.body]),
+      [['/agent/refusal', 'Bearer tok', { code: 'test_run_again', message: 'Playwright retried a', remedy: 'run with --retries=0' }]]);
+  } finally { await a.close(); }
+  for (const body of [{ v: 1 }, { v: 1, status: 'busy' }]) {
+    a = await agent(() => ({ body }));
+    try {
+      await rejects(new AgentClient(a.url, '').refuse('test_run_again', 'm', 'r'), /^keploy: the keploy agent answered the refusal test_run_again with status "(busy)?"$/);
+    } finally { await a.close(); }
+  }
+});
+
+test('runAgain: a retry and a repeat of --repeat-each are refused, naming the test by its keploy ID; a first run is not', () => {
+  const ref = { name: 'g › a', file: 'tests/a.spec.ts', project: 'chromium' };
+  assert.equal(runAgain(ref, { retry: 0, repeatEachIndex: 0 }), null);
+  const retry = { message: 'Playwright retried chromium::tests/a.spec.ts::g › a, and keploy runs each test once in a run',
+    remedy: 'run the suite with --retries=0, and with no retries in its config or its test.describe.configure' };
+  assert.deepEqual(runAgain(ref, { retry: 1, repeatEachIndex: 0 }), retry);
+  // The message names no attempt: the agent keeps one refusal per test.
+  assert.deepEqual(runAgain(ref, { retry: 2, repeatEachIndex: 0 }), retry);
+  assert.deepEqual(runAgain(ref, { retry: 1, repeatEachIndex: 1 }), retry);
+  assert.deepEqual(runAgain({ name: 'g › a', file: 'tests/a.spec.ts' }, { retry: 0, repeatEachIndex: 1 }), {
+    message: 'Playwright ran tests/a.spec.ts::g › a again for --repeat-each, and keploy runs each test once in a run',
+    remedy: 'run the suite without --repeat-each, and with no repeatEach in its config' });
 });
 
 test('an unreachable agent is an error', async () => {

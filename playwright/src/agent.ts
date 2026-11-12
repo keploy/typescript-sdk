@@ -1,6 +1,6 @@
 // The client of keploy's agent: scope protocol v1, the same wire go-sdk's
 // keploytest speaks (POST /agent/instance, /agent/scope/begin,
-// /agent/scope/end, /agent/scope/given).
+// /agent/scope/end, /agent/scope/given, /agent/refusal).
 //
 // Every answer of the agent carries the protocol version as "v"; an answer
 // without it, or with another version, is an error, so this package on an
@@ -14,6 +14,7 @@ export const PATH_INSTANCE = '/agent/instance';
 export const PATH_BEGIN = '/agent/scope/begin';
 export const PATH_END = '/agent/scope/end';
 export const PATH_GIVEN = '/agent/scope/given';
+export const PATH_REFUSAL = '/agent/refusal';
 
 export const ACTION_SKIP = 'skip';
 export const ACTION_FAIL = 'fail';
@@ -106,25 +107,30 @@ export class AgentClient {
     return a as Answer;
   }
 
-  /** Claims keploy's run for this test process (a Playwright worker). */
-  async claim(key: string, dir: string): Promise<Answer> {
-    let a: Answer;
+  /**
+   * Sends a call of the scope protocol's first release. keploy speaks it
+   * only under its proven switch: with the switch off (keploy's default),
+   * the agent has no route for it and answers the mux's plain 404, as a
+   * keploy from before the protocol does. So a plain 404 names the switch,
+   * saying what it stopped (what).
+   */
+  private async onWire(path: string, body: unknown, what: string): Promise<Answer> {
     try {
-      a = await this.post(PATH_INSTANCE, { key, dir });
+      return await this.post(path, body);
     } catch (err) {
       if (err instanceof KeployError && err.status === 404 && err.code === '') {
-        // keploy speaks scope protocol v1 only under its proven switch. With
-        // it off (keploy's default) the agent has no claim route and answers
-        // the mux's plain 404, as a keploy from before the protocol does
-        // (its begin and end answer an older, unversioned wire). The claim is
-        // this package's first call, so it is the one that names the switch.
-        throw new KeployError(`keploy: this keploy agent answered 404 to POST ${PATH_INSTANCE}, so this worker cannot claim keploy's run: ` +
+        throw new KeployError(`keploy: this keploy agent answered 404 to POST ${path}, so ${what}: ` +
           'keploy speaks @keploy/playwright\'s wire, scope protocol v1, only when it runs with KEPLOY_PROVEN=1 ' +
           '(KEPLOY_PROVEN=1 keploy mock record|replay -c "npx playwright test --workers=1 --retries=0"); ' +
           'a keploy run without KEPLOY_PROVEN=1, or one from before scope protocol v1, answers 404 there', 404);
       }
       throw err;
     }
+  }
+
+  /** Claims keploy's run for this test process (a Playwright worker). */
+  async claim(key: string, dir: string): Promise<Answer> {
+    const a = await this.onWire(PATH_INSTANCE, { key, dir }, 'this worker cannot claim keploy\'s run');
     if (!a.instance) {
       throw new KeployError('keploy: the keploy agent answered the claim of this test process without an instance');
     }
@@ -137,7 +143,7 @@ export class AgentClient {
 
   /** Asks the agent to open a test. */
   async begin(test: TestRef): Promise<Answer> {
-    const a = await this.post(PATH_BEGIN, { ...test, canSkip: true });
+    const a = await this.onWire(PATH_BEGIN, { ...test, canSkip: true }, `${test.name} cannot begin`);
     if (a.status !== 'ok') {
       throw new KeployError(`keploy: the keploy agent answered the begin of ${test.name} with status ${JSON.stringify(a.status ?? '')}`);
     }
@@ -149,7 +155,7 @@ export class AgentClient {
 
   /** Tells the agent the test ended, with its outcome. */
   async end(test: TestRef, outcome: Outcome): Promise<Answer> {
-    const a = await this.post(PATH_END, { ...test, outcome });
+    const a = await this.onWire(PATH_END, { ...test, outcome }, `${test.name} cannot end`);
     if (a.status !== 'ok') {
       throw new KeployError(`keploy: the keploy agent answered the end of ${test.name} with status ${JSON.stringify(a.status ?? '')}`);
     }
@@ -157,6 +163,17 @@ export class AgentClient {
       throw new KeployError(`keploy: the keploy agent answered the end of ${test.name} with the unknown action ${JSON.stringify(a.action)}`);
     }
     return a;
+  }
+
+  /**
+   * Tells keploy this package refused something keploy cannot judge (a
+   * test Playwright retried), so keploy's verdict on the run names it.
+   */
+  async refuse(code: string, message: string, remedy: string): Promise<void> {
+    const a = await this.onWire(PATH_REFUSAL, { code, message, remedy }, 'keploy cannot be told of the refusal');
+    if (a.status !== 'ok') {
+      throw new KeployError(`keploy: the keploy agent answered the refusal ${code} with status ${JSON.stringify(a.status ?? '')}`);
+    }
   }
 
   /** Gives the open test a value it made itself. Returns the agent's variable name. */
