@@ -726,7 +726,6 @@ export function initScript(seed: string, report = '', mark = ''): string {
     const s = now();
     if (s.kind === 'top') return s.uncounted ? 'nostorage' : '';
     if (s.kind === 'other') return s.uncounted ? 'uncounted' : '';
-    if (s.kind !== 'frame') return '';
     return s.frame === null ? 'frame' : s.up.why();
   };
   const aboveFor = () => {
