@@ -138,7 +138,10 @@ async function playwright(specs, env, cwd = PKG) {
       if (tests[key]) tests[key].runs.push(...runs);
       else {
         const mine = steps.filter((x) => x.test === spec.title);
-        tests[key] = { ...runs[0], runs, steps: mine.map((x) => x.step), at: Object.fromEntries(mine.map((x) => [x.step, x.at])) };
+        const begun = mine.filter((x) => x.step !== undefined);
+        // order: the test's steps begun and its stdout writes, as they came.
+        const order = mine.map((x) => (x.step !== undefined ? { step: x.step } : { out: x.out }));
+        tests[key] = { ...runs[0], runs, steps: begun.map((x) => x.step), at: Object.fromEntries(begun.map((x) => [x.step, x.at])), order };
       }
     }
   };
@@ -597,11 +600,15 @@ async function drawsServer() {
       },
     };
   })();
+  const rheld = [];
   const srv = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x');
     // /csp is served with a CSP sandbox: an opaque origin, no session storage.
     if (u.pathname === '/csp') { res.writeHead(200, { 'content-type': 'text/html', 'content-security-policy': 'sandbox allow-scripts' }); res.end(page('csp')); return; }
     if (u.pathname === '/held.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); held.script(() => res.end('')); return; }
+    // parse.spec.ts's removed: /rhold.js is answered at /rrelease.
+    if (u.pathname === '/rhold.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); rheld.push(res); return; }
+    if (u.pathname === '/rrelease') { for (const r of rheld.splice(0)) r.end(''); res.end(''); return; }
     res.writeHead(200, { 'content-type': 'text/html' });
     if (u.pathname === '/draws') { res.end(page(`<iframe src="http://localhost:${srv.address().port}/frame"></iframe>`)); return; }
     if (u.pathname === '/frame') { res.end(page('frame')); return; }
@@ -699,6 +706,14 @@ async function drawsServer() {
       return;
     }
     if (u.pathname === '/hold.js' || u.pathname === '/hold.png') return;
+    // parse.spec.ts's removed: frame p at /rparsed, which holds u0 and u1 at
+    // /fs, then /rhold.js.
+    if (u.pathname === '/removed') { res.end(page('<iframe name="p" src="/rparsed"></iframe>')); return; }
+    if (u.pathname === '/rparsed') {
+      const f = (n) => `<iframe name="${n}" sandbox="allow-scripts" src="/fs"></iframe>`;
+      res.end(page(`${f('u0')}${f('u1')}<script src="/rhold.js"></script>`));
+      return;
+    }
     if (u.pathname === '/cost') {
       const n = Number(u.searchParams.get('n') || 0);
       const sh = Number(u.searchParams.get('shadow') || 0);
@@ -1193,7 +1208,7 @@ for (const engine of ENGINES) {
 }
 
 for (const engine of ENGINES) {
-  test(`seeded, in ${engine}: a sandboxed frame's line counts the frames beside it once its parent's parser has ended, not at its parent's load; or at the test's end when the parser has not ended by then`, async () => {
+  test(`seeded, in ${engine}: a sandboxed frame's line counts the frames beside it once its parent's parser has ended, not at its parent's load; or at the test's end, before its wait, when the parser has not ended by then; or at once, naming none, when its parent is removed`, async () => {
     const j = journal();
     const a = await fakeAgent(j);
     const d = await drawsServer();
@@ -1208,7 +1223,20 @@ for (const engine of ENGINES) {
         const said = t.stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${n}, `)).map((l) => l.replace(/:\d+\//, ':<port>/'));
         assert.deepEqual(said, [unplacedLine(n, 'http://127.0.0.1:<port>/fs', 'uncounted', others)], n);
         assert.ok(t.steps.some((s) => s.startsWith('keploy: wait for the test\'s 1 call(s) in flight') && s.endsWith(call)), `${n}: ${t.steps.join('\n')}`);
+        // The line comes before that wait, not when the context closes.
+        const line = t.order.findIndex((o) => o.out?.startsWith(`keploy: in ${n}, `));
+        const wait = t.order.findIndex((o) => o.step?.startsWith('keploy: wait for the test\'s 1 call(s) in flight'));
+        assert.ok(line >= 0 && line < wait, `${n}: ${JSON.stringify(t.order)}`);
       }
+      // removed: the line comes once p is removed, before the test's next
+      // step, and names no other frame: theirs are gone with p.
+      const t = tests.removed;
+      assert.equal(t.status, 'passed', `removed: ${t.error}\n${out}`);
+      const said = t.stdout.split('\n').filter((l) => l.startsWith('keploy: in removed, ')).map((l) => l.replace(/:\d+\//, ':<port>/'));
+      assert.deepEqual(said, [unplacedLine('removed', 'http://127.0.0.1:<port>/fs', 'uncounted', 0)]);
+      const line = t.order.findIndex((o) => o.out?.startsWith('keploy: in removed, '));
+      const next = t.order.findIndex((o) => o.step === 'p removed');
+      assert.ok(line >= 0 && line < next, `removed: ${JSON.stringify(t.order)}`);
     } finally { await d.close(); await a.close(); }
   });
 }
