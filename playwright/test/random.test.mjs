@@ -309,6 +309,47 @@ test('a seeded document draws the same numbers for the same seed and path, other
   assert.notDeepEqual(documentAt('', '/p').draws(), documentAt('', '/p').draws());
 });
 
+// Each seeded function's own property flags and source, as a document sees them.
+const FLAGS = `JSON.stringify([[Math, 'random'], [Crypto.prototype, 'getRandomValues'], [Crypto.prototype, 'randomUUID']].map(([o, k]) => {
+  const p = Object.getOwnPropertyDescriptor(o, k);
+  return p ? [k, p.writable, p.enumerable, p.configurable, String(p.value)] : [k];
+}))`;
+
+test('a seeded document\'s Math.random, getRandomValues and randomUUID keep the browser\'s property flags: a page that lists Math\'s keys sees none', () => {
+  const own = JSON.parse(documentAt(null, '/p').run(FLAGS));
+  const seeded = JSON.parse(documentAt(initScript(S1), '/p').run(FLAGS));
+  // The seeding put its own functions in place, with the flags the browser's own had.
+  for (const [i, f] of seeded.entries()) assert.notEqual(f[4], own[i][4], f[0]);
+  assert.deepEqual(seeded.map((f) => f.slice(0, 4)), own.map((f) => f.slice(0, 4)));
+  assert.deepEqual(own.map((f) => f.slice(0, 4)), [['random', true, false, true], ['getRandomValues', true, false, true], ['randomUUID', true, false, true]]);
+  assert.deepEqual(JSON.parse(documentAt(initScript(S1), '/p').run('JSON.stringify(Object.keys(Math))')), []);
+});
+
+test('the seeding keeps a Math.random a script before it made read-only read-only, and gives a method Crypto.prototype only inherits an own one, writable and not enumerable; both draw the seeded numbers', () => {
+  const seeded = documentAt(initScript(S1), '/p').draws();
+  const FROZEN = "Object.defineProperty(Math, 'random', { writable: false });\n";
+  const frozenOwn = JSON.parse(documentAt(FROZEN, '/p').run(FLAGS));
+  assert.deepEqual(frozenOwn[0].slice(0, 4), ['random', false, false, true]);
+  const frozen = documentAt(FROZEN + initScript(S1), '/p');
+  const frozenFlags = JSON.parse(frozen.run(FLAGS));
+  assert.deepEqual(frozenFlags[0].slice(0, 4), frozenOwn[0].slice(0, 4));
+  assert.notEqual(frozenFlags[0][4], frozenOwn[0][4]);
+  assert.deepEqual(frozen.draws(), seeded);
+  // As a browser whose Crypto.prototype inherits both methods from a base.
+  const INHERITED = `{
+  const base = Object.create(Object.getPrototypeOf(Crypto.prototype));
+  for (const k of ['getRandomValues', 'randomUUID']) {
+    Object.defineProperty(base, k, Object.getOwnPropertyDescriptor(Crypto.prototype, k));
+    delete Crypto.prototype[k];
+  }
+  Object.setPrototypeOf(Crypto.prototype, base);
+}\n`;
+  assert.deepEqual(JSON.parse(documentAt(INHERITED, '/p').run(FLAGS)).slice(1), [['getRandomValues'], ['randomUUID']]);
+  const inherited = documentAt(INHERITED + initScript(S1), '/p');
+  assert.deepEqual(JSON.parse(inherited.run(FLAGS)).slice(1).map((f) => f.slice(0, 4)), [['getRandomValues', true, false, true], ['randomUUID', true, false, true]]);
+  assert.deepEqual(inherited.draws(), seeded);
+});
+
 test('each page the test opened draws its own numbers at one path, the same ones each run; its place is named in every document after the seeding script', () => {
   const s = initScript(S1);
   const first = documentAt(s, '/p', new Map(), 't0').draws();
