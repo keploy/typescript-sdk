@@ -3,7 +3,11 @@
 // a page. No browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DOC_KEY, ENV_SEED_RANDOM, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatRandom, seedingFromEnv, setAside, unplacedLine, unseededLine } from '../dist/random.js';
+import { DOC_KEY, ENV_SEED_RANDOM, FAKER, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, esmFile, exportOf, fakerLine, fakersIn, fakersOf, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatFaker, seatRandom, seedingFromEnv, setAside, unplacedLine, unseededLine } from '../dist/random.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { SEED } from '../dist/agent.js';
 import { OTHER, documentAt } from './draws.mjs';
 
@@ -29,11 +33,13 @@ test('seeding is on unless KEPLOY_SEED_RANDOM turns it off; another value is ref
 
 test('the lines say what is seeded, what is not, where the seed lives, and how to turn it off or on', () => {
   assert.equal(SEEDED_LINE, 'keploy: each test\'s random numbers are seeded from a seed keploy keeps with the test\'s recording, so a replay draws the numbers its recording drew: ' +
-    'in the test browser Math.random, crypto.getRandomValues and crypto.randomUUID, and in the test process Math.random, from the test\'s begin to its end ' +
+    'in the test browser Math.random, crypto.getRandomValues and crypto.randomUUID, and in the test process Math.random and the instances ' +
+    '@faker-js/faker makes as it loads (faker, fakerDE, ...), from the test\'s begin to its end ' +
     '(its beforeEach and afterEach hooks too). ' +
     'Web Workers and Service Workers keep the browser\'s own, and so does a page the app opens that keploy cannot place (each one is named); ' +
-    'the test process keeps its own crypto, and its own Math.random outside every test (beforeAll, afterAll, a file as it loads) ' +
-    'and while a worker fixture registered with this package\'s test.extend or test.use is set up. ' +
+    'the test process keeps its own crypto, and its own Math.random and faker outside every test (beforeAll, afterAll, a file as it loads) ' +
+    'and while a worker fixture registered with this package\'s test.extend or test.use is set up; a faker instance the suite makes itself ' +
+    '(new Faker(...)) as a file loads draws its own, and one it seeds itself (faker.seed(n)) draws as seeded. ' +
     'To turn it off, record and replay with KEPLOY_SEED_RANDOM=off, or set use: { keploySeedRandom: false } in the Playwright config.');
   assert.equal(OFF_LINE, 'keploy: random numbers are not seeded (KEPLOY_SEED_RANDOM=off, or keploySeedRandom: false), ' +
     'so the test process and the test browser draw their own each run: data a test makes from them (a name, an email, an ID) differs from its recording\'s ' +
@@ -291,6 +297,208 @@ test('setAside gives the process\'s own Math.random back under the seat until ea
     } finally { unseat2(); }
     assert.equal(Math.random(), 0.5);
   } finally { Math.random = realRandom; }
+});
+
+// A faker instance's randomizer as faker makes one: its own next and seed.
+const fakeRandomizer = (v) => {
+  const seeds = [];
+  return { seeds, r: { next() { return v; }, seed(...a) { seeds.push(a); } } };
+};
+
+test('a named stream of the test process: the same numbers for a seed and name on every run and every version, others for another name; Math.random\'s is the unnamed one', () => {
+  assert.deepEqual([processRandom(S1, 'Math.random')(), processRandom(S1, 'Math.random')()], [processRandom(S1)(), processRandom(S1)()]);
+  const f = processRandom(S1, `${FAKER} faker`);
+  // Pinned to a reference made outside this package (sfc32 over the SHA-256
+  // of the seed, "test process" and the name): a recording keeps the seed,
+  // not the numbers.
+  assert.deepEqual([f(), f()], [0.9618393967615386, 0.5619964902771277]);
+  assert.notEqual(processRandom(S1, `${FAKER} faker`)(), processRandom(S1)());
+  assert.notEqual(processRandom(S1, `${FAKER} faker`)(), processRandom(S1, `${FAKER} fakerDE`)());
+  assert.notEqual(processRandom(S1, `${FAKER} faker`)(), processRandom(S2, `${FAKER} faker`)());
+});
+
+test('seatFaker puts each instance\'s draws on its named stream of the seed and its own back; setAside, and a test that seeds the instance itself, give it its own; a replacement the test put there stays', () => {
+  const realRandom = Math.random;
+  try {
+    const a = fakeRandomizer(0.25);
+    const b = fakeRandomizer(0.75);
+    const ownA = a.r.next;
+    const ownSeedA = a.r.seed;
+    const ownB = b.r.next;
+    const mine = () => 0.5;
+    const unseat = seatRandom(processRandom(S1));
+    const unseatFaker = seatFaker(S1, [['faker', a.r], ['fakerDE', b.r]]);
+    const fa = processRandom(S1, `${FAKER} faker`);
+    const fb = processRandom(S1, `${FAKER} fakerDE`);
+    const m = processRandom(S1);
+    try {
+      assert.equal(a.r.next(), fa());
+      // One instance's draws move neither another's nor Math.random's.
+      assert.equal(b.r.next(), fb());
+      assert.equal(Math.random(), m());
+      assert.equal(a.r.next(), fa());
+      // While a worker fixture is set up, its own; no draw of the stream taken.
+      const back = setAside();
+      assert.equal(a.r.next(), 0.25);
+      assert.equal(b.r.next(), 0.75);
+      back();
+      assert.equal(a.r.next(), fa());
+      // The test seeds a itself: a's own seed is called as asked, and a
+      // draws its own from then on; b stays seated.
+      assert.equal(a.r.seed(7), undefined);
+      assert.deepEqual(a.seeds, [[7]]);
+      assert.equal(a.r.next, ownA);
+      assert.equal(a.r.seed, ownSeedA);
+      assert.equal(a.r.next(), 0.25);
+      assert.equal(b.r.next(), fb());
+      // A replacement the test put on b stays.
+      b.r.next = mine;
+    } finally {
+      unseatFaker();
+      unseat();
+    }
+    assert.equal(a.r.next, ownA);
+    assert.equal(b.r.next, mine);
+    assert.notEqual(b.r.next, ownB);
+    assert.equal(b.r.next(), 0.5);
+    // With nothing found, a seat changes nothing.
+    seatFaker(S1, [])();
+  } finally { Math.random = realRandom; }
+});
+
+test('seatFaker puts back the seed of an instance the test did not seed, and leaves one the test replaced', () => {
+  const a = fakeRandomizer(0.25);
+  const ownSeed = a.r.seed;
+  const unseat = seatRandom(processRandom(S1));
+  const un = seatFaker(S1, [['faker', a.r]]);
+  assert.notEqual(a.r.seed, ownSeed);
+  un();
+  unseat();
+  assert.equal(a.r.seed, ownSeed);
+  const c = fakeRandomizer(0.25);
+  const unseat2 = seatRandom(processRandom(S1));
+  const un2 = seatFaker(S1, [['faker', c.r]]);
+  const theirs = () => 'theirs';
+  c.r.seed = theirs;
+  un2();
+  unseat2();
+  assert.equal(c.r.seed, theirs);
+});
+
+test('esmFile: .mjs and .mts files are ES modules and .cjs and .cts are not; any other is one when its nearest package.json says "type": "module"', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kpw-esm-'));
+  try {
+    for (const [f, want] of [['a.mjs', true], ['a.mts', true], ['a.cjs', false], ['a.cts', false]]) assert.equal(esmFile(path.join(tmp, f)), want, f);
+    fs.mkdirSync(path.join(tmp, 'm', 'deep'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, 'm', 'package.json'), '{"type":"module"}');
+    assert.equal(esmFile(path.join(tmp, 'm', 'deep', 'a.spec.ts')), true);
+    assert.equal(esmFile(path.join(tmp, 'm', 'deep', 'a.cts')), false);
+    // The nearest package.json decides, even one with no type.
+    fs.writeFileSync(path.join(tmp, 'm', 'deep', 'package.json'), '{"name":"x"}');
+    assert.equal(esmFile(path.join(tmp, 'm', 'deep', 'a.spec.ts')), false);
+    fs.writeFileSync(path.join(tmp, 'm', 'deep', 'package.json'), '{"type":"commonjs"}');
+    assert.equal(esmFile(path.join(tmp, 'm', 'deep', 'a.spec.js')), false);
+    // One keploy cannot read as JSON: not an ES module.
+    fs.writeFileSync(path.join(tmp, 'm', 'deep', 'package.json'), '{');
+    assert.equal(esmFile(path.join(tmp, 'm', 'deep', 'a.spec.ts')), false);
+    fs.writeFileSync(path.join(tmp, 'm', 'deep', 'package.json'), 'null');
+    assert.equal(esmFile(path.join(tmp, 'm', 'deep', 'a.spec.ts')), false);
+    // This package's own test files are CommonJS.
+    assert.equal(esmFile(fileURLToPath(import.meta.url).replace(/\.mjs$/, '.ts')), false);
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('exportOf picks a package\'s main entry as Node does: the first condition in the object\'s order, nested, in an array the first that gives a file', () => {
+  const imp = ['node', 'import', 'module-sync', 'default'];
+  assert.equal(exportOf('./i.js', imp), './i.js');
+  assert.equal(exportOf({ '.': './d.js', './x': './x.js' }, imp), './d.js');
+  assert.equal(exportOf({ './x': './x.js' }, imp), null);
+  // faker 9's: require first, but an import takes default.
+  const f9 = { '.': { require: { types: './i.d.cts', default: './i.cjs' }, default: { types: './i.d.ts', default: './i.js' } } };
+  assert.equal(exportOf(f9, imp), './i.js');
+  assert.equal(exportOf(f9, ['require', 'default']), './i.cjs');
+  // Key order decides, not the conditions' order.
+  assert.equal(exportOf({ default: './d.js', import: './i.js' }, imp), './d.js');
+  assert.equal(exportOf({ browser: './b.js', import: './i.js' }, imp), './i.js');
+  // A condition whose target gives no file passes to the next.
+  assert.equal(exportOf({ import: { browser: './b.js' }, default: './d.js' }, imp), './d.js');
+  assert.equal(exportOf([{ browser: './b.js' }, './a.js'], imp), './a.js');
+  assert.equal(exportOf([{ browser: './b.js' }], imp), null);
+  assert.equal(exportOf({ browser: './b.js' }, imp), null);
+  for (const v of [null, undefined, 3, true]) assert.equal(exportOf(v, imp), null, String(v));
+});
+
+test('fakersIn finds each faker instance a module exports once, by its export\'s name, in the names\' order; allFakers\' are named by their fakerXX export', async () => {
+  const m = await import('@faker-js/faker');
+  const found = fakersIn(m);
+  const names = found.map(([n]) => n);
+  assert.ok(names.includes('faker') && names.includes('fakerDE') && names.includes('simpleFaker'), names.join(' '));
+  assert.ok(!names.some((n) => n.startsWith('allFakers.')), names.join(' '));
+  assert.deepEqual(names, [...names].sort());
+  const rs = found.map(([, r]) => r);
+  assert.equal(new Set(rs).size, rs.length);
+  assert.equal(found.find(([n]) => n === 'faker')[1], m.faker.fakerCore.randomizer);
+  for (const v of Object.values(m.allFakers)) assert.ok(rs.includes(v.fakerCore.randomizer));
+  // faker 8 and 9 keep theirs in _randomizer; one only in allFakers is named there.
+  const old = fakeRandomizer(0.5).r;
+  const only = fakeRandomizer(0.5).r;
+  assert.deepEqual(fakersIn({ faker: { _randomizer: old }, allFakers: { xx: { _randomizer: only }, de: { _randomizer: old } } }), [['faker', old], ['allFakers.xx', only]]);
+  // Neither an instance nor a module.
+  assert.deepEqual(fakersIn({ a: 1, b: { fakerCore: null }, c: { _randomizer: { next() { return 0; } } }, d: { fakerCore: { randomizer: 5 } }, allFakers: 3 }), []);
+  for (const v of [null, undefined, 'm', 3]) assert.deepEqual(fakersIn(v), []);
+  const throwing = { get faker() { throw new Error('not yet'); }, other: { get fakerCore() { throw new Error('no'); } }, get allFakers() { throw new Error('no'); } };
+  assert.deepEqual(fakersIn(throwing), []);
+});
+
+test('fakersOf gives a test file the faker instances its own import gets, CommonJS or ES module, the same ones each time; none where it cannot import faker; a problem where it can but keploy cannot load it', async () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const m = await import('@faker-js/faker');
+  for (const f of ['fixtures/faker.spec.ts', 'fixtures/faker-esm.spec.mts']) {
+    const got = fakersOf(path.join(here, f));
+    assert.equal(got.problem, '', f);
+    assert.equal(got.found.find(([n]) => n === 'faker')[1], m.faker.fakerCore.randomizer, f);
+    assert.equal(fakersOf(path.join(here, f)), got, f);
+  }
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kpw-faker-'));
+  try {
+    assert.deepEqual(fakersOf(path.join(tmp, 'a.spec.ts')), { found: [], problem: '' });
+    // A faker whose exports give no file for this kind of test file.
+    const pkg = (dir, json, files) => {
+      const d = path.join(tmp, dir, 'node_modules', '@faker-js', 'faker');
+      fs.mkdirSync(path.join(d, 'dist'), { recursive: true });
+      fs.writeFileSync(path.join(d, 'package.json'), JSON.stringify({ name: FAKER, ...json }));
+      for (const [n, body] of Object.entries(files)) fs.writeFileSync(path.join(d, n), body);
+    };
+    pkg('imp', { exports: { '.': { import: './dist/i.mjs' } } }, { 'dist/i.mjs': 'export const x = 1;\n' });
+    const imp = fakersOf(path.join(tmp, 'imp', 'a.spec.ts'));
+    assert.deepEqual(imp.found, []);
+    assert.match(imp.problem, /\S/);
+    // An ES module test file of a faker that exports nothing for import.
+    pkg('noimp', { exports: { '.': { require: './dist/i.cjs' } } }, { 'dist/i.cjs': 'exports.x = 1;\n' });
+    assert.deepEqual(fakersOf(path.join(tmp, 'noimp', 'a.spec.mts')), { found: [], problem: 'its package.json exports no file for import' });
+    // One that loads but exports no instance; one with no exports but a main.
+    pkg('none', { main: 'dist/m.cjs' }, { 'dist/m.cjs': 'exports.x = 1;\n' });
+    assert.deepEqual(fakersOf(path.join(tmp, 'none', 'a.spec.ts')), { found: [], problem: 'it exports no instance keploy knows how to seed (faker 8, 9 and 10 do)' });
+    assert.deepEqual(fakersOf(path.join(tmp, 'none', 'a.spec.mts')), { found: [], problem: 'it exports no instance keploy knows how to seed (faker 8, 9 and 10 do)' });
+    // An ES module test file gets the import's copy, a CommonJS one the require's.
+    const inst = (v) => `{ fakerCore: { randomizer: { next() { return ${v}; }, seed() {} } } }`;
+    pkg('dual', { exports: { '.': { require: './dist/i.cjs', default: './dist/i.mjs' } } }, {
+      'dist/i.cjs': `exports.faker = ${inst(0.1)};\n`,
+      'dist/i.mjs': `export const faker = ${inst(0.2)};\n`,
+    });
+    assert.equal(fakersOf(path.join(tmp, 'dual', 'a.spec.ts')).found[0][1].next(), 0.1);
+    assert.equal(fakersOf(path.join(tmp, 'dual', 'a.spec.mts')).found[0][1].next(), 0.2);
+    // A package keploy cannot find the root of from its entry.
+    pkg('noroot', { name: 'other', main: 'dist/m.cjs' }, { 'dist/m.cjs': 'exports.x = 1;\n' });
+    assert.match(fakersOf(path.join(tmp, 'noroot', 'a.spec.mts')).problem, /^no package\.json of @faker-js\/faker holds /);
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
+test('the line for a faker keploy cannot seed names the reason and the next step', () => {
+  assert.equal(fakerLine('Cannot find module x'), 'keploy: @faker-js/faker is installed where the tests import it, but keploy cannot seed it (Cannot find module x), ' +
+    'so what its instances make (a name, an email, an ID) differs from its recording\'s at replay while a mocked dependency answers with the recording\'s. ' +
+    'Fix what the message names (an ES module needs Node 20.19, 22.12 or later to be loaded here), or seed it in a beforeEach (faker.seed(n)).');
+  assert.match(fakerLine('a\nb'), /cannot seed it \(a\?b\)/);
 });
 
 test('a seeded document draws the same numbers for the same seed and path, others for another seed or path', () => {

@@ -58,7 +58,7 @@ import { ACTION_FAIL, ACTION_SKIP, AgentClient, KeployError, RANDOM_OWN, RANDOM_
 import type { Outcome, Random, TestRef } from './agent';
 import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
-import { OFF_LINE, SEEDED_LINE, besideOf, freshSeed, initScript, othersNow, pageAddress, placePages, processRandom, seatRandom, seedingFromEnv, setAside, unplacedLine, unseededLine, type Unplaced } from './random';
+import { OFF_LINE, SEEDED_LINE, besideOf, fakerLine, fakersOf, freshSeed, initScript, othersNow, pageAddress, placePages, processRandom, seatFaker, seatRandom, seedingFromEnv, setAside, unplacedLine, unseededLine, type Fakers, type Unplaced } from './random';
 import { Inflight } from './settle';
 
 export { expect, KeployError };
@@ -82,6 +82,8 @@ let seedingOn = false;
 let saidSeeded = false;
 // Whether this worker has said what a test with seeding off costs.
 let saidOff = false;
+// The reasons this worker has said it cannot seed faker, each said once.
+const saidFaker = new Set<string>();
 // How many contexts this worker seeded: each one's report function has its
 // own name.
 let reports = 0;
@@ -279,12 +281,26 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
     }
     open = ref;
     seeding = s;
-    // The test process draws Math.random from the test's seed from here, its
-    // beforeEach hooks included, until its afterEach hooks and fixtures end.
+    // faker's instances, found (and its module loaded, when the test file
+    // has not loaded it) before the seat, so what faker draws as it loads is
+    // the worker's own, not the test's.
+    let fakers: Fakers = { found: [], problem: '' };
+    if (s.seed !== '') {
+      fakers = fakersOf(testInfo.file);
+      if (fakers.problem !== '' && !saidFaker.has(fakers.problem)) {
+        saidFaker.add(fakers.problem);
+        process.stdout.write(`${fakerLine(fakers.problem)}\n`);
+      }
+    }
+    // The test process draws Math.random, and faker's instances draw, from
+    // the test's seed from here, its beforeEach hooks included, until its
+    // afterEach hooks and fixtures end.
     const unseat = s.seed !== '' ? seatRandom(processRandom(s.seed)) : null;
+    const unseatFaker = s.seed !== '' ? seatFaker(s.seed, fakers.found) : null;
     try {
       await use();
     } finally {
+      unseatFaker?.();
       unseat?.();
     }
     open = null;

@@ -19,11 +19,17 @@
 
 import type { BrowserContext, Frame, Page } from '@playwright/test';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import { createRequire } from 'node:module';
+import path from 'node:path';
 
 export const ENV_SEED_RANDOM = 'KEPLOY_SEED_RANDOM';
 
 /** The option that turns seeding off for a project, a file or a test. */
 export const OPTION_SEED_RANDOM = 'keploySeedRandom';
+
+/** The package whose prebuilt instances the test process seeds. */
+export const FAKER = '@faker-js/faker';
 
 export type Seeding = { mode: 'seeded' } | { mode: 'off' } | { mode: 'refused'; refusal: string };
 
@@ -42,11 +48,13 @@ export function seedingFromEnv(env: NodeJS.ProcessEnv): Seeding {
 
 /** The line a worker shows once, at the first test it seeds. */
 export const SEEDED_LINE = 'keploy: each test\'s random numbers are seeded from a seed keploy keeps with the test\'s recording, so a replay draws the numbers its recording drew: ' +
-  'in the test browser Math.random, crypto.getRandomValues and crypto.randomUUID, and in the test process Math.random, from the test\'s begin to its end ' +
+  'in the test browser Math.random, crypto.getRandomValues and crypto.randomUUID, and in the test process Math.random and the instances ' +
+  `${FAKER} makes as it loads (faker, fakerDE, ...), from the test's begin to its end ` +
   '(its beforeEach and afterEach hooks too). ' +
   'Web Workers and Service Workers keep the browser\'s own, and so does a page the app opens that keploy cannot place (each one is named); ' +
-  'the test process keeps its own crypto, and its own Math.random outside every test (beforeAll, afterAll, a file as it loads) ' +
-  'and while a worker fixture registered with this package\'s test.extend or test.use is set up. ' +
+  'the test process keeps its own crypto, and its own Math.random and faker outside every test (beforeAll, afterAll, a file as it loads) ' +
+  'and while a worker fixture registered with this package\'s test.extend or test.use is set up; a faker instance the suite makes itself ' +
+  '(new Faker(...)) as a file loads draws its own, and one it seeds itself (faker.seed(n)) draws as seeded. ' +
   `To turn it off, record and replay with ${ENV_SEED_RANDOM}=off, or set use: { ${OPTION_SEED_RANDOM}: false } in the Playwright config.`;
 
 /**
@@ -155,13 +163,14 @@ export function freshSeed(): string {
 }
 
 /**
- * The stream a test's process draws Math.random from under seed: sfc32 over
- * the SHA-256 of the seed and the stream's name, 53 bits a draw, as Node's
- * own Math.random gives. A replay draws what its recording drew only while
- * this stays the same: a recording keeps the seed, not the numbers.
+ * The stream a test's process draws Math.random from under seed (or, named,
+ * another of its streams: a faker instance's): sfc32 over the SHA-256 of the
+ * seed and the stream's name, 53 bits a draw, as Node's own Math.random
+ * gives. A replay draws what its recording drew only while this stays the
+ * same: a recording keeps the seed, not the numbers.
  */
-export function processRandom(seed: string): () => number {
-  const h = crypto.createHash('sha256').update(`${seed}\ntest process\nMath.random`).digest();
+export function processRandom(seed: string, name = 'Math.random'): () => number {
+  const h = crypto.createHash('sha256').update(`${seed}\ntest process\n${name}`).digest();
   let a = h.readUInt32LE(0), b = h.readUInt32LE(4), c = h.readUInt32LE(8), d = h.readUInt32LE(12);
   const next = (): number => {
     let t = (a + b) | 0;
@@ -263,6 +272,236 @@ export function setAside(): () => void {
   const hold = {};
   held.add(hold);
   return () => { held.delete(hold); };
+}
+
+/**
+ * What a faker instance draws from: each of its draws calls next, for a
+ * number in [0, 1), and its seed method calls seed.
+ */
+export type Randomizer = { next: () => number; seed: (...args: unknown[]) => unknown };
+
+/**
+ * The prebuilt faker instances a test file gets, each by its export's name;
+ * problem: why none could be had where the file can import the package (''
+ * when there is none to say).
+ */
+export type Fakers = { found: ReadonlyArray<readonly [string, Randomizer]>; problem: string };
+
+/**
+ * Whether file, a test file, runs as an ES module, as Node and Playwright
+ * decide it: .mjs and .mts files do, .cjs and .cts files do not, and any
+ * other does when the nearest package.json above it says "type": "module".
+ */
+export function esmFile(file: string): boolean {
+  const ext = path.extname(file);
+  if (ext === '.mjs' || ext === '.mts') return true;
+  if (ext === '.cjs' || ext === '.cts') return false;
+  for (let d = path.dirname(file); ; d = path.dirname(d)) {
+    let text: string | null = null;
+    try {
+      text = fs.readFileSync(path.join(d, 'package.json'), 'utf8');
+    } catch {
+      text = null;
+    }
+    if (text !== null) {
+      try {
+        return (JSON.parse(text) as { type?: unknown } | null)?.type === 'module';
+      } catch {
+        return false;
+      }
+    }
+    if (path.dirname(d) === d) return false;
+  }
+}
+
+// The conditions Node resolves an import under.
+const IMPORT_CONDITIONS: readonly string[] = ['node', 'import', 'module-sync', 'default'];
+
+/**
+ * The file a package's exports give its main entry under conditions, as Node
+ * picks it: in a conditions object, the first key in the object's order that
+ * is one of them and gives a file; in an array, the first entry that gives
+ * one. null for none.
+ */
+export function exportOf(exp: unknown, conditions: readonly string[]): string | null {
+  if (typeof exp === 'string') return exp;
+  if (Array.isArray(exp)) {
+    for (const e of exp) {
+      const t = exportOf(e, conditions);
+      if (t !== null) return t;
+    }
+    return null;
+  }
+  if (exp === null || typeof exp !== 'object') return null;
+  const o = exp as Record<string, unknown>;
+  const keys = Object.keys(o);
+  if (keys.some((k) => k.startsWith('.'))) return '.' in o ? exportOf(o['.'], conditions) : null;
+  for (const k of keys) {
+    if (!conditions.includes(k)) continue;
+    const t = exportOf(o[k], conditions);
+    if (t !== null) return t;
+  }
+  return null;
+}
+
+// What a faker instance draws from: faker 10's fakerCore.randomizer, faker 8
+// and 9's _randomizer; null for a value that is no instance.
+function randomizerOf(v: unknown): Randomizer | null {
+  if (v === null || typeof v !== 'object') return null;
+  let r: unknown;
+  try {
+    const o = v as { fakerCore?: { randomizer?: unknown } | null; _randomizer?: unknown };
+    r = o.fakerCore?.randomizer ?? o._randomizer;
+  } catch {
+    return null;
+  }
+  if (r === null || typeof r !== 'object') return null;
+  const x = r as Partial<Randomizer>;
+  return typeof x.next === 'function' && typeof x.seed === 'function' ? x as Randomizer : null;
+}
+
+/**
+ * The prebuilt instances a faker module exports, each once, by its export's
+ * name, in the order of the names: the instances allFakers holds are those
+ * its fakerXX exports name, so those names come first.
+ */
+export function fakersIn(mod: unknown): Array<[string, Randomizer]> {
+  const out: Array<[string, Randomizer]> = [];
+  if (mod === null || (typeof mod !== 'object' && typeof mod !== 'function')) return out;
+  const seen = new Set<Randomizer>();
+  const add = (name: string, from: Record<string, unknown>, k: string): void => {
+    let v: unknown;
+    try {
+      v = from[k];
+    } catch {
+      return;
+    }
+    const r = randomizerOf(v);
+    if (r !== null && !seen.has(r)) {
+      seen.add(r);
+      out.push([name, r]);
+    }
+  };
+  const m = mod as Record<string, unknown>;
+  for (const k of Object.keys(m).sort()) if (k !== 'allFakers') add(k, m, k);
+  let all: unknown;
+  try {
+    all = m.allFakers;
+  } catch {
+    all = null;
+  }
+  if (all !== null && typeof all === 'object') {
+    const a = all as Record<string, unknown>;
+    for (const k of Object.keys(a).sort()) add(`allFakers.${k}`, a, k);
+  }
+  return out;
+}
+
+// The folder of the faker package that holds entry.
+function rootOf(entry: string): string {
+  for (let d = path.dirname(entry); ; d = path.dirname(d)) {
+    try {
+      if ((JSON.parse(fs.readFileSync(path.join(d, 'package.json'), 'utf8')) as { name?: unknown } | null)?.name === FAKER) return d;
+    } catch {
+      // No package.json here, or not one keploy can read: look further up.
+    }
+    if (path.dirname(d) === d) throw new Error(`no package.json of ${FAKER} holds ${entry}`);
+  }
+}
+
+// What fakersOf found for each test file.
+const fakersFound = new Map<string, Fakers>();
+
+/**
+ * The prebuilt instances of @faker-js/faker (faker, fakerDE, ...) that file,
+ * a test file, gets when it imports the package, so that the test process can
+ * seed them: those of the module the file's own import or require loads, as
+ * the file resolves the package, loaded here when the file has not loaded it
+ * yet. faker 10 is an ES module only, so a test file that Playwright runs as
+ * CommonJS gets it through require, the very instances an ES module test
+ * file imports; faker 9 has a CommonJS copy as well, so an ES module test
+ * file's instances are its ES module ones. None, and no problem, when the
+ * file cannot resolve the package; none, with the problem, when it resolves
+ * it but its instances cannot be had (an ES module on a Node that cannot
+ * require one).
+ */
+export function fakersOf(file: string): Fakers {
+  const had = fakersFound.get(file);
+  if (had !== undefined) return had;
+  const f = findFakers(file);
+  fakersFound.set(file, f);
+  return f;
+}
+
+function findFakers(file: string): Fakers {
+  const req = createRequire(file);
+  const problem = (err: unknown): Fakers => ({ found: [], problem: err instanceof Error ? err.message : String(err) });
+  let main: string;
+  try {
+    main = req.resolve(FAKER);
+  } catch (err) {
+    return (err as { code?: unknown } | null)?.code === 'MODULE_NOT_FOUND' ? { found: [], problem: '' } : problem(err);
+  }
+  try {
+    let entry = main;
+    if (esmFile(file)) {
+      const root = rootOf(main);
+      const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')) as { exports?: unknown; main?: unknown };
+      const t = pkg.exports !== undefined ? exportOf(pkg.exports, IMPORT_CONDITIONS) : typeof pkg.main === 'string' ? pkg.main : 'index.js';
+      if (t === null) throw new Error(`its package.json exports no file for import`);
+      entry = path.resolve(root, t);
+    }
+    const found = fakersIn(req(entry));
+    return { found, problem: found.length > 0 ? '' : 'it exports no instance keploy knows how to seed (faker 8, 9 and 10 do)' };
+  } catch (err) {
+    return problem(err);
+  }
+}
+
+/**
+ * The line a worker shows once for each reason it could not seed faker
+ * where a test file can import it.
+ */
+export function fakerLine(problem: string): string {
+  return `keploy: ${FAKER} is installed where the tests import it, but keploy cannot seed it (${pageAddress(problem)}), ` +
+    'so what its instances make (a name, an email, an ID) differs from its recording\'s at replay while a mocked dependency answers with the recording\'s. ' +
+    'Fix what the message names (an ES module needs Node 20.19, 22.12 or later to be loaded here), or seed it in a beforeEach (faker.seed(n)).';
+}
+
+/**
+ * Puts the draws of each faker instance in found on a stream of the test's
+ * seed, named by the instance's name, until the returned function puts its
+ * own back: so a replay makes the names, emails and IDs its recording made,
+ * and one instance's draws move neither another's nor Math.random's. Called
+ * just after seatRandom: while setAside holds under that seat (a worker
+ * fixture being set up), an instance draws its own. A test that seeds an
+ * instance itself (faker.seed(n)) draws that instance's own from then on,
+ * seeded as it asked. An instance's own generator does not move while
+ * seated, so outside every test it goes on as if no test had drawn.
+ */
+export function seatFaker(seed: string, found: Fakers['found']): () => void {
+  const aside = asideNow;
+  const puts: Array<() => void> = [];
+  for (const [name, r] of found) {
+    const own = r.next;
+    const ownSeed = r.seed;
+    const draw = processRandom(seed, `${FAKER} ${name}`);
+    const seated: Randomizer = {
+      next(this: unknown): number { return aside.size > 0 ? Reflect.apply(own, this, []) as number : draw(); },
+      seed(this: unknown, ...args: unknown[]): unknown {
+        put();
+        return Reflect.apply(ownSeed, this, args);
+      },
+    };
+    const put = (): void => {
+      if (r.next === seated.next) r.next = own;
+      if (r.seed === seated.seed) r.seed = ownSeed;
+    };
+    r.next = seated.next;
+    r.seed = seated.seed;
+    puts.push(put);
+  }
+  return () => { for (const p of puts) p(); };
 }
 
 // A key of the page's session storage: how many documents of each path the

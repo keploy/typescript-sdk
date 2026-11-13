@@ -1386,6 +1386,53 @@ test('seeded: the test process draws Math.random from its test\'s seed in its be
   } finally { await rep.close(); await rec.close(); }
 });
 
+// One run of faker.spec.ts (CommonJS) and faker-esm.spec.mts (an ES
+// module): what each test made with faker, and the seed each begin sent.
+async function fakerRun(j, env) {
+  const from = j.events.length;
+  const { tests, tmp, out } = await playwright(['faker.spec.ts', 'faker-esm.spec.mts'], env);
+  for (const [k, t] of Object.entries(tests)) assert.equal(t.status, 'passed', `${k}: ${t.error}\n${out}`);
+  const made = {};
+  for (const n of ['made', 'other', 'mine', 'itself', 'outside', 'esm made']) made[n] = JSON.parse(fs.readFileSync(path.join(tmp, `faker-${n}.json`), 'utf8'));
+  const begins = calls({ events: j.events.slice(from) }).filter((c) => c.path === '/agent/scope/begin').map((c) => c.body);
+  const seeds = Object.fromEntries(begins.map((b) => [b.name.replace(/^own › /, ''), b.seed]));
+  return { made, seeds, out };
+}
+
+test('seeded: faker\'s instances in the test process make from the test\'s seed in its beforeEach, body and afterEach, in a CommonJS test file and an ES module one, so a replay makes the data its recording made; another test, an opted-out one, a test that seeds faker itself and code outside every test make others', async () => {
+  const j = journal();
+  const rec = await fakeAgent(j);
+  let kept = {};
+  const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+    ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+  try {
+    const r = await fakerRun(j, keployEnv(rec.url));
+    kept = r.seeds;
+    // An ID and a name in each of the beforeEach, the body and the afterEach.
+    assert.equal(r.made.made.length, 6);
+    assert.notDeepEqual(r.made.made, r.made.other);
+    assert.equal(r.seeds.mine, undefined);
+    const p = await fakerRun(j, keployEnv(rep.url));
+    for (const n of ['made', 'other', 'esm made']) {
+      assert.notEqual(p.seeds[n], kept[n], n);
+      assert.deepEqual(p.made[n], r.made[n], n);
+    }
+    // The opted-out test and the code after the last test make the worker's own.
+    assert.notDeepEqual(p.made.mine, r.made.mine);
+    assert.notDeepEqual(p.made.outside.made, r.made.outside.made);
+    for (const x of [r, p]) assert.equal(x.made.outside.own, true);
+    // A test that seeds an instance itself draws what that seed gives.
+    const { fakerFR } = await import('@faker-js/faker');
+    fakerFR.seed(7);
+    const want = fakerFR.number.int();
+    for (const x of [r, p]) assert.deepEqual(x.made.itself, [want, want]);
+    // A record made again makes new data.
+    const r2 = await fakerRun(j, keployEnv(rec.url));
+    assert.notDeepEqual(r2.made.made, r.made.made);
+    assert.notDeepEqual(r2.made['esm made'], r.made['esm made']);
+  } finally { await rep.close(); await rec.close(); }
+});
+
 test('the test process draws its own Math.random when keploy answers no seed, each test saying so, or with KEPLOY_SEED_RANDOM=off, the worker saying once what that costs', async () => {
   const j = journal();
   const none = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' ? { body: { v: 1, status: 'ok' } } : undefined));
