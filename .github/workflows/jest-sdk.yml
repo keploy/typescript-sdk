@@ -38,6 +38,9 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: npm ci
+      # oxlint with its type-aware rules (TypeScript 7's checker), on the
+      # package's source.
+      - run: npm run lint
       # The lockfile pins Jest 30; the Jest 29 leg swaps in the oldest Jest
       # this package supports (jest-jasmine2 too: a row runs under it, the
       # runner this package refuses).
