@@ -1,3 +1,4 @@
+import type { Frame, Page } from '@playwright/test';
 import { test } from '../../dist';
 
 const base = process.env.SLOW_BASE ?? '';
@@ -92,6 +93,60 @@ test('a call its removed cross-site frame had in flight', async ({ page }) => {
   await reached();
   await page.evaluate(() => { document.getElementById('child')?.remove(); });
   await detached;
+});
+// A frame from another site, loaded and ready (the payment form's frame).
+const crossSiteChild = async (page: Page): Promise<Frame> => {
+  await page.goto(`${base}/page`);
+  const attached = page.waitForEvent('frameattached');
+  await page.evaluate((src) => new Promise<void>((resolve) => {
+    const f = document.createElement('iframe');
+    f.id = 'child';
+    f.onload = () => resolve();
+    f.src = src;
+    document.body.appendChild(f);
+  }), `${base.replace('//127.0.0.1:', '//localhost:')}/page?child`);
+  return attached;
+};
+// The page loads another document: its frames go with the old one.
+const nextDocument = (page: Page) => page.goto(`${base}/page?next`);
+test('a beacon its frame sends as the page loads another document', async ({ page }) => {
+  // Telemetry a frame sends as its page hides (a payment form's). A
+  // keepalive call outlives its document: the browser still sends it.
+  const child = await crossSiteChild(page);
+  await child.evaluate(() => { addEventListener('pagehide', () => { navigator.sendBeacon('/beacon', 'b'); }); });
+  await nextDocument(page);
+  await reached();
+});
+test('a beacon its frame had in flight when the page loads another document', async ({ page }) => {
+  const child = await crossSiteChild(page);
+  const sent = page.waitForRequest(/\/beacon$/);
+  await child.evaluate(() => { navigator.sendBeacon('/beacon', 'b'); });
+  await sent;
+  await reached();
+  await nextDocument(page);
+});
+test('a keepalive fetch its frame had in flight when the page loads another document', async ({ page }) => {
+  const child = await crossSiteChild(page);
+  const sent = page.waitForRequest(/\/beacon$/);
+  await child.evaluate(() => { void fetch('/beacon', { method: 'POST', body: 'b', keepalive: true }); });
+  await sent;
+  await reached();
+  await nextDocument(page);
+});
+test('a call its frame had in flight when the page loads another document', async ({ page }) => {
+  const child = await crossSiteChild(page);
+  const sent = page.waitForRequest(/\/slow$/);
+  await child.evaluate(() => { void fetch('/slow'); });
+  await sent;
+  await reached();
+  await nextDocument(page);
+});
+test('a beacon in flight from the page', async ({ page }) => {
+  await page.goto(`${base}/page`);
+  const sent = page.waitForRequest(/\/beacon$/);
+  await page.evaluate(() => { navigator.sendBeacon('/beacon', 'b'); });
+  await sent;
+  await reached();
 });
 test('a call its closed page had in flight', async ({ page, context }) => {
   await page.goto(`${base}/page`);

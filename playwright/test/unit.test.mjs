@@ -228,6 +228,31 @@ test('settle: a cancel that comes while settle already waits wakes it (its page 
   }
 });
 
+test('settle: a frame that is gone drops only its own calls, and wakes settle once none is left', async () => {
+  // Two frames of one page, each with a call Playwright reports no end for
+  // once the frame is gone.
+  const ctx = fakeContext();
+  const inflight = new Inflight(ctx);
+  const page = new EventEmitter();
+  ctx.emit('page', page);
+  const a = { page: () => page };
+  const b = { page: () => page };
+  const beacon = (frame, url) => ({ frame: () => frame, isNavigationRequest: () => false, method: () => 'POST', url: () => url });
+  ctx.emit('request', beacon(a, 'http://localhost/a'));
+  ctx.emit('request', beacon(b, 'http://localhost/b'));
+  let settled = false;
+  inflight.settled().then(() => { settled = true; });
+  await ticks();
+  page.emit('framedetached', a);
+  await ticks();
+  assert.deepEqual(inflight.describe(), ['POST http://localhost/b'], 'the removed frame\'s call is dropped, the other frame\'s is not');
+  assert.equal(settled, false, 'settle still waits for the other frame\'s call');
+  page.emit('framedetached', b);
+  await ticks();
+  assert.equal(inflight.size, 0, 'no call is left in flight');
+  assert.equal(settled, true, 'settle is woken');
+});
+
 test('decide: inert, refused, active', () => {
   const never = () => { throw new Error('runsInside called'); };
   assert.deepEqual(decide({}, 10, never), { mode: 'inert' });
