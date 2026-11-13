@@ -228,7 +228,11 @@ test('while seated, a draw made as a stack trace is prepared is the process\'s o
     assert.equal(Object.getOwnPropertyDescriptor(E, 'prepareStackTrace'), undefined);
     // One set while seated stays set after, as an assignment leaves it.
     const unseat3 = seatRandom(processRandom(S1));
-    try { E.prepareStackTrace = fmt; } finally { unseat3(); }
+    try {
+      E.prepareStackTrace = fmt;
+      // Among Error's own keys while seated too, as an assignment lists it.
+      assert.ok(Object.keys(E).includes('prepareStackTrace'));
+    } finally { unseat3(); }
     assert.deepEqual(Object.getOwnPropertyDescriptor(E, 'prepareStackTrace'), { value: fmt, writable: true, enumerable: true, configurable: true });
 
     // A test that defines the property itself keeps its definition.
