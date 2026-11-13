@@ -149,6 +149,15 @@ test('the test process\'s stream: the same numbers for a seed on every run and e
   assert.notDeepEqual(draws(S1, 2), documentAt(initScript(S1), '/p').draws().random);
 });
 
+test('a document\'s Math.random stream: the same numbers for a seed, page, path and load on every run and every version', () => {
+  // Pinned to a reference made outside this package (sfc32 over a 128-bit
+  // hash of "seed\npage\npath\nloads\nMath.random", 15 draws dropped, 53 bits
+  // a draw): a recording keeps the seed, not the numbers, so a change here
+  // would make every recording's data anew.
+  assert.deepEqual(documentAt(initScript(S1), '/p').draws().random, [0.7259937449314731, 0.7408923870185994]);
+  assert.deepEqual(documentAt(initScript(S1), '/p', new Map([[LOADS_KEY, '{"/p":1}']])).draws().random, [0.2929767053506992, 0.11019693928372987]);
+});
+
 test('seatRandom puts the stream in Math.random\'s place and the process\'s own back; a stub the test put there stays', () => {
   const own = Math.random;
   const r = processRandom(S1);
@@ -432,8 +441,12 @@ test('a top document with no session storage draws the browser\'s own numbers an
   const named = [];
   assert.notDeepEqual(documentAt(r, 'blank', null, 't0', { report: 'rep', told: named, origin: 'null', href: 'about:blank', doc: { querySelectorAll: () => [] } }).draws(), a);
   assert.deepEqual(named, [['about:blank', 'nostorage']]);
-  for (const junk of ['not json', '[1,2]', 'null', '{"/p":"x"}']) {
-    assert.deepEqual(documentAt(s, '/p', new Map([[LOADS_KEY, junk]])).draws(), documentAt(s, '/p').draws(), junk);
+  // Junk in the tab's count is read as no loads and replaced by a count, so
+  // the tab's next document at the path draws as its second load.
+  for (const junk of ['not json', '[1,2]', '5', 'null', '{"/p":"x"}']) {
+    const tab = new Map([[LOADS_KEY, junk]]);
+    assert.deepEqual(documentAt(s, '/p', tab).draws(), documentAt(s, '/p').draws(), junk);
+    assert.equal(tab.get(LOADS_KEY), '{"/p":1}', junk);
   }
 });
 
