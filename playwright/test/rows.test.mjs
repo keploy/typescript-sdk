@@ -1235,6 +1235,21 @@ test('seeded: keploy answers no seed (an older recording, or an older keploy): t
   } finally { await a.close(); }
 });
 
+test('a page the test\'s context already holds when keploy\'s fixture gets it is the test\'s: its end says seeded, or own with seeding off', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  const d = await drawsServer();
+  try {
+    for (const [env, want] of [[{}, 'seeded'], [{ KEPLOY_SEED_RANDOM: 'off' }, 'own']]) {
+      const from = j.events.length;
+      const { tests, out } = await playwright(['opened.spec.ts'], { ...keployEnv(a.url), DRAWS_BASE: d.url, ...env });
+      assert.equal(tests['held page'].status, 'passed', out);
+      const ends = j.events.slice(from).filter((e) => e.agent && e.agent.path === '/agent/scope/end').map((e) => e.agent.body.random);
+      assert.deepEqual(ends, [want], `${want}: ${out}`);
+    }
+  } finally { await d.close(); await a.close(); }
+});
+
 test('seeded: keploySeedRandom: false for the whole project asks no seed, says once what that costs, and the browser draws its own', async () => {
   const j = journal();
   // An agent that answers a seed even to a begin that asked for none: the
