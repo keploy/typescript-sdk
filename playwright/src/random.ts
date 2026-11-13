@@ -1,18 +1,21 @@
-// Seeded randomness for the test browser. A page that draws random numbers
-// (stripe.js picks one of two builds from crypto.randomUUID() at each page
-// load) makes other calls each run, and no recording can answer a call it
-// never saw. So under keploy each test's browser draws from a seeded stream
-// instead. Each test's begin sends a seed drawn afresh, and keploy answers
-// the seed to draw from: a record keeps the begin's with the test's
-// recording, and a replay answers the recording's. So record and replay
-// draw the same numbers and pick the same side, two tests draw different
-// ones, and a record made again draws new ones (a browser-made ID is not sent
-// twice to a real server). Each page of a test draws its own numbers, so two
-// tabs do not make one ID. Only the test browser's pages change; the app,
-// its server and the browser's workers do not.
+// Seeded randomness for the test browser and the test process. A page that
+// draws random numbers (stripe.js picks one of two builds from
+// crypto.randomUUID() at each page load) makes other calls each run, and no
+// recording can answer a call it never saw. A suite that makes its test data
+// in the test process (a lead named with Math.random()) sends other data each
+// run, and a mocked dependency answers with the recording's. So under keploy
+// each test's browser and its test process draw from seeded streams instead.
+// Each test's begin sends a seed drawn afresh, and keploy answers the seed to
+// draw from: a record keeps the begin's with the test's recording, and a
+// replay answers the recording's. So record and replay draw the same numbers,
+// pick the same side and make the same data, two tests draw different ones,
+// and a record made again draws new ones (a browser-made ID is not sent twice
+// to a real server). Each page of a test draws its own numbers, so two tabs
+// do not make one ID. Only the test browser's pages and the test process's
+// Math.random change; the app, its server and the browser's workers do not.
 //
 // On by default; KEPLOY_SEED_RANDOM=off or the fixture option
-// keploySeedRandom: false turns it off.
+// keploySeedRandom: false turns it off, and the worker says what that costs.
 
 import type { BrowserContext, Frame, Page } from '@playwright/test';
 import crypto from 'node:crypto';
@@ -32,23 +35,36 @@ export function seedingFromEnv(env: NodeJS.ProcessEnv): Seeding {
   if (l === 'off' || l === '0' || l === 'false') return { mode: 'off' };
   return {
     mode: 'refused',
-    refusal: `keploy: ${ENV_SEED_RANDOM}=${JSON.stringify(v)} is neither on nor off; set it to off to give the test browser its own random numbers, ` +
+    refusal: `keploy: ${ENV_SEED_RANDOM}=${JSON.stringify(v)} is neither on nor off; set it to off to give the test browser and the test process their own random numbers, ` +
       'or unset it to seed them per test',
   };
 }
 
-/** The line a worker shows once, at the first test whose browser it seeds. */
-export const SEEDED_LINE = 'keploy: the test browser\'s random numbers (Math.random, crypto.getRandomValues, crypto.randomUUID) are seeded per test ' +
-  'from a seed keploy keeps with the test\'s recording, so a replay draws the numbers its recording drew; ' +
-  'Web Workers and Service Workers keep the browser\'s own, and so does a page the app opens that keploy cannot place (each one is named). ' +
+/** The line a worker shows once, at the first test it seeds. */
+export const SEEDED_LINE = 'keploy: each test\'s random numbers are seeded from a seed keploy keeps with the test\'s recording, so a replay draws the numbers its recording drew: ' +
+  'in the test browser Math.random, crypto.getRandomValues and crypto.randomUUID, and in the test process Math.random, from the test\'s begin to its end ' +
+  '(its beforeEach and afterEach hooks too). ' +
+  'Web Workers and Service Workers keep the browser\'s own, and so does a page the app opens that keploy cannot place (each one is named); ' +
+  'the test process keeps its own crypto, and its own Math.random outside every test (beforeAll, afterAll, a file as it loads) ' +
+  'and while a worker fixture registered with this package\'s test.extend or test.use is set up. ' +
   `To turn it off, record and replay with ${ENV_SEED_RANDOM}=off, or set use: { ${OPTION_SEED_RANDOM}: false } in the Playwright config.`;
 
 /**
+ * The line a worker shows once, at the first test it runs with seeding off:
+ * what the test's own random numbers cost a replay.
+ */
+export const OFF_LINE = `keploy: random numbers are not seeded (${ENV_SEED_RANDOM}=off, or ${OPTION_SEED_RANDOM}: false), ` +
+  'so the test process and the test browser draw their own each run: data a test makes from them (a name, an email, an ID) differs from its recording\'s ' +
+  'while a mocked dependency answers with the recording\'s, so a test that checks one against the other fails or is set aside, ' +
+  'and a page script\'s random choice may make calls the recording never saw. ' +
+  `Unset ${ENV_SEED_RANDOM} and ${OPTION_SEED_RANDOM} to seed them per test.`;
+
+/**
  * The line a test shows when it asked keploy for a seed and got none, so its
- * pages draw the browser's own random numbers.
+ * pages and its test process draw their own random numbers.
  */
 export function unseededLine(name: string): string {
-  return `keploy: keploy answered the begin of ${name} with no seed, so its browser draws its own random numbers: ` +
+  return `keploy: keploy answered the begin of ${name} with no seed, so its browser and its test process draw their own random numbers: ` +
     'its recording kept none (it was recorded before keploy kept seeds, or with seeding off: record the test again with seeding on, the default, to seed it), ' +
     'or the test was pulled from a Keploy branch, which keeps no seed, or this keploy predates seeds.';
 }
@@ -135,6 +151,117 @@ export function othersNow(beside: [Frame, Frame] | null): number {
 /** A seed drawn afresh for a test's begin: 128 bits, as hex. */
 export function freshSeed(): string {
   return crypto.randomBytes(16).toString('hex');
+}
+
+/**
+ * The stream a test's process draws Math.random from under seed: sfc32 over
+ * the SHA-256 of the seed and the stream's name, 53 bits a draw, as Node's
+ * own Math.random gives. A replay draws what its recording drew only while
+ * this stays the same: a recording keeps the seed, not the numbers.
+ */
+export function processRandom(seed: string): () => number {
+  const h = crypto.createHash('sha256').update(`${seed}\ntest process\nMath.random`).digest();
+  let a = h.readUInt32LE(0), b = h.readUInt32LE(4), c = h.readUInt32LE(8), d = h.readUInt32LE(12);
+  const next = (): number => {
+    let t = (a + b) | 0;
+    a = b ^ (b >>> 9);
+    b = (c + (c << 3)) | 0;
+    c = (c << 21) | (c >>> 11);
+    d = (d + 1) | 0;
+    t = (t + d) | 0;
+    c = (c + t) | 0;
+    return t >>> 0;
+  };
+  for (let i = 0; i < 15; i++) next();
+  return () => ((next() >>> 5) * 67108864 + (next() >>> 6)) / 9007199254740992;
+}
+
+/**
+ * Puts draw in Math.random's place in this process until the returned
+ * function puts the process's own back. That one puts it back only while
+ * Math.random is still draw: a test that put its own stub there keeps it.
+ *
+ * A draw made while a stack trace is prepared is not the test's, so it is
+ * the process's own. Playwright maps each stack frame through its file's
+ * source map (source-map-support's Error.prepareStackTrace, and the one it
+ * sets for a moment to read where test.step or test was called), and
+ * source-map parses a file's map the first time one of its frames is
+ * mapped, sorting it with pivots from Math.random. A worker parses each
+ * file once, in the first test whose stack reaches it (a helper file's
+ * test.step, an expect, an Error's stack read), so those draws would make
+ * a test's numbers depend on which tests its worker ran before it: a replay
+ * of one test alone, or one after keploy set an earlier test aside, would
+ * draw other numbers than its recording. Every stack trace is prepared
+ * through Error.prepareStackTrace, so while seated that property holds the
+ * function last set there wrapped, and reading it gives the wrapper (one
+ * for each function, so two reads are the same); setting a wrapper sets
+ * its function. Putting back gives Error.prepareStackTrace its own
+ * property again, holding the function last set: a test that defined the
+ * property itself keeps its definition.
+ */
+export function seatRandom(draw: () => number): () => void {
+  const own = Math.random;
+  // How many stack traces are being prepared now, one inside another.
+  let preparing = 0;
+  // What setAside holds for this seat: worker fixtures being set up.
+  const aside = new Set<object>();
+  asideNow = aside;
+  const seeded = { random(): number { return preparing > 0 || aside.size > 0 ? own() : draw(); } }.random;
+  const E = Error as { prepareStackTrace?: unknown };
+  const was = Object.getOwnPropertyDescriptor(E, 'prepareStackTrace');
+  let set: unknown = E.prepareStackTrace;
+  const wrapperOf = new WeakMap<object, unknown>();
+  const wrapped = new WeakMap<object, unknown>();
+  const get = (): unknown => {
+    if (typeof set !== 'function') return set;
+    let w = wrapperOf.get(set);
+    if (w === undefined) {
+      const f = set;
+      w = { prepareStackTrace(this: unknown, ...args: unknown[]): unknown {
+        preparing++;
+        try {
+          return Reflect.apply(f, this, args);
+        } finally {
+          preparing--;
+        }
+      } }.prepareStackTrace;
+      wrapperOf.set(f, w);
+      wrapped.set(w as object, f);
+    }
+    return w;
+  };
+  const put = (v: unknown): void => { set = typeof v === 'function' && wrapped.has(v) ? wrapped.get(v) : v; };
+  Object.defineProperty(E, 'prepareStackTrace', { get, set: put, enumerable: was?.enumerable ?? true, configurable: true });
+  Math.random = seeded;
+  return () => {
+    if (Math.random === seeded) Math.random = own;
+    if (Object.getOwnPropertyDescriptor(E, 'prepareStackTrace')?.get !== get) return;
+    if (was === undefined) delete E.prepareStackTrace;
+    else Object.defineProperty(E, 'prepareStackTrace', was);
+    if (E.prepareStackTrace !== set) E.prepareStackTrace = set;
+  };
+}
+
+// The set the seat in place now (or the last one) takes setAside's holds
+// from: each seat makes its own, so a hold never outlives its seat.
+let asideNow = new Set<object>();
+
+/**
+ * Gives the process's own Math.random back, under the seat in place, until
+ * the returned function is called (once or more): what runs meanwhile is the
+ * worker's, not the test's. A worker fixture is set up in the first test that
+ * asks for it, after that test's seat is in place, so its draws (a test
+ * account made once for the worker's tests) would come from that test's
+ * stream and shift the test's own draws: a replay in which another test is
+ * the first to ask for it (one test alone, or after keploy set an earlier
+ * test aside) would draw other numbers than its recording. With no seat in
+ * place it holds nothing.
+ */
+export function setAside(): () => void {
+  const held = asideNow;
+  const hold = {};
+  held.add(hold);
+  return () => { held.delete(hold); };
 }
 
 // A key of the page's session storage: how many documents of each path the

@@ -43,8 +43,11 @@
 //     seed keploy answered its begin with, which a record keeps with the
 //     test's recording, so a replay's pages make the calls the recording's
 //     made; each page draws its own, named by its place in the test's
-//     order; KEPLOY_SEED_RANDOM=off or the option keploySeedRandom: false
-//     turns it off.
+//     order; the test process draws Math.random from that seed too, from
+//     the test's begin to its end, so data the test makes there (a name
+//     stamped with Math.random()) is the recording's; KEPLOY_SEED_RANDOM=off
+//     or the option keploySeedRandom: false turns it off, and the worker
+//     says once what that costs.
 // Any answer of the agent this package cannot trust fails the test.
 
 import { test as base, expect } from '@playwright/test';
@@ -55,7 +58,7 @@ import { ACTION_FAIL, ACTION_SKIP, AgentClient, KeployError, RANDOM_OWN, RANDOM_
 import type { Outcome, Random, TestRef } from './agent';
 import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
-import { SEEDED_LINE, besideOf, freshSeed, initScript, othersNow, pageAddress, placePages, seedingFromEnv, unplacedLine, unseededLine, type Unplaced } from './random';
+import { OFF_LINE, SEEDED_LINE, besideOf, freshSeed, initScript, othersNow, pageAddress, placePages, processRandom, seatRandom, seedingFromEnv, setAside, unplacedLine, unseededLine, type Unplaced } from './random';
 import { Inflight } from './settle';
 
 export { expect, KeployError };
@@ -75,8 +78,10 @@ let projectDir = '';
 let open: TestRef | null = null;
 // Whether the environment leaves the test browser's seeding on.
 let seedingOn = false;
-// Whether this worker has said that it seeds the test browser.
+// Whether this worker has said that it seeds each test's random numbers.
 let saidSeeded = false;
+// Whether this worker has said what a test with seeding off costs.
+let saidOff = false;
 // How many contexts this worker seeded: each one's report function has its
 // own name.
 let reports = 0;
@@ -111,11 +116,11 @@ function randomDone(s: PageSeeding): Random | undefined {
 /** @keploy/playwright's options, for a config's or a file's use. */
 export type KeployOptions = {
   /**
-   * Seed the test browser's random numbers per test under keploy (default
-   * true), so a replay's pages draw what the recording's drew. Set false,
-   * for record and replay alike, to give a project, a file or a test the
-   * browser's own random numbers; KEPLOY_SEED_RANDOM=off does so for the
-   * whole run.
+   * Seed the test browser's random numbers and the test process's
+   * Math.random per test under keploy (default true), so a replay draws
+   * what the recording drew. Set false, for record and replay alike, to give
+   * a project, a file or a test their own random numbers;
+   * KEPLOY_SEED_RANDOM=off does so for the whole run.
    */
   keploySeedRandom: boolean;
 };
@@ -123,7 +128,7 @@ export type KeployOptions = {
 type WorkerFixtures = { keployWorker: void };
 type TestFixtures = { keployTest: void } & KeployOptions;
 
-export const test = base.extend<TestFixtures, WorkerFixtures>({
+const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
   keployWorker: [async ({}, use, workerInfo) => {
     const j = joining();
     if (j.mode === 'refused') throw new KeployError(j.refusal);
@@ -208,12 +213,6 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       const placing = placePages(context, mark);
       restore = placing.restore;
       opened = placing.opened;
-      if (!saidSeeded) {
-        saidSeeded = true;
-        process.stdout.write(`${SEEDED_LINE}\n`);
-      }
-    } else if (s.asked) {
-      process.stdout.write(`${unseededLine(name)}\n`);
     }
     const seeded = s.seed !== '';
     const opened = (): void => { if (seeded) s.seededPage = true; else s.ownPage = true; };
@@ -267,15 +266,131 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       return;
     }
     const s: PageSeeding = { asked, seed: asked ? b.seed ?? '' : '', seededPage: false, ownPage: false };
+    if (s.seed !== '') {
+      if (!saidSeeded) {
+        saidSeeded = true;
+        process.stdout.write(`${SEEDED_LINE}\n`);
+      }
+    } else if (asked) {
+      process.stdout.write(`${unseededLine(ref.name)}\n`);
+    } else if (!saidOff) {
+      saidOff = true;
+      process.stdout.write(`${OFF_LINE}\n`);
+    }
     open = ref;
     seeding = s;
-    await use();
+    // The test process draws Math.random from the test's seed from here, its
+    // beforeEach hooks included, until its afterEach hooks and fixtures end.
+    const unseat = s.seed !== '' ? seatRandom(processRandom(s.seed)) : null;
+    try {
+      await use();
+    } finally {
+      unseat?.();
+    }
     open = null;
     seeding = null;
     const e = await c.end(ref, outcomeOf(testInfo), randomDone(s));
     if (e.action === ACTION_FAIL) throw new KeployError(keployText(e.reason, 'keploy: the keploy agent failed this test and gave no reason'));
   }, { auto: true }],
 });
+
+/**
+ * The test type specs import. Its extend, and use, give each worker fixture
+ * they register the worker's own Math.random while it is set up, until it
+ * calls use(), and so do those of each test type extend makes from it. A
+ * worker fixture is set up in the first test that asks for it (unless it is
+ * auto), after that test's seeding began, so its draws would otherwise come
+ * from that test's stream and shift the test's own: a test would draw other
+ * numbers when replayed alone, or after keploy set an earlier test aside.
+ */
+export const test = onWorkerSide(keployTestType);
+
+type Registering = (fixtures: Record<string, unknown>) => unknown;
+
+function onWorkerSide<T extends object>(t: T): T {
+  const o = t as unknown as { extend: Registering; use: Registering };
+  const extend = o.extend;
+  const use = o.use;
+  o.extend = function extend_(fixtures: Record<string, unknown>): unknown {
+    return onWorkerSide(asCaller(extend_, () => extend(workerSideAll(fixtures))) as object);
+  };
+  o.use = function use_(fixtures: Record<string, unknown>): unknown {
+    return asCaller(use_, () => use(workerSideAll(fixtures)));
+  };
+  return t;
+}
+
+// fixtures with each fixture function, alone or first in a [function,
+// options] pair, made workerSide; every other value, and a symbol's (a test
+// type's, which Playwright refuses to extend with), as given.
+function workerSideAll(fixtures: Record<string, unknown>): Record<string, unknown> {
+  const entries = Object.entries(fixtures);
+  const out: Record<string, unknown> = { ...fixtures };
+  for (const [name, v] of entries) {
+    if (typeof v === 'function') out[name] = workerSide(v);
+    else if (Array.isArray(v) && typeof v[0] === 'function' && typeof v[1] === 'object') out[name] = [workerSide(v[0]), ...v.slice(1)];
+  }
+  return out;
+}
+
+/**
+ * fn, a fixture function, that while it sets up a worker fixture (until it
+ * calls use(), or fails before) draws the worker's own Math.random. A worker
+ * fixture is told of its worker (WorkerInfo), a test fixture of its test
+ * (TestInfo, with its testId): a test fixture is the test's and runs as it
+ * is. Playwright reads a fixture's parameters from its source, so the
+ * wrapper reads as fn's.
+ */
+function workerSide(fn: Function): Function {
+  const w = { async fixture(this: unknown, args: unknown, use: (v: unknown) => Promise<void>, info: unknown): Promise<unknown> {
+    if (typeof (info as { testId?: unknown } | null)?.testId === 'string') return await Reflect.apply(fn, this, [args, use, info]);
+    const back = setAside();
+    try {
+      return await Reflect.apply(fn, this, [args, async (v: unknown) => { back(); await use(v); }, info]);
+    } finally {
+      back();
+    }
+  } }.fixture;
+  Object.defineProperty(w, 'toString', { value: () => fn.toString(), enumerable: false, writable: true, configurable: true });
+  return w;
+}
+
+/**
+ * Runs f, a call of Playwright's own extend or use, as if made by the code
+ * that called wrapper. Playwright takes the file and line it names a fixture
+ * by, in its errors and reports, from its caller's frame: it sets a function
+ * in Error.prepareStackTrace and reads the second frame of a stack it
+ * captures, which here is wrapper's, in this package. While f runs, a
+ * function set there gets that code's frame in wrapper's place.
+ */
+function asCaller<R>(wrapper: Function, f: () => R): R {
+  const E = Error as { prepareStackTrace?: unknown; stackTraceLimit?: number };
+  const was = Object.getOwnPropertyDescriptor(E, 'prepareStackTrace');
+  const limit = E.stackTraceLimit;
+  try {
+    // The frame of the code that called wrapper, as V8 gives it (one frame,
+    // whatever limit the suite set).
+    Object.defineProperty(E, 'prepareStackTrace', { value: (_e: unknown, frames: unknown[]) => frames, writable: true, enumerable: false, configurable: true });
+    E.stackTraceLimit = 1;
+    const o: { stack?: unknown } = {};
+    Error.captureStackTrace(o, wrapper);
+    const caller = (o.stack as unknown[])[0];
+    // Playwright sets its function, reads, and sets back the one it found;
+    // each is called, if at all, only before this puts the property back.
+    let now: unknown;
+    Object.defineProperty(E, 'prepareStackTrace', {
+      get: () => now,
+      set: (v: unknown) => { now = (e: unknown, frames: unknown[]) => Reflect.apply(v as Function, E, [e, [frames[0], caller, ...frames.slice(2)]]); },
+      enumerable: false,
+      configurable: true,
+    });
+    return f();
+  } finally {
+    E.stackTraceLimit = limit;
+    if (was === undefined) delete E.prepareStackTrace;
+    else Object.defineProperty(E, 'prepareStackTrace', was);
+  }
+}
 
 /**
  * given tells keploy a value the open test made itself, as an incoming
