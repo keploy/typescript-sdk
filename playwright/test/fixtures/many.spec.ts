@@ -5,7 +5,8 @@ import { test } from '../../dist';
 // Run in Chromium, Firefox and WebKit (PW_BROWSER). A page that holds many
 // frames of its origin, in its markup or put in by one script; sandboxed
 // frames, which have no session storage (some whose own script replaces the
-// global parent, some holding a srcdoc frame); and what seeding costs a page
+// global parent, some holding a srcdoc frame); a cross-site frame whose
+// origin's session storage is full, holding a frame; and what seeding costs a page
 // whose DOM changes often. Each test keeps what it saw.
 const base = process.env.DRAWS_BASE ?? '';
 const keep = (name: string, v: unknown): void => fs.writeFileSync(`${process.env.MARKER_DIR}/${name}.json`, JSON.stringify(v));
@@ -108,6 +109,22 @@ test('nested', async ({ page }) => {
     drew[n] = { own: await f.evaluate(read), child };
   }
   keep('nested', drew);
+});
+
+test('filled', async ({ page }) => {
+  // A cross-site frame a fills its origin's session storage in the tab;
+  // then b, of that origin, cannot count its load, and holds y of its own
+  // origin.
+  await page.goto(`${base}/full`);
+  const b = await loaded(page, 'b', '/ffx');
+  let y: unknown;
+  for (let i = 0; i < 400 && y === undefined; i++) {
+    const c = b.childFrames()[0];
+    if (c) { try { y = await c.evaluate(read); } catch { /* not yet */ } }
+    if (y === undefined) await page.waitForTimeout(25);
+  }
+  if (y === undefined) throw new Error('no frame y drew in b');
+  keep('filled', { b: await b.evaluate(read), y });
 });
 
 // A workload in the page: 'grow' adds 20000 rows in 500 tasks; 'churn'

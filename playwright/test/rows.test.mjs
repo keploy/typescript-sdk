@@ -663,6 +663,23 @@ async function drawsServer() {
       return;
     }
     if (u.pathname === '/fsn') { res.end(page(`<iframe name="c" srcdoc="<script>window.__draws = ${DRAWS};</script>"></iframe>`)); return; }
+    // /full holds a (/ffill, cross-site), which fills its origin's session
+    // storage in the tab and then has /full put in b (/ffx, cross-site too),
+    // which holds y (/ffy, of b's origin). b cannot count its load, so it is
+    // a frame under a parent of another origin with no session storage, and
+    // y a frame inside one: a is beside b, y is alone in b.
+    if (u.pathname === '/full') {
+      res.end(page(`<iframe name="a" src="http://localhost:${port}/ffill"></iframe><script>addEventListener('message', (e) => { if (e.data !== 'full') return; ` +
+        `const f = document.createElement('iframe'); f.name = 'b'; f.src = 'http://localhost:${port}/ffx'; document.body.appendChild(f); });</script>`));
+      return;
+    }
+    if (u.pathname === '/ffill') {
+      res.end(page(`<script>{ let s = 'x'.repeat(1 << 20), i = 0; while (s.length > 0) { try { sessionStorage.setItem('f' + i, s); i++; } catch (e) { s = s.slice(0, s.length >> 1); } } ` +
+        `parent.postMessage('full', '*'); }</script>`));
+      return;
+    }
+    if (u.pathname === '/ffx') { res.end(page('<iframe name="y" src="/ffy"></iframe>')); return; }
+    if (u.pathname === '/ffy') { res.end(page('')); return; }
     // /held holds sandboxed frame h0 at /fh, then /held.js, then h1 and h2
     // at /fh. /held.js is answered only once h0 has loaded (its load sends
     // /fh-loaded), so its parent's parser puts h1 and h2 in only after h0
@@ -1087,13 +1104,13 @@ for (const engine of ENGINES) {
 }
 
 for (const engine of ENGINES) {
-  test(`seeded, in ${engine}: 300 frames in a page's markup, or put in by one script, each load and draw their own numbers, the same at replay, with no page error; sandboxed frames are never seeded, each draws its own numbers and is named with how many frames are beside it once its parent's parser has ended: three at one path, a lone one, a new one put in at a removed one's path, ones whose own script replaces the global parent before they draw, one that draws and loads while its parent's parser holds the frames after it, and a srcdoc frame inside one (sandboxed too, alone under its parent); a page whose DOM changes often is walked only when a frame is put in`, async () => {
+  test(`seeded, in ${engine}: 300 frames in a page's markup, or put in by one script, each load and draw their own numbers, the same at replay, with no page error; sandboxed frames are never seeded, each draws its own numbers and is named with how many frames are beside it once its parent's parser has ended: three at one path, a lone one, a new one put in at a removed one's path, ones whose own script replaces the global parent before they draw, one that draws and loads while its parent's parser holds the frames after it, and a srcdoc frame inside one (sandboxed too, alone under its parent); a cross-site frame that cannot count its load (its origin's session storage full) and a frame of its origin inside it are named with the frames beside the first; a page whose DOM changes often is walked only when a frame is put in`, async () => {
     const j = journal();
     const rec = await fakeAgent(j);
     let kept = {};
     const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
       ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
-    const names = ['markup', 'script', 'sandboxed', 'lone', 'swapped', 'held', 'nested', 'cost'];
+    const names = ['markup', 'script', 'sandboxed', 'lone', 'swapped', 'held', 'nested', 'filled', 'cost'];
     const env = (url) => ({ ...keployEnv(url), PW_BROWSER: engine });
     const unplaced = (r, n) => r.tests[n].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${n}, `)).map((l) => l.replace(/:\d+\//, ':<port>/'));
     const line = (n, at, others) => unplacedLine(n, `http://127.0.0.1:<port>${at}`, 'uncounted', others);
@@ -1108,6 +1125,12 @@ for (const engine of ENGINES) {
       // under a parent of another origin with no session storage, alone
       // under its parent, and its line counts no other frame (every engine).
       assert.deepEqual(unplaced(run, 'nested').sort(), [line('nested', '/fsn', 1), unplacedLine('nested', 'about:srcdoc', 'uncounted', 0)].sort());
+      // A cross-site frame b that cannot count its load (a frame of its
+      // origin filled that origin's session storage in the tab), and y, of
+      // b's origin, inside it: both lines count the frames beside b under
+      // its parent (a), not those beside y in b (none).
+      const full = (at) => unplacedLine('filled', `http://localhost:<port>${at}`, 'uncounted', 1);
+      assert.deepEqual(unplaced(run, 'filled').sort(), [full('/ffx'), full('/ffy')].sort());
     };
     try {
       const r = await drawRun(j, env(rec.url), ['many.spec.ts'], names);
@@ -1144,6 +1167,7 @@ for (const engine of ENGINES) {
       for (const x of Object.values(held)) assert.notDeepEqual(x, seeded('held', '/fh'));
       const nested = Object.values(r.drew.nested).flatMap((x) => [x.own, x.child]);
       assert.equal(new Set(nested.map((x) => x.uuid)).size, 4);
+      assert.notEqual(r.drew.filled.b.uuid, r.drew.filled.y.uuid);
       sandboxed(r);
       // A page whose DOM changes often: seeding walks the document for no
       // change that puts in no frame, and once when one frame is put in.
