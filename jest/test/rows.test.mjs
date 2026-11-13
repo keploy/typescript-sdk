@@ -27,7 +27,9 @@ async function fakeAgent(journal, answer = () => undefined) {
       const b = call.body ?? {};
       fs.appendFileSync(journal, call.path === '/agent/instance'
         ? `claim ${b.key} ${b.dir}\n`
-        : `${call.path.slice('/agent/scope/'.length)} ${b.project ? `${b.project}::` : ''}${b.file}::${b.name}${b.outcome ? ` ${b.outcome}` : ''}\n`);
+        : call.path === '/agent/refusal'
+          ? `refusal ${b.code} ${b.message} (${b.remedy})\n`
+          : `${call.path.slice('/agent/scope/'.length)} ${b.project ? `${b.project}::` : ''}${b.file}::${b.name}${b.outcome ? ` ${b.outcome}` : ''}\n`);
       let a = answer(call);
       if (!a) a = { body: call.path === '/agent/instance' ? { v: 1, instance: 'run', timeFile: '' } : { v: 1, status: 'ok' } };
       res.writeHead(a.status ?? 200, { 'content-type': 'application/json' });
@@ -71,6 +73,10 @@ async function jest(files, { answer, env = {}, agent = true, args = [] } = {}) {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 }
+
+// The refusals' messages and remedies, as keploy is told them.
+const AGAIN = (name, file) => `${name} in ${file} would begin a second time, and keploy names a test by its file and title (give each test of a file its own title, and run without jest.retryTimes)`;
+const CONCURRENT = (name, file) => `${name} in ${file} is a test.concurrent test, and keploy judges one test at a time (declare it with test instead of test.concurrent)`;
 
 const statuses = (r) => Object.fromEntries(Object.entries(r.tests).map(([k, v]) => [k, v.status]));
 
@@ -173,35 +179,71 @@ test('tests Jest itself does not run (focus, -t) never begin', async () => {
 
 test('a title begun twice in one file (a repeated title, a jest.retryTimes retry) fails, and its second run never begins', async () => {
   let r = await jest(['refusals/repeat.test.js']);
-  assert.deepEqual(r.journal, [`claim . ${FIX}`, 'begin refusals/repeat.test.js::same', 'body same 1', 'end refusals/repeat.test.js::same passed']);
+  assert.deepEqual(r.journal, [`claim . ${FIX}`, 'begin refusals/repeat.test.js::same', 'body same 1', 'end refusals/repeat.test.js::same passed',
+    `refusal test_run_again ${AGAIN('same', 'refusals/repeat.test.js')}`]);
   const results = JSON.stringify(r.tests);
   assert.match(results, /same in refusals\/repeat\.test\.js would begin a second time/);
   // The refusal is the test's one failure: Jest starting the refused test
   // adds no second one.
   assert.doesNotMatch(results, /did not begin/);
   r = await jest(['refusals/retry.test.js']);
-  assert.deepEqual(r.journal, [`claim . ${FIX}`, 'begin refusals/retry.test.js::flaky', 'body flaky 1', 'end refusals/retry.test.js::flaky failed']);
+  assert.deepEqual(r.journal, [`claim . ${FIX}`, 'begin refusals/retry.test.js::flaky', 'body flaky 1', 'end refusals/retry.test.js::flaky failed',
+    `refusal test_run_again ${AGAIN('flaky', 'refusals/retry.test.js')}`]);
   assert.equal(r.tests.flaky.status, 'failed');
   assert.match(r.tests.flaky.failure, /flaky in refusals\/retry\.test\.js would begin a second time.*jest\.retryTimes/);
+  assert.doesNotMatch(r.tests.flaky.failure, /could not be told/);
+});
+
+test('a refusal keploy cannot be told of still fails the test, saying why and what the agent answered', async () => {
+  const plain = (c) => (c.path === '/agent/refusal' ? { status: 404, body: '404 page not found' } : undefined);
+  let r = await jest(['refusals/retry.test.js'], { answer: plain });
+  assert.deepEqual(r.journal, [`claim . ${FIX}`, 'begin refusals/retry.test.js::flaky', 'body flaky 1', 'end refusals/retry.test.js::flaky failed',
+    `refusal test_run_again ${AGAIN('flaky', 'refusals/retry.test.js')}`]);
+  assert.equal(r.tests.flaky.status, 'failed');
+  assert.match(r.tests.flaky.failure, /flaky in refusals\/retry\.test\.js would begin a second time.*jest\.retryTimes; keploy could not be told: keploy: this keploy agent answered 404 to POST \/agent\/refusal, so keploy cannot be told of the refusal: .*KEPLOY_PROVEN=1/);
+  r = await jest(['refusals/concurrent.test.js'], { answer: (c) => (c.path === '/agent/refusal' ? { body: { v: 1, status: 'busy' } } : undefined) });
+  assert.equal(r.tests['at once'].status, 'failed');
+  assert.match(r.tests['at once'].failure, /at once in refusals\/concurrent\.test\.js is a test\.concurrent test.*; keploy could not be told: keploy: the keploy agent answered the refusal test_concurrent with status "busy"/);
+  assert.equal(r.tests.serial.status, 'passed');
+});
+
+test('a begin or an end answered with a plain 404 fails the test and names KEPLOY_PROVEN=1', async () => {
+  let r = await jest(['second.test.js'], { answer: (c) => (c.path === '/agent/scope/begin' ? { status: 404, body: '404 page not found' } : undefined) });
+  assert.deepEqual(r.journal, [`claim . ${FIX}`, 'begin second.test.js::second file']);
+  assert.equal(r.tests['second file'].status, 'failed');
+  assert.match(r.tests['second file'].failure, /answered 404 to POST \/agent\/scope\/begin, so second file cannot begin: .*only when it runs with KEPLOY_PROVEN=1/);
+  r = await jest(['second.test.js'], { answer: (c) => (c.path === '/agent/scope/end' ? { status: 404, body: '404 page not found' } : undefined) });
+  assert.equal(r.tests['second file'].status, 'failed');
+  assert.match(r.tests['second file'].failure, /answered 404 to POST \/agent\/scope\/end, so second file cannot end: .*only when it runs with KEPLOY_PROVEN=1/);
 });
 
 test('a test.concurrent test fails before its body ever runs; the file\'s other tests run', async () => {
-  const r = await jest(['refusals/concurrent.test.js']);
-  assert.deepEqual(r.journal, [`claim . ${FIX}`, 'begin refusals/concurrent.test.js::serial', 'body serial', 'end refusals/concurrent.test.js::serial passed']);
+  let r = await jest(['refusals/concurrent.test.js']);
+  assert.deepEqual(r.journal, [`claim . ${FIX}`,
+    `refusal test_concurrent ${CONCURRENT('at once', 'refusals/concurrent.test.js')}`,
+    `refusal test_concurrent ${CONCURRENT('group › nested at once', 'refusals/concurrent.test.js')}`,
+    'begin refusals/concurrent.test.js::serial', 'body serial', 'end refusals/concurrent.test.js::serial passed']);
   assert.equal(r.tests['at once'].status, 'failed');
-  assert.match(r.tests['at once'].failure, /at once is a test\.concurrent test, and keploy judges one test at a time/);
-  assert.equal(count(r.tests['at once'].failure, /at once is a test\.concurrent test/), 1, r.tests['at once'].failure);
+  assert.match(r.tests['at once'].failure, /at once in refusals\/concurrent\.test\.js is a test\.concurrent test, and keploy judges one test at a time: declare it with test instead of test\.concurrent/);
+  assert.equal(count(r.tests['at once'].failure, /at once in \S+ is a test\.concurrent test/), 1, r.tests['at once'].failure);
   assert.equal(r.tests['group nested at once'].status, 'failed');
-  assert.match(r.tests['group nested at once'].failure, /group › nested at once is a test\.concurrent test/);
-  assert.doesNotMatch(JSON.stringify(r.tests), /did not begin/);
+  assert.match(r.tests['group nested at once'].failure, /group › nested at once in refusals\/concurrent\.test\.js is a test\.concurrent test/);
+  assert.doesNotMatch(JSON.stringify(r.tests), /did not begin|could not be told/);
   assert.equal(r.tests.serial.status, 'passed');
+  // A test.concurrent test Jest does not run (-t picks another) is not
+  // refused, and keploy is told of nothing.
+  r = await jest(['refusals/concurrent.test.js'], { args: ['-t', 'serial'] });
+  assert.deepEqual(r.journal, [`claim . ${FIX}`, 'begin refusals/concurrent.test.js::serial', 'body serial', 'end refusals/concurrent.test.js::serial passed']);
+  assert.equal(r.tests['at once'].status, 'pending');
 });
 
 test('a refused test stays refused on every retry of jest.retryTimes: each run fails with the reason, none runs unjudged', async () => {
   // Begun once, failed, then retried twice: both retries are refused, and
   // neither runs its body.
+  // keploy is told once, not on each retry.
   let r = await jest(['refusals/retry-twice.test.js']);
-  assert.deepEqual(r.journal, [`claim . ${FIX}`, 'begin refusals/retry-twice.test.js::flaky', 'body flaky 1', 'end refusals/retry-twice.test.js::flaky failed']);
+  assert.deepEqual(r.journal, [`claim . ${FIX}`, 'begin refusals/retry-twice.test.js::flaky', 'body flaky 1', 'end refusals/retry-twice.test.js::flaky failed',
+    `refusal test_run_again ${AGAIN('flaky', 'refusals/retry-twice.test.js')}`]);
   assert.equal(r.tests.flaky.status, 'failed');
   assert.match(r.tests.flaky.failure, /flaky in refusals\/retry-twice\.test\.js would begin a second time.*jest\.retryTimes/);
   // A begin the agent failed: the retry fails with the same reason, and runs
@@ -213,14 +255,15 @@ test('a refused test stays refused on every retry of jest.retryTimes: each run f
   assert.match(r.tests.steady.failure, /the keploy agent answered 500 Internal Server Error to \/agent\/scope\/begin: "boom"/);
   // A repeated title: the second test's retry is refused too.
   r = await jest(['refusals/repeat-retry.test.js']);
-  assert.deepEqual(r.journal, [`claim . ${FIX}`, 'begin refusals/repeat-retry.test.js::same', 'body same 1', 'end refusals/repeat-retry.test.js::same passed']);
+  assert.deepEqual(r.journal, [`claim . ${FIX}`, 'begin refusals/repeat-retry.test.js::same', 'body same 1', 'end refusals/repeat-retry.test.js::same passed',
+    `refusal test_run_again ${AGAIN('same', 'refusals/repeat-retry.test.js')}`]);
   assert.match(JSON.stringify(r.tests), /same in refusals\/repeat-retry\.test\.js would begin a second time/);
   // A test.concurrent test fails before it runs, so Jest does not retry it;
   // its refusal is its one failure.
   r = await jest(['refusals/concurrent-retry.test.js']);
-  assert.deepEqual(r.journal, [`claim . ${FIX}`]);
+  assert.deepEqual(r.journal, [`claim . ${FIX}`, `refusal test_concurrent ${CONCURRENT('at once', 'refusals/concurrent-retry.test.js')}`]);
   assert.equal(r.tests['at once'].status, 'failed');
-  assert.equal(count(r.tests['at once'].failure, /at once is a test\.concurrent test/), 1, r.tests['at once'].failure);
+  assert.equal(count(r.tests['at once'].failure, /at once in \S+ is a test\.concurrent test/), 1, r.tests['at once'].failure);
 });
 
 test('a project whose testRunner is not jest-circus (jest-jasmine2) fails every test file, claims nothing and begins nothing', async () => {

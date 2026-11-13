@@ -71,9 +71,9 @@ Any answer from the agent that this package cannot trust fails the test it belon
 
 ## Refused: tests keploy cannot judge one at a time
 
-Each of these fails with its reason, on every run `jest.retryTimes` gives it, and none runs unjudged:
+Each of these fails with its reason, on every run `jest.retryTimes` gives it, and none runs unjudged. keploy is told of each refused test once (`POST /agent/refusal`, naming the test), so keploy's verdict on the run names it; when keploy cannot be told, the test's failure says so and gives the agent's answer:
 
-- A `test.concurrent` test. Its body would start before its turn, outside its window. It fails before its body runs; declare it with `test`.
+- A `test.concurrent` test that Jest runs. Its body would start before its turn, outside its window. It fails before its body runs; declare it with `test`.
 - A title that repeats in one test file. keploy names a test by its file and titles, so a second test with the same name fails without beginning.
 - A retry of `jest.retryTimes`. The retry would begin the same test a second time; it fails instead. A test refused for any reason (one of these, or an agent's answer this package cannot trust at its begin) stays refused on each retry: jest-circus clears a test's errors before it retries it, so the refusal is given again, and the retry runs no `beforeEach` hook and no body. Its `afterEach` hooks still run on each try, outside any test (jest-circus runs them even for a failed test). keploy sets aside a test it cannot prove, with its reason, and fails a test whose calls changed, and a retry changes neither.
 

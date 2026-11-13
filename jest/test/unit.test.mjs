@@ -132,6 +132,44 @@ test('a claim answered with a plain 404 names the route and the switch keploy sp
   } finally { await a.close(); }
 });
 
+test('a begin, an end or a refusal answered with a plain 404 names the route and the switch, as the claim does; keploy\'s own 404 shows keploy\'s reason', async () => {
+  const t = { name: 'g › a', file: 'a.test.js' };
+  const calls = [
+    ['/agent/scope/begin', 'g › a cannot begin', (c) => c.begin(t)],
+    ['/agent/scope/end', 'g › a cannot end', (c) => c.end(t, 'passed')],
+    ['/agent/refusal', 'keploy cannot be told of the refusal', (c) => c.refuse('test_run_again', 'g › a would begin a second time', 'run it once')],
+  ];
+  for (const [route, what, call] of calls) {
+    let a = await agent(() => ({ status: 404, body: '404 page not found' }));
+    try {
+      await rejects(call(new AgentClient(a.url, '')), new RegExp(`^keploy: this keploy agent answered 404 to POST ${route.replace(/\//g, '\\/')}, so ${what}: ` +
+        'keploy speaks @keploy\\/jest\'s wire, scope protocol v1, only when it runs with KEPLOY_PROVEN=1 .*answers 404 there$'));
+    } finally { await a.close(); }
+    a = await agent(() => ({ status: 404, body: { error: 'not_open', message: 'g › a is not open', remedy: 'begin it first' } }));
+    try {
+      await rejects(call(new AgentClient(a.url, '')), /^keploy: g › a is not open \(begin it first\)$/);
+    } finally { await a.close(); }
+    a = await agent(() => ({ status: 500, body: 'boom' }));
+    try {
+      await rejects(call(new AgentClient(a.url, '')), new RegExp(`^keploy: the keploy agent answered 500 Internal Server Error to ${route.replace(/\//g, '\\/')}: "boom"$`));
+    } finally { await a.close(); }
+  }
+});
+
+test('refuse sends the code, the message and the remedy, and takes only ok', async () => {
+  let a = await agent(() => ({ body: { v: 1, status: 'ok' } }));
+  try {
+    await new AgentClient(a.url, 'tok').refuse('test_concurrent', 'a in a.test.js is a test.concurrent test', 'declare it with test');
+    assert.deepEqual(a.calls.map((x) => [x.path, x.auth, x.body]), [
+      ['/agent/refusal', 'Bearer tok', { code: 'test_concurrent', message: 'a in a.test.js is a test.concurrent test', remedy: 'declare it with test' }],
+    ]);
+  } finally { await a.close(); }
+  a = await agent(() => ({ body: { v: 1, status: 'busy' } }));
+  try {
+    await rejects(new AgentClient(a.url, '').refuse('test_concurrent', 'm', 'r'), /^keploy: the keploy agent answered the refusal test_concurrent with status "busy"$/);
+  } finally { await a.close(); }
+});
+
 test('an unreachable agent is an error', async () => {
   const a = await agent(() => ({ body: {} }));
   await a.close();

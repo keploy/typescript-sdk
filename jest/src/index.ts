@@ -38,7 +38,8 @@
 // belongs to (or, for the claim, the test file). A test keploy cannot judge
 // one at a time (test.concurrent, a title repeated in one file, a retry of
 // jest.retryTimes) fails with the reason, on every run jest.retryTimes gives
-// it; none runs unjudged. A project whose testRunner is not jest-circus
+// it; none runs unjudged, and keploy is told of each once (POST
+// /agent/refusal), so its verdict on the run names the test. A project whose testRunner is not jest-circus
 // fails every test file: only jest-circus tells an environment where each
 // test starts and ends.
 
@@ -191,8 +192,12 @@ class FileScope {
         // and keep Jest from starting them at once.
         for (const ct of concurrentTests(state.rootDescribeBlock)) {
           ct.concurrent = false;
-          this.refuse(ct, new KeployError(`keploy: ${titles(ct).join(' › ')} is a test.concurrent test, and keploy judges one test at a time: ` +
-            'declare it with test instead of test.concurrent'));
+          // A test Jest will not run (its skip, a focus elsewhere, -t) is
+          // nothing keploy is told of.
+          if (!jestRuns(ct, state)) continue;
+          const ref = testRef(ct, this.testPath, this.dir, this.project);
+          await this.refuseTold(c, ct, REFUSE_CONCURRENT, `${ref.name} in ${ref.file} is a test.concurrent test, and keploy judges one test at a time`,
+            'declare it with test instead of test.concurrent');
         }
         return;
       case 'test_start': {
@@ -211,8 +216,8 @@ class FileScope {
         const ref = testRef(t, this.testPath, this.dir, this.project);
         const id = `${ref.project ?? ''}::${ref.file}::${ref.name}`;
         if (this.begun.has(id)) {
-          this.refuse(t, new KeployError(`keploy: ${ref.name} in ${ref.file} would begin a second time, and keploy names a test by its file and title: ` +
-            'give each test of a file its own title, and run without jest.retryTimes'));
+          await this.refuseTold(c, t, REFUSE_RUN_AGAIN, `${ref.name} in ${ref.file} would begin a second time, and keploy names a test by its file and title`,
+            'give each test of a file its own title, and run without jest.retryTimes');
           return;
         }
         this.begun.add(id);
@@ -272,7 +277,27 @@ class FileScope {
     this.refused.set(t, err);
     t.errors.push(err);
   }
+
+  /**
+   * Refuses a test keploy cannot judge one at a time, and tells keploy once,
+   * so keploy's verdict on the run names it. The message names the test, not
+   * the try. When keploy cannot be told, the test's failure says so.
+   */
+  private async refuseTold(c: AgentClient, t: CircusTest, code: string, message: string, remedy: string): Promise<void> {
+    let told = '';
+    try {
+      await c.refuse(code, message, remedy);
+    } catch (err) {
+      told = `; keploy could not be told: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    this.refuse(t, new KeployError(`keploy: ${message}: ${remedy}${told}`));
+  }
 }
+
+/** The code of the refusal of a test.concurrent test. */
+export const REFUSE_CONCURRENT = 'test_concurrent';
+/** The code of the refusal of a test begun a second time in one file (a repeated title, a retry). */
+export const REFUSE_RUN_AGAIN = 'test_run_again';
 
 /**
  * Whether a Jest project's testRunner (Jest resolves it to a file's path)
