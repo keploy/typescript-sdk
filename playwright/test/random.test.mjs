@@ -536,6 +536,33 @@ test('a page the test asked for is the test\'s own when its first document tells
   assert.equal(inherited.newPage, original);
 });
 
+test('newPage comes only once its page\'s first document is named, and a first document that cannot be named fails newPage', async () => {
+  // A page whose first document runs the script only when the row says: the
+  // test's next call to the page may not wait on the browser's own order.
+  const fakePage = () => {
+    const page = { scripts: [], ran: null, addInitScript: async (s) => { page.scripts.push(s.content); } };
+    page.evaluate = (s) => new Promise((resolve, reject) => { page.ran = { resolve: () => { page.scripts.push(s); resolve(); }, reject }; });
+    return page;
+  };
+  const named = fakePage(), lost = fakePage();
+  const pages = [named, lost];
+  const context = { newPage: async () => pages.shift() };
+  const placing = placePages(context, 'MK');
+  let came = false;
+  const a = context.newPage().then((p) => { came = true; return p; });
+  while (!named.ran) await new Promise((r) => setImmediate(r));
+  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(came, false, 'newPage came before its first document was named');
+  named.ran.resolve();
+  assert.equal(await a, named);
+  assert.deepEqual(named.scripts, [pageScript('t0'), firstScript('t0', 'MK')]);
+  const b = context.newPage();
+  while (!lost.ran) await new Promise((r) => setImmediate(r));
+  lost.ran.reject(new Error('Target page, context or browser has been closed'));
+  await assert.rejects(b, /has been closed/);
+  placing.restore();
+});
+
 // A frame element of a document the row makes: its tag, its src (null for
 // none), whether it has srcdoc, the shadow root it hosts, the frame
 // elements under it, and whether it has element children (inner; it has
