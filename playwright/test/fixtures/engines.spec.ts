@@ -54,7 +54,9 @@ test('ownctxinit', async ({ context }) => {
   const [q] = await Promise.all([context.waitForEvent('page'), p.evaluate(() => { window.open('about:blank'); })]);
   await q.waitForLoadState('load');
   await p.goto(`${base}/draws`);
-  keep('ownctxinit', { early, url: p.url() });
+  // A draw after the page's own scripts: the document drew its own first.
+  const late = await p.evaluate(() => Math.random());
+  keep('ownctxinit', { early, late, url: p.url() });
 });
 
 test('shadow', async ({ page }) => {

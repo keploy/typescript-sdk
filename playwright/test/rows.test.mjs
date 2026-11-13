@@ -1036,6 +1036,9 @@ for (const engine of ENGINES) {
       assert.notDeepEqual(p.drew.nostorage.inner, ns.inner);
       for (const k of ['blank', 'csp', 'data']) for (const i of [0, 1]) assert.notDeepEqual(p.drew.nostorage[k][i], ns[k][i], `${k}${i}`);
       assert.notEqual(p.drew.ownctxinit.early, r.drew.ownctxinit.early);
+      // A document that drew its own numbers before its page was named
+      // keeps drawing its own: it is named once, as drawing them.
+      assert.notEqual(p.drew.ownctxinit.late, r.drew.ownctxinit.late);
       assert.deepEqual({ ...p.drew.shadow, closed: null }, { ...sh, closed: null });
       assert.notDeepEqual(p.drew.shadow.closed, sh.closed);
       assert.deepEqual(p.drew.removed, r.drew.removed);
@@ -1263,7 +1266,7 @@ test('seeded: keploy answers no seed (an older recording, or an older keploy): t
   } finally { await a.close(); }
 });
 
-test('a page the test\'s context already holds when keploy\'s fixture gets it is the test\'s: its end says seeded, or own with seeding off', async () => {
+test('a page the test\'s context already holds when keploy\'s fixture gets it is the test\'s: its end says seeded, or own with seeding off; a test that takes the context and opens no page says neither', async () => {
   const j = journal();
   const a = await fakeAgent(j);
   const d = await drawsServer();
@@ -1271,9 +1274,9 @@ test('a page the test\'s context already holds when keploy\'s fixture gets it is
     for (const [env, want] of [[{}, 'seeded'], [{ KEPLOY_SEED_RANDOM: 'off' }, 'own']]) {
       const from = j.events.length;
       const { tests, out } = await playwright(['opened.spec.ts'], { ...keployEnv(a.url), DRAWS_BASE: d.url, ...env });
-      assert.equal(tests['held page'].status, 'passed', out);
-      const ends = j.events.slice(from).filter((e) => e.agent && e.agent.path === '/agent/scope/end').map((e) => e.agent.body.random);
-      assert.deepEqual(ends, [want], `${want}: ${out}`);
+      for (const n of ['held page', 'no page']) assert.equal(tests[n].status, 'passed', `${n}: ${out}`);
+      const ends = j.events.slice(from).filter((e) => e.agent && e.agent.path === '/agent/scope/end').map((e) => [e.agent.body.name, e.agent.body.random]);
+      assert.deepEqual(ends, [['held page', want], ['no page', undefined]], `${want}: ${out}`);
     }
   } finally { await d.close(); await a.close(); }
 });

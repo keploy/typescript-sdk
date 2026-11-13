@@ -16,3 +16,8 @@ const test = mergeTests(held, keploy);
 test('held page', async ({ context }) => {
   await context.pages()[0].goto(`${process.env.DRAWS_BASE ?? ''}/draws`);
 });
+
+// A test that takes the context and opens no page: its browser drew nothing.
+keploy('no page', async ({ context }) => {
+  await context.cookies();
+});
