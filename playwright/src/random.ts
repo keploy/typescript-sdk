@@ -74,6 +74,7 @@ export function unseededLine(name: string): string {
  * control character a ?), of at most 512 characters.
  */
 export function pageAddress(at: unknown): string {
+  // oxlint-disable-next-line no-control-regex -- control characters are what it replaces
   return String(at).replace(/[\u0000-\u001f\u007f]/g, '?').slice(0, 512);
 }
 
@@ -349,7 +350,7 @@ export function placePages(context: BrowserContext, mark: string): { restore: ()
     },
     // A page's first document may tell before its newPage has come.
     opened: async (page) => {
-      const came = await Promise.allSettled([...coming]);
+      const came = await Promise.allSettled(coming);
       return pages.has(page as Page) || came.some((c) => c.status === 'fulfilled' && c.value === page);
     },
   };

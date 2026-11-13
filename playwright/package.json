@@ -16,6 +16,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "lint": "oxlint --type-aware --deny-warnings src",
     "prepublishOnly": "npm run build",
     "test": "npm run build && node --test test/*.test.mjs"
   },
@@ -23,9 +24,11 @@
     "@playwright/test": ">=1.40.0"
   },
   "devDependencies": {
-    "@playwright/test": "1.62.1",
-    "@types/node": "22.19.1",
-    "typescript": "5.9.3"
+    "@playwright/test": "1.65.0",
+    "@types/node": "20.19.43",
+    "oxlint": "^1.93.0",
+    "oxlint-tsgolint": "^7.0.2007",
+    "typescript": "^7.0.2"
   },
   "engines": {
     "node": ">=20"

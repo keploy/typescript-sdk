@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "rules": {
+    // Playwright reads a fixture's first parameter as an object pattern: {}
+    // is how a fixture asks for no other fixture.
+    "no-empty-pattern": "off",
+    // `void keployTest` asks for a fixture for its order (it runs first), not
+    // for its value.
+    "typescript/no-meaningless-void-operator": "off",
+    // The package keeps the methods it wraps (newPage, querySelectorAll) and
+    // calls them with their own receiver (Reflect.apply), and names its
+    // wrappers with object-literal methods that never read this.
+    "typescript/unbound-method": "off"
+  }
+}

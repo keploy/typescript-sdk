@@ -102,6 +102,7 @@ export class AgentClient {
         `this @keploy/playwright needs a keploy agent that speaks scope protocol v${PROTOCOL_VERSION}: upgrade keploy`, res.status);
     }
     if (v !== PROTOCOL_VERSION) {
+      // oxlint-disable-next-line typescript/no-base-to-string -- the version as the agent sent it; its whole answer follows
       throw new KeployError(`keploy: the keploy agent answered ${path} in scope protocol v${String(v)} (${quoted(data)}); ` +
         `this @keploy/playwright speaks scope protocol v${PROTOCOL_VERSION}: use a keploy and a @keploy/playwright of the same release`, res.status);
     }

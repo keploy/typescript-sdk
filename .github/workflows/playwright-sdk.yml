@@ -24,7 +24,7 @@ jobs:
       # result is its own.
       fail-fast: false
       matrix:
-        # Playwright 1.62 (the rows' version) needs Node.js 20 or later, and
+        # Playwright 1.65 (the rows' version) needs Node.js 20 or later, and
         # so does this package (package.json engines).
         node: [20, 22, 24]
     defaults:
@@ -36,6 +36,9 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: npm ci
+      # oxlint with its type-aware rules (TypeScript 7's checker), on the
+      # package's source.
+      - run: npm run lint
       # The rows run in Chromium, and the seeding's engine rows in Firefox and
       # WebKit too.
       - run: npx playwright install --with-deps chromium firefox webkit

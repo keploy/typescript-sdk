@@ -51,7 +51,7 @@
 // Any answer of the agent this package cannot trust fails the test.
 
 import { test as base, expect } from '@playwright/test';
-import type { Page, TestInfo } from '@playwright/test';
+import type { Page, PlaywrightTestArgs, PlaywrightTestOptions, PlaywrightWorkerArgs, PlaywrightWorkerOptions, TestInfo, TestType } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ACTION_FAIL, ACTION_SKIP, AgentClient, KeployError, RANDOM_OWN, RANDOM_SEEDED } from './agent';
@@ -223,7 +223,7 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
       await use(context);
     } finally {
       restore();
-      for (const say of [...waiting]) say();
+      for (const say of waiting) say();
     }
     if (inflight.size > 0) {
       const calls = inflight.describe();
@@ -302,8 +302,14 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
  * auto), after that test's seeding began, so its draws would otherwise come
  * from that test's stream and shift the test's own: a test would draw other
  * numbers when replayed alone, or after keploy set an earlier test aside.
+ *
+ * Its type is written out so the declaration names @playwright/test, the
+ * package a project installs: TypeScript 7 would otherwise name playwright,
+ * the package @playwright/test re-exports, which a strict installer such as
+ * pnpm does not let the project see.
  */
-export const test = onWorkerSide(keployTestType);
+export const test: TestType<PlaywrightTestArgs & PlaywrightTestOptions & TestFixtures, PlaywrightWorkerArgs & PlaywrightWorkerOptions & WorkerFixtures> =
+  onWorkerSide(keployTestType);
 
 type Registering = (fixtures: Record<string, unknown>) => unknown;
 
