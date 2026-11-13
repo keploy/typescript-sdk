@@ -23,6 +23,17 @@ test('a call its page cancelled by loading another document', async ({ page }) =
   await reached();
   await page.goto(`${base}/page?next`);
 });
+test('a call its new document makes as it loads', async ({ page }) => {
+  // The document's image, which its parser asks for as it loads, is still
+  // in flight when the body ends. The body ends once the test has seen the
+  // image's request and the document's end, so the call settle names is the
+  // image alone. By then the test has seen the frame's commit too (goto
+  // resolves after it), in whichever order the browser reported the two.
+  const sent = page.waitForRequest(/\/slow$/);
+  const doc = await page.goto(`${base}/loads`, { waitUntil: 'commit' });
+  await sent;
+  await doc?.finished();
+});
 test('a call in flight across a route change inside the page', async ({ page }) => {
   await page.goto(`${base}/page`);
   const sent = page.waitForRequest(/\/slow$/);

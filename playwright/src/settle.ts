@@ -7,7 +7,9 @@
 import type { BrowserContext, Frame, Page, Request } from '@playwright/test';
 
 export class Inflight {
-  private readonly open = new Map<Request, { frame: Frame | null; nav: boolean }>();
+  // Each call's number, in the order the browser reported it.
+  private readonly open = new Map<Request, { frame: Frame | null; nav: boolean; n: number }>();
+  private reported = 0;
   private waiters: (() => void)[] = [];
 
   constructor(context: BrowserContext) {
@@ -15,13 +17,16 @@ export class Inflight {
       let frame: Frame | null = null;
       // A service worker's call has no frame.
       try { frame = r.frame(); } catch { frame = null; }
-      this.open.set(r, { frame, nav: r.isNavigationRequest() });
+      this.open.set(r, { frame, nav: r.isNavigationRequest(), n: ++this.reported });
     });
     context.on('requestfinished', (r) => this.done(r));
     context.on('requestfailed', (r) => this.done(r));
     // The frames whose navigation request was answered with a document, which
-    // the frame commits next.
-    const loading = new Set<Frame>();
+    // the frame commits next, each with the number of the last call reported
+    // before that answer: the new document can make no call before its
+    // answer, so every later one may be its own (a redirect's answer is not
+    // the document's, and the final answer's number replaces it).
+    const loading = new Map<Frame, number>();
     context.on('response', (res) => {
       const r = res.request();
       if (!r.isNavigationRequest()) return;
@@ -29,18 +34,27 @@ export class Inflight {
       try { f = r.frame(); } catch { f = null; }
       // A 204 or 205 answer, or a download, leaves the document in place.
       const keeps = res.status() === 204 || res.status() === 205 || /attachment/i.test(res.headers()['content-disposition'] ?? '');
-      if (f && !keeps) loading.add(f);
+      if (f && !keeps) loading.set(f, this.reported);
     });
     const watch = (p: Page): void => {
       // The browser reports no end for a call whose document was replaced
       // while it ran: a frame that commits a new document has cancelled
-      // every call the old one still had open. The new document's calls
-      // start after the commit. A navigation inside the document (the
-      // history API, a client-side route change) has no navigation request
-      // and replaces nothing.
+      // every call the old one still had open. Only the calls reported
+      // before the new document's answer are surely the old one's: Firefox
+      // can report a call the new document makes as it loads (a script or
+      // an image its parser asks for) before it reports the commit, and
+      // that call is waited for. A call the old document starts after its
+      // replacement's answer (an unload handler's) is waited for too: the
+      // browser tells the two apart by nothing settle sees, and waiting
+      // fails toward the test's timeout, never toward a cut call. A
+      // navigation inside the document (the history API, a client-side
+      // route change) has no navigation request and replaces nothing.
       p.on('framenavigated', (f) => {
-        if (!loading.delete(f)) return;
-        this.drop((o) => o.frame === f && !o.nav);
+        // A commit with no answer (a route change) is numbered 0: it drops
+        // nothing.
+        const answered = loading.get(f) ?? 0;
+        loading.delete(f);
+        this.drop((o) => o.frame === f && !o.nav && o.n <= answered);
       });
       // Nor for the calls of a page that closes. Only that page's calls: a
       // popup that closes cancels nothing of its opener.
@@ -82,7 +96,7 @@ export class Inflight {
     if (this.open.delete(r)) this.wake();
   }
 
-  private drop(gone: (o: { frame: Frame | null; nav: boolean }) => boolean): void {
+  private drop(gone: (o: { frame: Frame | null; nav: boolean; n: number }) => boolean): void {
     let n = 0;
     for (const [r, o] of this.open) {
       if (gone(o)) { this.open.delete(r); n++; }

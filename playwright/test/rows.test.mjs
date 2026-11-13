@@ -60,6 +60,7 @@ async function pageServer(j) {
   const seen = new Promise((r) => { saw = r; });
   const srv = http.createServer((req, res) => {
     if (req.url === '/page') { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><body>page</body></html>'); return; }
+    if (req.url === '/loads') { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><body><img src="/slow"></body></html>'); return; }
     if (req.url === '/release') { release(); res.end('ok'); return; }
     if (req.url === '/seen') { void seen.then(() => res.end('ok')); return; }
     // A service worker that calls /slow as it installs.
@@ -383,6 +384,25 @@ test('settle: a call cancelled by its page loading another document is not waite
     assert.deepEqual(order.filter((e) => e.startsWith('slow') || e === '/agent/scope/end'), ['slow sent', 'slow cut', '/agent/scope/end']);
   } finally { await p.close(); await a.close(); }
 });
+
+// Firefox can report the new document's first call before the frame's
+// commit; the commit cancels only the old document's calls, so this one is
+// still waited for, in every engine.
+for (const engine of ['chromium', 'firefox', 'webkit']) {
+  test(`settle, in ${engine}: a call the new document makes as it loads is waited for, whichever the browser reports first, the call or its frame's commit`, async () => {
+    const j = journal();
+    const a = await fakeAgent(j);
+    const p = await pageServer(j);
+    try {
+      const title = 'a call its new document makes as it loads';
+      const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, NO_RELEASE: '1', PW_TIMEOUT: '4000', PW_BROWSER: engine });
+      const t = tests[title];
+      assert.equal(t.status, 'timedOut', out);
+      const named = /^keploy: wait for the test's 1 call\(s\) in flight before its browser context closes: GET http:\/\/127\.0\.0\.1:\d+\/slow$/;
+      assert.ok(t.steps.some((s) => named.test(s)), t.steps.join('\n'));
+    } finally { await p.close(); await a.close(); }
+  });
+}
 
 test('settle: a route change inside the page cancels nothing, so its call in flight is waited for', async () => {
   const j = journal();
@@ -1064,7 +1084,7 @@ for (const engine of ENGINES) {
 }
 
 for (const engine of ENGINES) {
-  test(`seeded, in ${engine}: 300 frames in a page's markup, or put in by one script, each load and draw their own numbers, the same at replay, with no page error; sandboxed frames are never seeded, each draws its own numbers and is named with how many frames are beside it once its parent's parser has ended: three at one path, a lone one, a new one put in at a removed one's path, ones whose own script replaces the global parent before they draw, one that draws and loads while its parent's parser holds the frames after it, and a srcdoc frame inside one (named with the frames beside the sandboxed one); a page whose DOM changes often is walked only when a frame is put in`, async () => {
+  test(`seeded, in ${engine}: 300 frames in a page's markup, or put in by one script, each load and draw their own numbers, the same at replay, with no page error; sandboxed frames are never seeded, each draws its own numbers and is named with how many frames are beside it once its parent's parser has ended: three at one path, a lone one, a new one put in at a removed one's path, ones whose own script replaces the global parent before they draw, one that draws and loads while its parent's parser holds the frames after it, and a srcdoc frame inside one (sandboxed too, alone under its parent); a page whose DOM changes often is walked only when a frame is put in`, async () => {
     const j = journal();
     const rec = await fakeAgent(j);
     let kept = {};
@@ -1080,9 +1100,11 @@ for (const engine of ENGINES) {
       assert.deepEqual(unplaced(run, 'lone'), [line('lone', '/fs', 0)]);
       assert.deepEqual(unplaced(run, 'swapped').sort(), SWAP.map(([, at]) => line('swapped', at, 8)).sort());
       assert.deepEqual(unplaced(run, 'held'), [line('held', '/fh', 2)]);
-      // A srcdoc frame in a sandboxed one counts the frames beside the
-      // sandboxed one, as the sandboxed one does.
-      assert.deepEqual(unplaced(run, 'nested').sort(), [line('nested', '/fsn', 1), unplacedLine('nested', 'about:srcdoc', 'uncounted', 1)].sort());
+      // A srcdoc frame in a sandboxed one is sandboxed too, so its origin
+      // is an opaque one of its own, not its parent's: it is itself a frame
+      // under a parent of another origin with no session storage, alone
+      // under its parent, and its line counts no other frame (every engine).
+      assert.deepEqual(unplaced(run, 'nested').sort(), [line('nested', '/fsn', 1), unplacedLine('nested', 'about:srcdoc', 'uncounted', 0)].sort());
     };
     try {
       const r = await drawRun(j, env(rec.url), ['many.spec.ts'], names);
