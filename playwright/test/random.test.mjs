@@ -454,6 +454,34 @@ test('a top document with no session storage draws the browser\'s own numbers an
   }
 });
 
+test('a page\'s first document that drew before keploy named it keeps the place it drew in, none: the frames and popups that ask it after are not given the name it got later', () => {
+  // A script the test added to its context draws as the first document
+  // begins, before newPage returns and keploy names the page: it draws the
+  // browser's own and says so once. Its key, which its frames and the
+  // popups it opens are placed by, stays none after the name and the mark.
+  const api = `globalThis[${JSON.stringify(DOC_KEY)}]`;
+  const first = (drawn) => {
+    const told = [];
+    const d = documentAt(initScript(S1, 'rep', 'MK'), 'blank', null, null, { report: 'rep', told, origin: 'null', href: 'about:blank', doc: { querySelectorAll: () => [] } });
+    if (drawn) d.draws();
+    d.run(firstScript('t0', 'MK'));
+    return { d, told };
+  };
+  const early = first(true);
+  assert.equal(early.d.run(`${api}.key()`), null);
+  assert.equal(early.d.run(`${api}.key()`), null);
+  assert.equal(early.d.run(`${api}.why()`), '');
+  assert.notDeepEqual(early.d.draws(), early.d.draws());
+  assert.deepEqual(early.told, ['about:blank']);
+  // Named before it drew: placed by the name, each time it is asked.
+  const named = first(false);
+  const k = `${S1}\nt0\nblank\n0\n`;
+  assert.equal(named.d.run(`${api}.key()`), k);
+  assert.deepEqual(named.d.draws(), documentAt(initScript(S1), 'blank', new Map(), 't0').draws());
+  assert.equal(named.d.run(`${api}.key()`), k);
+  assert.deepEqual(named.told, []);
+});
+
 test('each function has its own stream: extra draws of one do not move another\'s', () => {
   const s = initScript(S1);
   const d = documentAt(s);
@@ -560,6 +588,34 @@ test('newPage comes only once its page\'s first document is named, and a first d
   while (!lost.ran) await new Promise((r) => setImmediate(r));
   lost.ran.reject(new Error('Target page, context or browser has been closed'));
   await assert.rejects(b, /has been closed/);
+  placing.restore();
+});
+
+test('newPage comes only once the script that names its page\'s later documents is in place, and one the page refuses fails newPage', async () => {
+  // A page that takes the script for its later documents only when the row
+  // says: the test's next goto may not wait on the browser's own order.
+  const fakePage = () => {
+    const page = { scripts: [], added: null, evaluate: async (s) => { page.scripts.push(s); } };
+    page.addInitScript = (s) => new Promise((resolve, reject) => { page.added = { resolve: () => { page.scripts.push(s.content); resolve(); }, reject }; });
+    return page;
+  };
+  const named = fakePage(), refused = fakePage();
+  const pages = [named, refused];
+  const context = { newPage: async () => pages.shift() };
+  const placing = placePages(context, 'MK');
+  let came = false;
+  const a = context.newPage().then((p) => { came = true; return p; });
+  while (!named.added) await new Promise((r) => setImmediate(r));
+  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  assert.equal(came, false, 'newPage came before its later documents\' script was in place');
+  named.added.resolve();
+  assert.equal(await a, named);
+  assert.deepEqual(named.scripts, [pageScript('t0'), firstScript('t0', 'MK')]);
+  const b = context.newPage();
+  while (!refused.added) await new Promise((r) => setImmediate(r));
+  refused.added.reject(new Error('Target page, context or browser has been closed'));
+  await assert.rejects(b, /has been closed/);
+  assert.deepEqual(refused.scripts, []);
   placing.restore();
 });
 
