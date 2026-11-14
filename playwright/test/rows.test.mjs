@@ -1282,14 +1282,14 @@ for (const engine of ENGINES) {
       const r = await drawRun(j, env(rec.url), ['workers.spec.ts'], ['workers']);
       const w = byKind(r);
       const [ded, mod, shared] = workerMarks(r.seeds.workers);
-      assert.deepEqual([ded.kind, mod.kind, shared.kind], ['w', 'm', 'w']);
+      assert.deepEqual([ded.kind, mod.kind, shared.kind], ['w', 'm', 's']);
       assert.match(w.ded.href, /^http:\/\/127\.0\.0\.1:\d+\/wk\/ded\.js\?x=1$/);
       assert.match(w.mod.href, /^http:\/\/127\.0\.0\.1:\d+\/wk\/mod\.js$/);
       assert.match(w.shared.href, /^http:\/\/127\.0\.0\.1:\d+\/wk\/shared\.js$/);
       assert.deepEqual([w.ded.dep, w.mod.dep], ['dep', 'lib']);
       assert.deepEqual(w.ded.draws, workerAt('http://h/wk/ded.js?x=1', workerScript(ded.token, 0, 'w')).draws());
       assert.deepEqual(w.mod.draws, workerAt('http://h/wk/mod.js', workerScript(mod.token, 0, 'm')).draws());
-      const model = workerAt('http://h/wk/shared.js', workerScript(shared.token, 0, 'w')).draws();
+      const model = workerAt('http://h/wk/shared.js', workerScript(shared.token, 0, 's')).draws();
       const said = r.tests.workers.stdout.split('\n').filter((l) => l.startsWith('keploy: in workers, ')).map((l) => l.replace(/:\d+\//, ':<port>/'));
       if (engine === 'firefox') {
         assert.notDeepEqual(w.shared.draws, model);

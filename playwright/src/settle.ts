@@ -11,9 +11,12 @@ export class Inflight {
   private readonly open = new Map<Request, { frame: Frame | null; nav: boolean; n: number }>();
   private reported = 0;
   private waiters: (() => void)[] = [];
+  // The calls keploy's own route answered whole (answered).
+  private readonly ended = new WeakSet<Request>();
 
   constructor(context: BrowserContext) {
     context.on('request', (r) => {
+      if (this.ended.has(r)) return;
       let frame: Frame | null = null;
       // A service worker's call has no frame.
       try { frame = r.frame(); } catch { frame = null; }
@@ -90,6 +93,17 @@ export class Inflight {
   settled(): Promise<void> {
     if (this.open.size === 0) return Promise.resolve();
     return new Promise((resolve) => this.waiters.push(resolve));
+  }
+
+  /**
+   * A call keploy's own route answered whole (a worker's script): nothing of
+   * it is in flight, whatever the browser reports after. Chromium reports
+   * no end for a Shared Worker's script: Playwright does not follow Shared
+   * Workers, and the end goes to the worker.
+   */
+  answered(r: Request): void {
+    this.ended.add(r);
+    this.done(r);
   }
 
   private done(r: Request): void {

@@ -3,7 +3,7 @@
 // a page. No browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DOC_KEY, ENV_SEED_RANDOM, FAKER, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, esmFile, exportOf, fakerLine, fakersIn, fakersOf, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatFaker, seatRandom, seedFaker, seedingFromEnv, setAside, unplacedLine, unseededLine, WORKER_PARAM, markWorker, workerMark, workerScript, workerRoutes } from '../dist/random.js';
+import { DOC_KEY, ENV_SEED_RANDOM, FAKER, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, esmFile, exportOf, fakerLine, fakersIn, fakersOf, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatFaker, seatRandom, seedFaker, seedingFromEnv, setAside, unplacedLine, unseededLine, WORKER_PARAM, markWorker, workerMark, workerScript, workerRoutes, sharedScript, strictPrologue, cspAllowsData } from '../dist/random.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -1351,7 +1351,7 @@ test('a worker\'s mark: what markWorker makes, workerMark reads back, the URL as
     }
   }
   assert.equal(markWorker('http://h/w.js?a=1#f', 'w', t), `http://h/w.js?a=1&__keploy_worker=w.${t}#f`);
-  for (const u of ['http://h/w.js', `http://h/w.js?__keploy_worker=w.${t}&a=1`, `http://h/w.js?__keploy_worker=x.${t}`, `http://h/w.js?__keploy_worker=w.${t.toUpperCase()}`,
+  for (const u of ['http://h/w.js', `http://h/w.js?__keploy_worker=w.${t}&a=1`, `http://h/w.js?__keploy_worker=z.${t}`, `http://h/w.js?__keploy_worker=w.${t.toUpperCase()}`,
     `http://h/w.js?__keploy_worker=w.${t}.0`, `http://h/w.js?__keploy_worker=o.${t}`, `http://h/w.js?__keploy_worker=w.${t.slice(1)}`]) {
     assert.equal(workerMark(u), null, u);
   }
@@ -1404,7 +1404,7 @@ test('a Shared Worker\'s token is the same in every document of the test, by scr
   };
   const s = 'new SharedWorker("/s.js"); new SharedWorker("/s.js", "n"); new SharedWorker("/s.js", { name: "n", type: "module" }); new SharedWorker("/t.js");';
   const a = tokens(S1, 't0', '/p', s);
-  assert.deepEqual(a.map(([m]) => m.kind), ['w', 'w', 'm', 'w']);
+  assert.deepEqual(a.map(([m]) => m.kind), ['s', 's', 'x', 's']);
   assert.deepEqual(tokens(S1, 't1', '/q', s), a);
   assert.equal(a[1][0].token, a[2][0].token);
   assert.equal(new Set([a[0], a[1], a[3]].map(([m]) => m.token)).size, 3);
@@ -1492,4 +1492,71 @@ test('workerRoutes answers a module worker script with an import of its seeding 
     ['fulfill', { status: 404, headers: { 'content-type': 'text/javascript', 'x-a': '1' }, body: 'no' }]]);
   assert.deepEqual(await r.ask(markWorker('http://h/m.js', 'w', t), new Error('net')), [['fetch', 'http://h/m.js'], ['continue', 'http://h/m.js']]);
   assert.deepEqual(await r.ask(`http://h/m.js?__keploy_worker=w.${t}.3`), [['fallback']]);
+});
+
+test('strictPrologue: a Use Strict Directive anywhere in the directive prologue, after spaces and comments; not one that an expression goes on from, one with an escape, or one after a statement', () => {
+  const yes = ["'use strict';x()", '"use strict"\nx()', "// c\n/* d */ 'use strict'", "'use asm'; 'use strict'; f()", "'use strict'\n!x", "'use strict'\n++x", "'use strict' /* c */\n'next'", "'use strict'", "'a'\n'use strict'\n", "'use strict'}"];
+  const no = ["'use strict'\n(x)", "'use strict'.x", "'use\\x20strict';", "x; 'use strict'", "'use strict'\n+x", "'use strict'\nin x", "'use strict' + 1", "'use strict'\n[1]", '', "'unterminated", "'a'\n.x\n'use strict'", "'use strict' // c\n, 1", "'a' x 'use strict'"];
+  for (const src of yes) assert.equal(strictPrologue(src), true, JSON.stringify(src));
+  for (const src of no) assert.equal(strictPrologue(src), false, JSON.stringify(src));
+});
+
+test('cspAllowsData: no policy, or each policy whose script or worker source list is named lists data:; a policy that names one without it refuses', () => {
+  const csp = (v) => ({ 'content-security-policy': v });
+  assert.equal(cspAllowsData({}), true);
+  for (const v of ["img-src 'self'", "script-src 'self' data:", "default-src 'self' DATA:", "script-src data:; worker-src data:", "script-src-elem data:; worker-src 'self' data:"]) assert.equal(cspAllowsData(csp(v)), true, v);
+  for (const v of ["script-src 'self'", "default-src 'self'", "script-src data:; worker-src 'self'", "script-src-elem 'self'; script-src data:", "child-src 'self'; script-src data:",
+    "script-src data:, default-src 'self'", "script-src data:\nscript-src 'none'", "script-src 'none'; script-src data:"]) assert.equal(cspAllowsData(csp(v)), false, v);
+});
+
+test('sharedScript: a classic Shared Worker\'s answer is its seeding on the app\'s first line (no line moves), after a hashbang, under the app\'s use strict; a module one\'s imports its seeding as a data: module first', () => {
+  const t = '45'.repeat(16);
+  const seeding = workerScript(t, 2, 's');
+  assert.doesNotMatch(seeding, /(^|[^:'"\\])\/\//, 'the seeding holds no line comment');
+  const line = sharedScript(t, 2, 's', '').split('\n');
+  assert.equal(line.length, 1);
+  assert.equal(sharedScript(t, 2, 's', 'a()\nb()'), `${line[0]}a()\nb()`);
+  assert.equal(sharedScript(t, 2, 's', '"use strict";\na()'), `'use strict';${line[0]}"use strict";\na()`);
+  assert.equal(sharedScript(t, 2, 's', '#!/x\r\n\'use strict\'\na()'), `#!/x\r\n'use strict';${line[0]}'use strict'\na()`);
+  assert.equal(sharedScript(t, 2, 's', '#!/x'), `#!/x\n${line[0]}`);
+  // The one line draws as the seeding does, and its location shows no mark.
+  const href = markWorker('http://h/s.js?q=1', 's', t);
+  const w = workerAt(href, sharedScript(t, 2, 's', 'globalThis.app = location.href;'));
+  assert.deepEqual(w.draws(), workerAt(href, seeding).draws());
+  assert.equal(w.run('app'), 'http://h/s.js?q=1');
+  const m = sharedScript(t, 2, 'x', '#!/x\nimport "./a.js";');
+  const data = /^#!\/x\nimport "data:text\/javascript;base64,([A-Za-z0-9+/=]+)";import "\.\/a\.js";$/.exec(m);
+  assert.ok(data, m.slice(0, 120));
+  assert.equal(Buffer.from(data[1], 'base64').toString(), workerScript(t, 2, 'x'));
+  assert.equal(sharedScript(t, 2, 'x', 'x()'), `import ${JSON.stringify(`data:text/javascript;base64,${Buffer.from(workerScript(t, 2, 'x')).toString('base64')}`)};x()`);
+});
+
+test('workerRoutes answers a Shared Worker\'s script whole with sharedScript (the app\'s byte order mark dropped), a module one whose policy refuses data: as the app\'s own and says so; each request it fulfills is answered, none it lets go on', async () => {
+  const { r, context } = routed();
+  const answered = [];
+  const unreached = [];
+  await workerRoutes(context, { answered: (q) => answered.push(q.url()), unreached: (u, why) => unreached.push([u, why]) });
+  const t = '67'.repeat(16);
+  const headers = { 'content-type': 'text/javascript', 'x-a': '1' };
+  const s0 = markWorker('http://h/s.js', 's', t);
+  assert.deepEqual(await r.ask(s0, answerOf(200, '\ufeffapp()')), [['fetch', 'http://h/s.js'], ['fulfill', { status: 200, headers, body: sharedScript(t, 0, 's', 'app()') }]]);
+  assert.equal((await r.ask(s0, answerOf(200, 'app()')))[1][1].body, sharedScript(t, 1, 's', 'app()'));
+  const x0 = markWorker('http://h/m.js', 'x', t.replace('6', '8'));
+  assert.equal((await r.ask(x0, answerOf(200, 'export {}')))[1][1].body, sharedScript(t.replace('6', '8'), 0, 'x', 'export {}'));
+  const policy = { 'content-type': 'text/javascript', 'content-security-policy': "script-src 'self'" };
+  const x1 = markWorker('http://h/c.js', 'x', t.replace('6', '9'));
+  assert.deepEqual(await r.ask(x1, answerOf(200, '\ufeffexport {}', policy)), [['fetch', 'http://h/c.js'], ['fulfill', { status: 200, headers: policy, body: '\ufeffexport {}' }]]);
+  assert.deepEqual(unreached, [['http://h/c.js', 'csp']]);
+  // A classic one is not refused by a policy: its seeding is in its own script.
+  const d0 = markWorker('http://h/d.js', 's', t.replace('6', 'a'));
+  assert.equal((await r.ask(d0, answerOf(200, 'app()', policy)))[1][1].body, sharedScript(t.replace('6', 'a'), 0, 's', 'app()'));
+  assert.deepEqual(answered, [s0, s0, x0, x1, d0]);
+  // Not answered: what goes on, and what falls back.
+  await r.ask(markWorker('http://h/e.js', 's', t), new Error('net'));
+  await r.ask(markWorker('http://h/w.js', 'o', t, 5));
+  await r.ask(`http://h/m.js?__keploy_worker=s.${t}.3`);
+  assert.equal(answered.length, 5);
+  assert.equal(unplacedLine('t', 'http://h/c.js', 'csp'), 'keploy: in t, the Shared Worker at http://h/c.js draws the browser\'s own random numbers, so its draws may differ at replay: ' +
+    'it is a module Shared Worker whose script is served with a Content-Security-Policy that refuses data: scripts, and keploy puts its seeding ahead of ' +
+    'such a worker\'s modules only as a data: import; allow data: in that policy\'s script-src and worker-src for the test run to seed it.');
 });

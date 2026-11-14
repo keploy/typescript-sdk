@@ -170,6 +170,7 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
     // The lines that wait for a parent's parser to end, each said at the
     // test's end if it has not.
     const waiting = new Set<() => void>();
+    const inflight = new Inflight(context);
     if (s.seed !== '') {
       // A document the seeding cannot place draws the browser's own numbers
       // and says so here, once for each address and reason in the test.
@@ -215,7 +216,16 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
       const mark = freshSeed();
       // The workers' scripts: Firefox's route does not reach a Shared
       // Worker's, so there it is not marked, and says so.
-      await workerRoutes(context);
+      await workerRoutes(context, {
+        answered: (r) => inflight.answered(r),
+        unreached: (url, why) => {
+          const a = pageAddress(url);
+          const k = `${why}\n${a}`;
+          if (told.has(k)) return;
+          told.add(k);
+          process.stdout.write(`${unplacedLine(name, a, why)}\n`);
+        },
+      });
       await context.addInitScript({ content: initScript(s.seed, report, mark, browserName !== 'firefox') });
       const placing = placePages(context, mark);
       restore = placing.restore;
@@ -225,7 +235,6 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
     const opened = (): void => { if (seeded) s.seededPage = true; else s.ownPage = true; };
     if (context.pages().length > 0) opened();
     context.on('page', opened);
-    const inflight = new Inflight(context);
     try {
       await use(context);
     } finally {

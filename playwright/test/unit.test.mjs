@@ -275,6 +275,30 @@ async function ticks() {
   for (let i = 0; i < 5; i++) await Promise.resolve();
 }
 
+test('settle: a call keploy\'s route answered has ended, though the browser reports no end (Chromium, a Shared Worker\'s script); one reported after its answer is not waited for', async () => {
+  const ctx = fakeContext();
+  const inflight = new Inflight(ctx);
+  const page = new EventEmitter();
+  ctx.emit('page', page);
+  const script = fakeRequest(page);
+  const other = fakeRequest(page);
+  ctx.emit('request', script);
+  ctx.emit('request', other);
+  let settled = false;
+  inflight.settled().then(() => { settled = true; });
+  inflight.answered(script);
+  await ticks();
+  assert.equal(inflight.size, 1);
+  assert.equal(settled, false);
+  ctx.emit('requestfinished', other);
+  await ticks();
+  assert.equal(settled, true);
+  const late = fakeRequest(page);
+  inflight.answered(late);
+  ctx.emit('request', late);
+  assert.equal(inflight.size, 0);
+});
+
 test('settle: a cancel that comes while settle already waits wakes it (its page closes; then, for a service worker\'s call, the test closes its context)', async () => {
   for (const worker of [false, true]) {
     const c = worker ? 'a page\'s call and a service worker\'s' : 'a page\'s call';
