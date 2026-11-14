@@ -232,6 +232,17 @@ export function processRandom(seed: string, name = 'Math.random'): () => number 
 }
 
 /**
+ * Gives draw back, counting each of its draws under name in counts (the
+ * test process's part of a test's note, note.ts).
+ */
+export function tally(counts: Map<string, number>, name: string, draw: () => number): () => number {
+  return () => {
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+    return draw();
+  };
+}
+
+/**
  * Puts draw in Math.random's place in this process until the returned
  * function puts the process's own back. That one puts it back only while
  * Math.random is still draw: a test that put its own stub there keeps it.
@@ -538,9 +549,10 @@ function ownStream(name: string): string {
  * set up), an instance draws its own. A test that seeds an instance itself
  * (faker.seed(n)) draws that instance's own from then on, seeded as it
  * asked. An instance's own generator does not move while seated, so outside
- * every test it goes on as if no test had drawn.
+ * every test it goes on as if no test had drawn. counts, when given, counts
+ * each seated draw under its stream's name (tally).
  */
-export function seatFaker(seed: string, found: Fakers['found']): () => void {
+export function seatFaker(seed: string, found: Fakers['found'], counts?: Map<string, number>): () => void {
   const aside = asideNow;
   const puts: Array<() => void> = [];
   const done = new Set<Randomizer>();
@@ -549,7 +561,7 @@ export function seatFaker(seed: string, found: Fakers['found']): () => void {
     done.add(r);
     const own = r.next;
     const ownSeed = r.seed;
-    const draw = processRandom(seed, stream);
+    const draw = counts !== undefined ? tally(counts, stream, processRandom(seed, stream)) : processRandom(seed, stream);
     const seated: Randomizer = {
       next(this: unknown): number { return aside.size > 0 ? Reflect.apply(own, this, []) as number : draw(); },
       seed(this: unknown, ...args: unknown[]): unknown {
@@ -867,8 +879,15 @@ export function placePages(context: BrowserContext, mark: string): { restore: ()
  *
  * mark: the value by which firstScript marks a page's first document ('' for
  * none, so no document is marked).
+ *
+ * drawn: the name of a function the fixture exposed ('' for none) that
+ * hears how a placed document drew: after each task in which it drew or
+ * numbered a frame, once its place is known, with its place (the key its
+ * streams are made from, without the seed), its address, how many times it
+ * drew Math.random, crypto.getRandomValues and crypto.randomUUID, and how
+ * many frames it numbered at each path (the note, note.ts).
  */
-export function initScript(seed: string, report = '', mark = '', shared = true): string {
+export function initScript(seed: string, report = '', mark = '', shared = true, drawn = ''): string {
   return `(() => {
   const seed = ${JSON.stringify(seed)};
   const mark = ${JSON.stringify(mark)};
@@ -879,6 +898,35 @@ ${STREAM_JS}
   // off the window so the page does not see it.
   let tell = null;
   ${report === '' ? '' : `try { const f = g[${JSON.stringify(report)}]; if (typeof f === 'function') tell = f; delete g[${JSON.stringify(report)}]; } catch (e) { tell = null; }`}
+  // The fixture's function that hears how a placed document drew, taken
+  // off the window the same way.
+  let tellDrawn = null;
+  ${drawn === '' ? '' : `try { const f = g[${JSON.stringify(drawn)}]; if (typeof f === 'function') tellDrawn = f; delete g[${JSON.stringify(drawn)}]; } catch (e) { tellDrawn = null; }`}
+  const later = typeof g.queueMicrotask === 'function' ? g.queueMicrotask.bind(g) : null;
+  // Tells the fixture how document state s drew so far, once its place is
+  // known: a document whose place no one asked for yet is told when one
+  // does (pageOf), so this never asks for it before the page script ran.
+  const sendDrawn = (s) => {
+    s.due = false;
+    if (s.page === undefined) { s.wants = true; return; }
+    if (s.page === null || tellDrawn === null || stale()) return;
+    const k = (seed + '\\n' + s.page + '\\n' + s.place + '\\n' + s.loads + '\\n').split(seed + '\\n').join('');
+    let at = '';
+    try {
+      const o = location.origin;
+      at = o && o !== 'null' ? o + location.pathname : String(location.href).split(/[?#]/)[0];
+    } catch (e) { at = ''; }
+    const f = {};
+    s.numbers.forEach((c, p) => { f[p] = c; });
+    try { const r = tellDrawn(k, at, [s.n[0], s.n[1], s.n[2]], f); if (r && typeof r.catch === 'function') r.catch(() => {}); } catch (e) {}
+  };
+  // Marks s as having drawn or numbered a frame: it is told at the end of
+  // the task, once however many times it drew.
+  const drew = (s) => {
+    if (tellDrawn === null || s.due) return;
+    s.due = true;
+    if (later !== null) later(() => sendDrawn(s)); else sendDrawn(s);
+  };
   // Taken as the script begins: the page's own scripts run after it.
   const WM = WeakMap;
   const Mp = Map;
@@ -917,6 +965,7 @@ ${STREAM_JS}
     const at = srcOf(el, s.doc);
     const n = s.numbers.get(at) || 0;
     s.numbers.set(at, n + 1);
+    drew(s);
     return 'f' + at + '\\n' + n;
   };
   const isFrame = (n) => { const t = n.localName; return t === 'iframe' || t === 'frame'; };
@@ -1068,7 +1117,7 @@ ${STREAM_JS}
       // An opener of another origin.
       given = null;
     }
-    const s = { doc, place, loads, counted, kind, up, frame, given, page: undefined, first: false, uncounted: false, opened: [], workers: new Mp(), els: new WM(), held: 0, bound: new WM(), mo: null, numbers: new Mp(), counts: new Mp(), streams: null };
+    const s = { doc, place, loads, counted, kind, up, frame, given, page: undefined, first: false, uncounted: false, opened: [], workers: new Mp(), els: new WM(), held: 0, bound: new WM(), mo: null, numbers: new Mp(), counts: new Mp(), streams: null, n: [0, 0, 0], due: false, wants: false };
     watch(s);
     return s;
   };
@@ -1133,6 +1182,7 @@ ${STREAM_JS}
         p = k === null ? null : k + s.frame;
       }
       s.page = p;
+      if (s.wants) { s.wants = false; drew(s); }
     }
     return s.page;
   };
@@ -1198,7 +1248,10 @@ ${STREAM_JS}
         try { const r = tell(at, why, aboveFor()); if (r && typeof r.catch === 'function') r.catch(() => {}); } catch (e) {}
       }
     }
-    return s.streams === false ? null : s.streams[name];
+    if (s.streams === false) return null;
+    s.n[name === 'random' ? 0 : name === 'grv' ? 1 : 2]++;
+    drew(s);
+    return s.streams[name];
   };
   // A page's stacks show no URL keploy marked: an error goes on as it is.
   const thrown = (e) => e;

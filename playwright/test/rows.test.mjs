@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LOADS_KEY, OFF_LINE, SEEDED_LINE, fakerLine, initScript, processRandom, unplacedLine, unseededLine, markWorker, workerMark, workerScript } from '../dist/random.js';
 import { sharedWorkerLine } from '../dist/settle.js';
+import { NO_NOTE_LINE, readNote, unreadNoteLine } from '../dist/note.js';
 import { BLANK_DRAWS, DRAWS, documentAt, workerAt } from './draws.mjs';
 
 const PKG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -156,13 +157,17 @@ async function playwright(specs, env, cwd = PKG, config = CONFIG) {
 const keployEnv = (url) => ({ KEPLOY_MOCK_AGENT: url, KEPLOY_MOCK_AGENT_TOKEN: 'tok', KEPLOY_MOCK_PROJECT: PKG, KEPLOY_TEST_PID: undefined });
 const calls = (j) => j.events.filter((e) => e.agent).map((e) => e.agent);
 // Every call's path and body, each begin's seed shown as FRESH once it is
-// checked to be a fresh one: 128 bits of hex, no two begins the same.
+// checked to be a fresh one: 128 bits of hex, no two begins the same; and
+// each end's note as NOTE once it is checked to be one this package reads.
 const FRESH = '<a fresh seed>';
+const NOTE = '<a note>';
 function wire(j) {
   const seeds = calls(j).filter((c) => c.path === '/agent/scope/begin' && c.body.seed !== undefined).map((c) => c.body.seed);
   for (const sd of seeds) assert.match(sd, /^[0-9a-f]{32}$/);
   assert.equal(new Set(seeds).size, seeds.length, seeds.join(' '));
-  return calls(j).map((c) => [c.path, c.body && c.body.seed !== undefined ? { ...c.body, seed: FRESH } : c.body]);
+  for (const c of calls(j)) if (c.path === '/agent/scope/end' && c.body.note !== undefined) assert.equal(typeof readNote(c.body.note), 'object', c.body.note);
+  return calls(j).map((c) => [c.path, c.body && c.body.seed !== undefined ? { ...c.body, seed: FRESH }
+    : c.body && c.body.note !== undefined ? { ...c.body, note: NOTE } : c.body]);
 }
 const ref = (file, name) => ({ name, file: `test/fixtures/${file}`, project: 'p1' });
 
@@ -193,11 +198,11 @@ test('a worker claims the run, each test begins before its beforeEach and ends w
     // b fails, so Playwright runs c and d in a new worker, which claims again.
     assert.deepEqual(wire(j), [
       ['/agent/instance', claim],
-      ['/agent/scope/begin', { ...r('a'), canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('a'), outcome: 'passed' }],
-      ['/agent/scope/begin', { ...r('b'), canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('b'), outcome: 'failed' }],
+      ['/agent/scope/begin', { ...r('a'), canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('a'), outcome: 'passed', note: NOTE }],
+      ['/agent/scope/begin', { ...r('b'), canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('b'), outcome: 'failed', note: NOTE }],
       ['/agent/instance', claim],
-      ['/agent/scope/begin', { ...r('c'), canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('c'), outcome: 'skipped' }],
-      ['/agent/scope/begin', { ...r('d'), canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('d'), outcome: 'passed' }],
+      ['/agent/scope/begin', { ...r('c'), canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('c'), outcome: 'skipped', note: NOTE }],
+      ['/agent/scope/begin', { ...r('d'), canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('d'), outcome: 'passed', note: NOTE }],
     ]);
     assert.ok(calls(j).every((c) => c.auth === 'Bearer tok'));
     // KEPLOY_TEST_PID named the claiming worker (test a checks it).
@@ -270,7 +275,7 @@ test('a test Playwright retries is not begun again: the retry fails, saying why,
     const claim = { key: 'p1', dir: fs.realpathSync(PKG) };
     assert.deepEqual(wire(j), [
       ['/agent/instance', claim],
-      ['/agent/scope/begin', { ...r, canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/end', { ...r, outcome: 'failed' }],
+      ['/agent/scope/begin', { ...r, canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/end', { ...r, outcome: 'failed', note: NOTE }],
       // The retry runs in a new worker, which claims the run again.
       ['/agent/instance', claim],
       ['/agent/refusal', retryRefusal],
@@ -313,7 +318,7 @@ test('a test --repeat-each runs again is not begun again: the repeat fails, sayi
     const claim = { key: 'p1', dir: fs.realpathSync(PKG) };
     assert.deepEqual(wire(j), [
       ['/agent/instance', claim],
-      ['/agent/scope/begin', { ...r, canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/end', { ...r, outcome: 'passed' }],
+      ['/agent/scope/begin', { ...r, canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/end', { ...r, outcome: 'passed', note: NOTE }],
       // Playwright runs each repeat in a worker of its own.
       ['/agent/instance', claim],
       ['/agent/refusal', { code: 'test_run_again', message, remedy }],
@@ -483,7 +488,7 @@ test('an unnamed Playwright project claims with the key ".", and its tests name 
     assert.deepEqual(wire(j), [
       ['/agent/instance', { key: '.', dir: fs.realpathSync(PKG) }],
       ['/agent/scope/begin', { ...r, canSkip: true, random: 'seeded', seed: FRESH }],
-      ['/agent/scope/end', { ...r, outcome: 'passed' }],
+      ['/agent/scope/end', { ...r, outcome: 'passed', note: NOTE }],
     ]);
   } finally { await a.close(); }
 });
@@ -503,7 +508,7 @@ test('a worker started above keploy\'s project claims with the project\'s folder
     assert.deepEqual(wire(j), [
       ['/agent/instance', { key: 'p1', dir: fs.realpathSync(PKG) }],
       ['/agent/scope/begin', { ...r, canSkip: true, random: 'seeded', seed: FRESH }],
-      ['/agent/scope/end', { ...r, outcome: 'passed' }],
+      ['/agent/scope/end', { ...r, outcome: 'passed', note: NOTE }],
     ]);
   } finally { await a.close(); }
 });
@@ -519,7 +524,7 @@ test('when keploy names no project, a worker claims with the current folder, whi
     assert.deepEqual(wire(j), [
       ['/agent/instance', { key: 'p1', dir: fs.realpathSync(cwd) }],
       ['/agent/scope/begin', { ...r, canSkip: true, random: 'seeded', seed: FRESH }],
-      ['/agent/scope/end', { ...r, outcome: 'passed' }],
+      ['/agent/scope/end', { ...r, outcome: 'passed', note: NOTE }],
     ]);
   } finally { await a.close(); }
 });
@@ -632,6 +637,8 @@ async function drawsServer() {
     const u = new URL(req.url, 'http://x');
     // /csp is served with a CSP sandbox: an opaque origin, no session storage.
     if (u.pathname === '/csp') { res.writeHead(200, { 'content-type': 'text/html', 'content-security-policy': 'sandbox allow-scripts' }); res.end(page('csp')); return; }
+    // /cspf: the same, with a frame of its own origin in it.
+    if (u.pathname === '/cspf') { res.writeHead(200, { 'content-type': 'text/html', 'content-security-policy': 'sandbox allow-scripts' }); res.end(page('<iframe src="/frame"></iframe>')); return; }
     if (u.pathname === '/held.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); held.script(() => res.end('')); return; }
     // parse.spec.ts's removed: /rhold.js is answered at /rrelease.
     if (u.pathname === '/rhold.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); rheld.push(res); return; }
@@ -718,6 +725,15 @@ async function drawsServer() {
     }
     if (u.pathname === '/draws') { res.end(page(`<iframe src="http://localhost:${srv.address().port}/frame"></iframe>`)); return; }
     if (u.pathname === '/frame') { res.end(page('frame')); return; }
+    // note.spec.ts's page: draws Math.random once and getRandomValues twice
+    // more times after DRAWS, then puts in frames frames at /frame.
+    if (u.pathname === '/note') {
+      const extra = Number(u.searchParams.get('draws')), frames = Number(u.searchParams.get('frames'));
+      const draw = 'Math.random(); crypto.getRandomValues(new Uint8Array(1)); crypto.getRandomValues(new Uint8Array(1));';
+      res.end(page(`<script>for (let i = 0; i < ${extra}; i++) { ${draw} }</script>${'<iframe src="/frame"></iframe>'.repeat(frames)}`));
+      return;
+    }
+    if (u.pathname === '/notef') { res.end('<html><body><iframe src="/frame"></iframe></body></html>'); return; }
     // /nest holds /frame of its own origin.
     if (u.pathname === '/nest') { res.end(page('<iframe src="/frame"></iframe>')); return; }
     // /long/... is a page at an address of any length.
@@ -903,6 +919,88 @@ test('seeded: a record seeds each test\'s pages from the fresh seed its begin se
     assert.notDeepEqual(r2.drew.three, r1.drew.three);
   } finally { await a.close(); }
 });
+
+for (const engine of ['chromium', 'firefox', 'webkit']) {
+  test(`seeded (${engine}): a record's end sends keploy a note of how the test drew, in its test process and in each document, and the frames each document put in at each path; its replay prints one line for each difference, none when it draws as recorded, and says once per worker when keploy answered no note`, async () => {
+    const j = journal();
+    const d = await drawsServer();
+    const rec = await fakeAgent(j);
+    // What the recording kept: each test's seed and note.
+    let kept = {};
+    // The note each begin is answered: the recording's by default.
+    let noteOf = (name) => ({ note: kept[name].note });
+    const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+      ? { body: { v: 1, status: 'ok', seed: kept[c.body.name].seed, ...noteOf(c.body.name) } } : undefined));
+    const run = async (url, more) => {
+      const from = j.events.length;
+      const { tests, out } = await playwright(['note.spec.ts'], { ...keployEnv(url), DRAWS_BASE: d.url, PW_BROWSER: engine, NOTE_MORE: more ? '1' : undefined });
+      for (const [k, t] of Object.entries(tests)) assert.equal(t.status, 'passed', `${k}: ${t.error}\n${out}`);
+      const sent = calls({ events: j.events.slice(from) });
+      const seeds = Object.fromEntries(sent.filter((c) => c.path === '/agent/scope/begin').map((c) => [c.body.name, c.body.seed]));
+      const notes = Object.fromEntries(sent.filter((c) => c.path === '/agent/scope/end').map((c) => [c.body.name, c.body.note]));
+      // What each test said, but the seeding's line and the unplaced document's.
+      const said = Object.fromEntries(Object.entries(tests).map(([k, t]) => [k, t.stdout.split('\n').filter((l) => l.startsWith('keploy:') && l !== SEEDED_LINE && !l.startsWith('keploy: in '))]));
+      return { seeds, notes, said, out };
+    };
+    const at = (n) => Object.values(n.d).map((x) => [x.at.replace(/:\d+\//, ':<port>/'), x.n, x.f]).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    try {
+      const r = await run(rec.url, false);
+      kept = Object.fromEntries(Object.keys(r.seeds).map((k) => [k, { seed: r.seeds[k], note: r.notes[k] }]));
+      const noted0 = readNote(r.notes.noted);
+      assert.equal(typeof noted0, 'object', r.notes.noted);
+      // The test process drew Math.random once, and faker; the page drew
+      // DRAWS (Math.random twice, crypto.getRandomValues and
+      // crypto.randomUUID once) and put in one frame at /frame, whose
+      // document drew DRAWS. No place keeps the seed.
+      assert.deepEqual(Object.keys(noted0.p).sort(), ['@faker-js/faker faker', 'Math.random']);
+      assert.equal(noted0.p['Math.random'], 1);
+      assert.ok(noted0.p['@faker-js/faker faker'] > 0, String(noted0.p['@faker-js/faker faker']));
+      assert.equal(noted0.cut, 0);
+      assert.deepEqual(at(noted0), [
+        ['http://127.0.0.1:<port>/frame', [2, 1, 1], {}],
+        ['http://127.0.0.1:<port>/note', [2, 1, 1], { '/frame': 1 }],
+      ]);
+      for (const k of Object.keys(noted0.d)) assert.ok(!k.includes(r.seeds.noted), k);
+      // A document that puts in a frame before its place is known (it never
+      // draws) is told once its frame's document asks for it.
+      const plain = readNote(r.notes.plain);
+      assert.deepEqual(at(plain), [['http://127.0.0.1:<port>/frame', [2, 1, 1], {}], ['http://127.0.0.1:<port>/notef', [0, 0, 0], { '/frame': 1 }]]);
+      assert.ok(Object.keys(plain.d).includes('t0\n/notef\n0\n'), Object.keys(plain.d).join(' | '));
+      // A document with no place is not in the note, nor are the frames it
+      // put in.
+      assert.deepEqual(readNote(r.notes.unplaced), { v: 1, p: {}, d: {}, cut: 0 });
+      // A record says nothing of notes.
+      assert.deepEqual(r.said, { noted: [], plain: [], unplaced: [] }, r.out);
+      // A replay that draws as its recording did says nothing.
+      const same = await run(rep.url, false);
+      assert.deepEqual(same.said, { noted: [], plain: [], unplaced: [] }, same.out);
+      // One that draws once more in each place (getRandomValues twice more
+      // in the page), with one more frame at /frame, names each difference;
+      // faker drew as recorded.
+      const more = await run(rep.url, true);
+      const lines = more.said.noted.map((l) => l.replace(/:\d+\//, ':<port>/'));
+      assert.deepEqual(lines.map((l) => l.split(', so ')[0]), [
+        'keploy: noted drew Math.random 2 times in the test process at this replay and once in its recording',
+        'keploy: noted: the document at http://127.0.0.1:<port>/note drew Math.random 3 times at this replay and 2 times in its recording',
+        'keploy: noted: the document at http://127.0.0.1:<port>/note drew crypto.getRandomValues 3 times at this replay and once in its recording',
+        'keploy: noted: the document at http://127.0.0.1:<port>/note put in 2 frame(s) at /frame at this replay and 1 in its recording',
+        'keploy: noted: the document at http://127.0.0.1:<port>/frame drew Math.random 2 times at this replay and 0 times in its recording',
+        'keploy: noted: the document at http://127.0.0.1:<port>/frame drew crypto.getRandomValues once at this replay and 0 times in its recording',
+        'keploy: noted: the document at http://127.0.0.1:<port>/frame drew crypto.randomUUID once at this replay and 0 times in its recording',
+      ], more.out);
+      assert.deepEqual([more.said.plain, more.said.unplaced], [[], []]);
+      // A replay keploy answered no note (none, or an empty one) says so once
+      // in the worker.
+      noteOf = (name) => (name === 'noted' ? {} : { note: '' });
+      const none = await run(rep.url, false);
+      assert.deepEqual([...none.said.noted, ...none.said.plain, ...none.said.unplaced], [NO_NOTE_LINE], none.out);
+      // A note this package cannot read is named, and nothing is compared.
+      noteOf = (name) => ({ note: name === 'noted' ? '{"v":2}' : kept[name].note });
+      const other = await run(rep.url, true);
+      assert.deepEqual(other.said, { noted: [unreadNoteLine('noted', 'it is version 2, and this @keploy/playwright reads version 1')], plain: [], unplaced: [] }, other.out);
+    } finally { await rep.close(); await rec.close(); await d.close(); }
+  });
+}
 
 test('seeded: a replay draws the numbers its recording drew, from the seed keploy answers, not the one its begin sent', async () => {
   const j = journal();
@@ -1797,7 +1895,8 @@ test('KEPLOY_SEED_RANDOM=off, or no keploy: the test browser draws its own rando
     // Under keploy with it off, each begin says the browser draws its own
     // and sends no seed, and each end says it did.
     assert.deepEqual(calls(j).filter((c) => c.path === '/agent/scope/begin').map((c) => [c.body.random, c.body.seed]), Array(8).fill(['own', undefined]));
-    assert.deepEqual(calls(j).filter((c) => c.path === '/agent/scope/end').map((c) => c.body.random), Array(8).fill('own'));
+    // Unseeded, a test's end sends no note.
+    assert.deepEqual(calls(j).filter((c) => c.path === '/agent/scope/end').map((c) => [c.body.random, c.body.note]), Array(8).fill(['own', undefined]));
   } finally { await a.close(); }
 });
 

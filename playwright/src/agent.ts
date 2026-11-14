@@ -33,7 +33,11 @@ export interface Answer {
   timeFile?: string;
   variable?: string;
   seed?: string;
+  note?: string;
 }
+
+/** The largest note keploy keeps (its models.MaxScopeNote), in UTF-8 bytes. */
+export const MAX_NOTE = 16 << 10;
 
 /** An answer this package cannot trust, or the agent's own refusal. */
 export class KeployError extends Error {
@@ -150,7 +154,10 @@ export class AgentClient {
    * when it means to seed them, is one drawn afresh for this begin; the
    * answer's seed is the one to draw from: in a record the begin's own, in a
    * replay the one the test's recording kept, and none when it kept none. An
-   * agent from before either field ignores it and answers no seed.
+   * agent from before either field ignores it and answers no seed. The
+   * answer's note, in a replay, is the one the test's recording's end sent
+   * (end); a record's begin, a recording that kept none and an agent from
+   * before notes answer none.
    */
   async begin(test: TestRef, random?: Random, seed?: string): Promise<Answer> {
     const a = await this.onWire(PATH_BEGIN, { ...test, canSkip: true, ...(random ? { random } : {}), ...(seed ? { seed } : {}) }, `${test.name} cannot begin`);
@@ -164,16 +171,22 @@ export class AgentClient {
       throw new KeployError(`keploy: the keploy agent answered the begin of ${test.name} with the seed ${quoted(typeof a.seed === 'string' ? a.seed : String(JSON.stringify(a.seed)))}, ` +
         'which is no seed keploy keeps (8 to 64 lower-case hex digits)');
     }
+    if (a.note !== undefined && (typeof a.note !== 'string' || Buffer.byteLength(a.note, 'utf8') > MAX_NOTE)) {
+      throw new KeployError(`keploy: the keploy agent answered the begin of ${test.name} with the note ${quoted(typeof a.note === 'string' ? a.note : String(JSON.stringify(a.note)))}, ` +
+        `which is no note keploy keeps (a string of at most ${MAX_NOTE} bytes)`);
+    }
     return a;
   }
 
   /**
    * Tells the agent the test ended, with its outcome, and, when it is known,
    * how its browser drew its random numbers (random), which replaces what its
-   * begin meant to do.
+   * begin meant to do, and the note (note.ts) keploy keeps with a record and
+   * answers to the test's replay's begin, which it never reads. An agent
+   * from before notes ignores it.
    */
-  async end(test: TestRef, outcome: Outcome, random?: Random): Promise<Answer> {
-    const a = await this.onWire(PATH_END, { ...test, outcome, ...(random ? { random } : {}) }, `${test.name} cannot end`);
+  async end(test: TestRef, outcome: Outcome, random?: Random, note?: string): Promise<Answer> {
+    const a = await this.onWire(PATH_END, { ...test, outcome, ...(random ? { random } : {}), ...(note ? { note } : {}) }, `${test.name} cannot end`);
     if (a.status !== 'ok') {
       throw new KeployError(`keploy: the keploy agent answered the end of ${test.name} with status ${JSON.stringify(a.status ?? '')}`);
     }

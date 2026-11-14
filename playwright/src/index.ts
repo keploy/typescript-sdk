@@ -48,7 +48,13 @@
 //     instances and those the suite gives seedFaker, so data the test makes
 //     there (a name stamped with Math.random()) is the recording's; KEPLOY_SEED_RANDOM=off
 //     or the option keploySeedRandom: false turns it off, and the worker
-//     says once what that costs.
+//     says once what that costs;
+//   - a seeded test's end sends keploy a note of how many times the test
+//     drew each stream, in its test process and in each of its documents,
+//     and how many frames each document put in at each path (note.ts),
+//     which a record keeps; its replay's begin is answered that note, and
+//     its end prints one line for each difference, naming what differs and
+//     the next step, since a draw that moves shifts the draws after it.
 // Any answer of the agent this package cannot trust fails the test.
 
 import { test as base, expect } from '@playwright/test';
@@ -59,7 +65,8 @@ import { ACTION_FAIL, ACTION_SKIP, AgentClient, KeployError, RANDOM_OWN, RANDOM_
 import type { Outcome, Random, TestRef } from './agent';
 import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
-import { OFF_LINE, SEEDED_LINE, besideOf, fakerLine, fakersOf, freshSeed, initScript, othersNow, pageAddress, placePages, processRandom, seatFaker, seatRandom, seedingFromEnv, setAside, unplacedLine, unseededLine, workerRoutes, type Fakers, type Unplaced } from './random';
+import { NO_NOTE_LINE, differences, docLog, keepDocDraws, noteText, readNote, unreadNoteLine, type DocLog } from './note';
+import { OFF_LINE, SEEDED_LINE, besideOf, fakerLine, fakersOf, freshSeed, initScript, othersNow, pageAddress, placePages, processRandom, seatFaker, seatRandom, seedingFromEnv, setAside, tally, unplacedLine, unseededLine, workerRoutes, type Fakers, type Unplaced } from './random';
 import { Inflight, sharedWorkerLine, sharedWorkerScript } from './settle';
 
 export { expect, KeployError };
@@ -84,6 +91,8 @@ let seedingOn = false;
 let saidSeeded = false;
 // Whether this worker has said what a test with seeding off costs.
 let saidOff = false;
+// Whether this worker has said that a seeded replay was answered no note.
+let saidNoNote = false;
 // The reasons this worker has said it cannot seed faker, each said once.
 const saidFaker = new Set<string>();
 // How many contexts this worker seeded: each one's report function has its
@@ -103,6 +112,8 @@ type PageSeeding = {
   // (seededPage) or not (ownPage).
   seededPage: boolean;
   ownPage: boolean;
+  // What its context's documents drew, for its note.
+  drawn: DocLog;
 };
 // The open test's, while one is open.
 let seeding: PageSeeding | null = null;
@@ -178,6 +189,9 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
       // A document the seeding cannot place draws the browser's own numbers
       // and says so here, once for each address and reason in the test.
       const report = `__keploy_random_unplaced_${++reports}`;
+      // How each placed document drew, for the test's note.
+      const drawnReport = `__keploy_random_drawn_${reports}`;
+      await context.exposeBinding(drawnReport, (_source, key: unknown, at: unknown, n: unknown, f: unknown) => { keepDocDraws(s.drawn, key, at, n, f); });
       const told = new Set<string>();
       let opened: (page: Page | null | undefined) => Promise<boolean> = async () => false;
       await context.exposeBinding(report, async (source, at: unknown, why: unknown, above: unknown) => {
@@ -243,7 +257,7 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
           process.stdout.write(`${unplacedLine(name, a, why)}\n`);
         },
       }, browserName === 'webkit');
-      await context.addInitScript({ content: initScript(s.seed, report, mark, browserName !== 'firefox') });
+      await context.addInitScript({ content: initScript(s.seed, report, mark, browserName !== 'firefox', drawnReport) });
       const placing = placePages(context, mark);
       restore = placing.restore;
       opened = placing.opened;
@@ -302,7 +316,8 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
       throw new KeployError(`keploy: ${again.message} (${again.remedy})${told}`);
     }
     const asked = seedingOn && keploySeedRandom;
-    const b = await c.begin(ref, asked ? RANDOM_SEEDED : RANDOM_OWN, asked ? freshSeed() : undefined);
+    const sent = asked ? freshSeed() : undefined;
+    const b = await c.begin(ref, asked ? RANDOM_SEEDED : RANDOM_OWN, sent);
     if (b.action === ACTION_SKIP) {
       // The framework's own skip, with keploy's reason; no end follows.
       // Playwright's list, line and dot reporters print a test's output but
@@ -312,7 +327,10 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
       testInfo.skip(true, why);
       return;
     }
-    const s: PageSeeding = { asked, seed: asked ? b.seed ?? '' : '', seededPage: false, ownPage: false };
+    const s: PageSeeding = { asked, seed: asked ? b.seed ?? '' : '', seededPage: false, ownPage: false, drawn: docLog() };
+    // A replay: keploy answered the seed its recording kept, not the one
+    // this begin sent (a record answers the begin's own).
+    const replaying = s.seed !== '' && s.seed !== sent;
     if (s.seed !== '') {
       if (!saidSeeded) {
         saidSeeded = true;
@@ -340,8 +358,10 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
     // The test process draws Math.random, and faker's instances draw, from
     // the test's seed from here, its beforeEach hooks included, until its
     // afterEach hooks and fixtures end.
-    const unseat = s.seed !== '' ? seatRandom(processRandom(s.seed)) : null;
-    const unseatFaker = s.seed !== '' ? seatFaker(s.seed, fakers.found) : null;
+    // How many times the test process drew each stream, for the note.
+    const processDrawn = new Map<string, number>();
+    const unseat = s.seed !== '' ? seatRandom(tally(processDrawn, 'Math.random', processRandom(s.seed))) : null;
+    const unseatFaker = s.seed !== '' ? seatFaker(s.seed, fakers.found, processDrawn) : null;
     try {
       await use();
     } finally {
@@ -350,7 +370,22 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
     }
     open = null;
     seeding = null;
-    const e = await c.end(ref, outcomeOf(testInfo), randomDone(s));
+    const note = s.seed !== '' ? noteText(processDrawn, s.drawn) : undefined;
+    if (replaying && note !== undefined) {
+      // What differs from the recording's draws: one line each.
+      if (b.note === undefined || b.note === '') {
+        if (!saidNoNote) {
+          saidNoNote = true;
+          process.stdout.write(`${NO_NOTE_LINE}\n`);
+        }
+      } else {
+        const recorded = readNote(b.note);
+        const now = readNote(note);
+        if (typeof recorded === 'string') process.stdout.write(`${unreadNoteLine(ref.name, recorded)}\n`);
+        else if (typeof now !== 'string') for (const line of differences(ref.name, recorded, now)) process.stdout.write(`${line}\n`);
+      }
+    }
+    const e = await c.end(ref, outcomeOf(testInfo), randomDone(s), note);
     if (e.action === ACTION_FAIL) throw new KeployError(keployText(e.reason, 'keploy: the keploy agent failed this test and gave no reason'));
   }, { auto: true }],
 });
