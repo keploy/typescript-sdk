@@ -638,16 +638,16 @@ async function drawsServer() {
     // workers.spec.ts's workers, and the scripts they load.
     const wk = {
       // Each Web Worker answers the message its page posts as it starts it.
-      '/wk/ded.js': `importScripts('dep.js'); onmessage = (e) => postMessage({ kind: 'ded-early', data: e.data }); postMessage({ kind: 'ded', draws: ${DRAWS}, href: location.href, dep: self.dep, stack: String(new Error('at').stack) });`,
+      '/wk/ded.js': `importScripts('dep.js'); onmessage = (e) => postMessage({ kind: 'ded-early', data: e.data }); postMessage({ kind: 'ded', draws: ${DRAWS}, href: location.href, dep: self.dep, stack: String(new Error('at').stack), errs: ${ERRS} });`,
       '/wk/dep.js': 'self.dep = \'dep\';',
-      '/wk/mod.js': `import { dep } from './lib.mjs'; self.onmessage = (e) => postMessage({ kind: 'mod-early', data: e.data }); postMessage({ kind: 'mod', draws: ${DRAWS}, href: location.href, dep, meta: import.meta.url, top: String(new Error('at').stack) });`,
+      '/wk/mod.js': `import { dep } from './lib.mjs'; self.onmessage = (e) => postMessage({ kind: 'mod-early', data: e.data }); postMessage({ kind: 'mod', draws: ${DRAWS}, href: location.href, dep, meta: import.meta.url, top: String(new Error('at').stack), errs: ${ERRS} });`,
       '/wk/lib.mjs': 'export const dep = \'lib\';',
-      '/wk/shared.js': `onconnect = (e) => e.ports[0].postMessage({ kind: 'shared', draws: ${DRAWS}, href: location.href, stack: String(new Error('at').stack) });`,
+      '/wk/shared.js': `onconnect = (e) => e.ports[0].postMessage({ kind: 'shared', draws: ${DRAWS}, href: location.href, stack: String(new Error('at').stack), errs: ${ERRS} });`,
       // Module Shared Workers: one plain, one (started by two names, c1
       // twice) served with a policy that refuses data: scripts. Each
       // connection after a worker's first is named by its number (c1+2).
-      '/wk/mshared.js': `import { dep } from './lib.mjs'; const top = String(new Error('at').stack); self.onconnect = (e) => e.ports[0].postMessage({ kind: 'mshared', draws: ${DRAWS}, href: location.href, dep, meta: import.meta.url, top });`,
-      '/wk/cshared.js': `import { dep } from './lib.mjs'; let n = 0; const draws = ${DRAWS}; const top = String(new Error('at').stack); self.onconnect = (e) => { n++; e.ports[0].postMessage({ kind: self.name + (n > 1 ? \`+\${n}\` : ''), draws, href: location.href, dep, meta: import.meta.url, top, stack: String(new Error('at').stack) }); };`,
+      '/wk/mshared.js': `import { dep } from './lib.mjs'; const top = String(new Error('at').stack); self.onconnect = (e) => e.ports[0].postMessage({ kind: 'mshared', draws: ${DRAWS}, href: location.href, dep, meta: import.meta.url, top, errs: ${ERRS} });`,
+      '/wk/cshared.js': `import { dep } from './lib.mjs'; let n = 0; const draws = ${DRAWS}; const errs = ${ERRS}; const top = String(new Error('at').stack); self.onconnect = (e) => { n++; e.ports[0].postMessage({ kind: self.name + (n > 1 ? \`+\${n}\` : ''), draws, href: location.href, dep, meta: import.meta.url, top, stack: String(new Error('at').stack), errs }); };`,
     }[u.pathname];
     if (wk !== undefined) {
       res.writeHead(200, { 'content-type': 'text/javascript', ...(u.pathname === '/wk/cshared.js' ? { 'content-security-policy': 'script-src \'self\'' } : {}) });
@@ -1306,6 +1306,14 @@ const WK_STARTS = [
   'new SharedWorker(\'/wk/cshared.js\', { type: \'module\', name: \'c1\' })',
 ];
 
+// What each worker sends of the errors the browser's own calls throw in its
+// seeded functions and its location's getters (a float array, more than
+// 65536 bytes, a this that is no Crypto or location): each one's stack, or
+// null for an error with none; 'none' if a call threw nothing.
+const ERRS = '[() => crypto.getRandomValues(new Float64Array(1)), () => crypto.getRandomValues(new Uint8Array(65537)), () => crypto.randomUUID.call({}), ' +
+  '...[\'href\', \'search\'].map((k) => () => Object.getOwnPropertyDescriptor(WorkerLocation.prototype, k).get.call({})), () => WorkerLocation.prototype.toString.call({})]' +
+  '.map((f) => { try { f(); return \'none\'; } catch (e) { return e.stack === undefined ? null : String(e.stack); } })';
+
 // The marks a document at /wk of page t0 gives the workers workers.spec.ts
 // starts (WK_STARTS).
 function workerMarks(seed) {
@@ -1349,6 +1357,21 @@ for (const engine of ENGINES) {
       for (const [k, f, file] of stacks) {
         assert.match(w[k][f], new RegExp(`/wk/${file}\\.js[?:]`), `${k}.${f}: ${w[k][f]}`);
         assert.doesNotMatch(w[k][f], /__keploy_worker/, `${k}.${f}: ${w[k][f]}`);
+      }
+      // An error the browser's own call throws in a seeded function or
+      // getter shows no frame of keploy's seeding (at its marked URL or its
+      // data: module): each frame is the app's script's or the browser's own
+      // (Firefox, whose stacks go on through queued code: none of keploy's).
+      for (const [k, file] of [['ded', 'ded'], ['mod', 'mod'], ['shared', 'shared'], ['mshared', 'mshared'], ['c1', 'cshared'], ['c2', 'cshared']]) {
+        assert.equal(w[k].errs.length, 6, k);
+        for (const s of w[k].errs) {
+          assert.notEqual(s, 'none', k);
+          if (s === null) continue;
+          assert.doesNotMatch(s, /__keploy_worker|data:/, `${k}: ${s}`);
+          const frames = s.split('\n').filter((l) => (engine === 'chromium' ? /^\s+at /.test(l) : l !== ''));
+          assert.ok(frames.some((l) => l.includes(`/wk/${file}.js`)), `${k}: ${s}`);
+          if (engine !== 'firefox') for (const l of frames) assert.match(l, new RegExp(`/wk/${file}\\.js[?:]|\\[native code\\]|<anonymous>`), `${k}: ${s}`);
+        }
       }
       // A message the page posts as it starts a Web Worker reaches the app's
       // handler: the app's script has run before the worker takes it.

@@ -1496,6 +1496,69 @@ test('a worker\'s seeding: an Error\'s or a DOMException\'s stack read through i
   assert.equal(workerAt(href, workerScript(t, 0, 'w')).run('Object.getOwnPropertyDescriptor(Error.prototype, \'stack\')'), undefined);
 });
 
+test('a worker\'s seeding: an error the browser\'s own call throws in a seeded getRandomValues or randomUUID, or in the location\'s href, search or toString, reaches the caller with each frame at a URL keploy marked (a query\'s mark or a data: module\'s parameter) left out of its own stack, through its setter or as its value, flags kept; a stack with no such frame, one that is no string, none of its own and a thrown value that is no object stay as they were; a page\'s errors go on as they are', () => {
+  const t = 'cd'.repeat(16);
+  const href = markWorker('http://h/w.js', 'w', t);
+  const kept = ['TypeError: no', '    at f (http://h/w.js:1:2)', `    at g (http://h/w.js?a__keploy_worker=w.${t}:7:8)`, ''];
+  const stack = [kept[0], `    at Crypto.getRandomValues (${href}:30:5)`, kept[1], `    at x (data:text/javascript;__keploy_worker=x.${t};base64,QUJD:1:9)`,
+    `    at y (${markWorker('http://h/m.js', 'p', t, 0)}:3:4)`, kept[2], kept[3]].join('\n');
+  // What the browser's own calls throw, in turn.
+  const throws = [];
+  const raise = () => { throw throws.shift(); };
+  // A scope's own classes: its seeding wraps their prototypes' functions.
+  const natives = () => {
+    class Crypto { getRandomValues() { raise(); } randomUUID() { raise(); } }
+    class WorkerLocation { get href() { return raise(); } get search() { return raise(); } toString() { return raise(); } }
+    return { Crypto, crypto: new Crypto(), WorkerLocation, location: new WorkerLocation() };
+  };
+  const w = workerAt(href, workerScript(t, 0, 'w'), natives());
+  const caught = (at, call) => [...at.run(`(() => { try { ${call}; } catch (e) { return [e]; } return []; })()`)];
+  // An own stack read and written through a getter and a setter (V8's).
+  const accessor = (s0) => {
+    const e = new Error('no');
+    let s = s0;
+    const set = [];
+    Object.defineProperty(e, 'stack', { get() { return s; }, set(v) { set.push(v); s = v; }, enumerable: false, configurable: true });
+    return { e, set };
+  };
+  const calls = ['crypto.getRandomValues(new Uint8Array(1))', 'crypto.randomUUID()', 'location.href', 'location.search', 'String(location)'];
+  for (const call of calls) {
+    const a = accessor(stack);
+    throws.push(a.e);
+    assert.deepEqual(caught(w, call), [a.e], call);
+    assert.deepEqual(a.set, [kept.join('\n')], call);
+    const d = Object.getOwnPropertyDescriptor(a.e, 'stack');
+    assert.deepEqual([typeof d.get, typeof d.set, d.enumerable], ['function', 'function', false], call);
+    // A stack that is the error's own value (WebKit's).
+    const v = new Error('no');
+    Object.defineProperty(v, 'stack', { value: stack, writable: true, enumerable: false, configurable: true });
+    throws.push(v);
+    assert.deepEqual(caught(w, call), [v], call);
+    assert.deepEqual(Object.getOwnPropertyDescriptor(v, 'stack'), { value: kept.join('\n'), writable: true, enumerable: false, configurable: true }, call);
+  }
+  // As they were: no frame keploy marked, a stack that is no string (never
+  // read as one), an error with no stack of its own (Firefox's), a value
+  // that is no object.
+  const plain = accessor(kept.join('\n'));
+  let read = 0;
+  const odd = accessor({ toString() { read++; return stack; } });
+  const none = Object.create(Error.prototype);
+  for (const e of [plain.e, odd.e, none, 'thrown']) {
+    throws.push(e);
+    assert.deepEqual(caught(w, 'crypto.getRandomValues(new Uint8Array(1))'), [e]);
+  }
+  assert.deepEqual([plain.set, odd.set, read, Object.getOwnPropertyNames(none)], [[], [], 0, []]);
+  // A page's seeded functions: what the browser throws goes on as it is.
+  const { Crypto, crypto } = natives();
+  const page = documentAt(initScript(S1), '/p', new Map(), 't0', { globals: { Crypto, crypto } });
+  for (const call of calls.slice(0, 2)) {
+    const a = accessor(stack);
+    throws.push(a.e);
+    assert.deepEqual(caught(page, call), [a.e], call);
+    assert.deepEqual([a.set, a.e.stack], [[], stack], call);
+  }
+});
+
 // A context whose route keeps its matcher and handler, and a route of it
 // that records what the handler did.
 function routed() {
@@ -1580,7 +1643,8 @@ test('workerAnswer: a classic Web or Shared Worker runs its seeding, then import
     assert.equal(w.run('location.href'), 'http://h/s.js?q=1', kind);
   }
   const m = workerAnswer(t, 2, 'x', 'http://h/m.js?q=1');
-  const data = /^import "data:text\/javascript;base64,([A-Za-z0-9+/=]+)";\nimport "http:\/\/h\/m\.js\?q=1";\n$/.exec(m);
+  // Its media type carries the mark, so a stack can leave its frames out.
+  const data = new RegExp(`^import "data:text/javascript;__keploy_worker=x\\.${t};base64,([A-Za-z0-9+/=]+)";\\nimport "http://h/m\\.js\\?q=1";\\n$`).exec(m);
   assert.ok(data, m.slice(0, 120));
   assert.equal(Buffer.from(data[1], 'base64').toString(), workerScript(t, 2, 'x'));
 });

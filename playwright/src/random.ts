@@ -635,7 +635,9 @@ const STREAM_JS = `  const imul = Math.imul;
 // A browser script's seeded Math.random, crypto.getRandomValues and
 // crypto.randomUUID, each drawing from from(name) ('random', 'grv',
 // 'uuid'): a stream, or null for the browser's own; and define, which
-// keeps a property's flags.
+// keeps a property's flags. What the browser's own call throws in them
+// reaches their caller as thrown(e) gives it (workerScript's: with no frame
+// of keploy's seeding on its stack).
 const DRAW_JS = `  const define = (o, name, value) => {
     const d = Object.getOwnPropertyDescriptor(o, name);
     Object.defineProperty(o, name, { value, writable: d ? d.writable : true, enumerable: d ? d.enumerable : false, configurable: true });
@@ -659,7 +661,8 @@ const DRAW_JS = `  const define = (o, name, value) => {
     define(C, 'getRandomValues', { getRandomValues(array) {
       /* The browser's own call first: it refuses what the browser refuses
          (a float array, more than 65536 bytes, a this that is no Crypto). */
-      const out = real.call(this, array);
+      let out;
+      try { out = real.call(this, array); } catch (e) { throw thrown(e); }
       const grv = from('grv');
       if (grv !== null) fill(grv, new Uint8Array(out.buffer, out.byteOffset, out.byteLength));
       return out;
@@ -668,7 +671,8 @@ const DRAW_JS = `  const define = (o, name, value) => {
   if (C && typeof C.randomUUID === 'function') {
     const realUUID = C.randomUUID;
     define(C, 'randomUUID', { randomUUID() {
-      const own = realUUID.call(this);
+      let own;
+      try { own = realUUID.call(this); } catch (e) { throw thrown(e); }
       const uuid = from('uuid');
       if (uuid === null) return own;
       const b = new Uint8Array(16);
@@ -1154,6 +1158,8 @@ ${STREAM_JS}
     }
     return s.streams === false ? null : s.streams[name];
   };
+  // A page's stacks show no URL keploy marked: an error goes on as it is.
+  const thrown = (e) => e;
 ${DRAW_JS}
   const realOpen = g.open;
   if (typeof realOpen === 'function') {
@@ -1284,7 +1290,10 @@ export function markWorker(url: string, kind: WorkerMark['kind'], token: string,
  * its own URL (workerAnswer). An Error's or a DOMException's stack read
  * through its prototype's getter (Firefox's, whose stacks go on through
  * the code that queued what runs) leaves out each frame at a URL keploy
- * marked: keploy's own code.
+ * marked: keploy's own code. An error the browser's own call throws in a
+ * seeded function or in the location's getters (a float array, a this that
+ * is no Crypto or location) reaches its caller with none of the seeding's
+ * frames on the stack it keeps (V8's and WebKit's).
  */
 export function workerScript(token: string, n: number, kind: 'w' | 'm' | 's' | 'x'): string {
   return `(() => {
@@ -1293,6 +1302,25 @@ export function workerScript(token: string, n: number, kind: 'w' | 'm' | 's' | '
 ${STREAM_JS}
   const streams = { random: stream(k + 'Math.random'), grv: stream(k + 'crypto.getRandomValues'), uuid: stream(k + 'crypto.randomUUID') };
   const from = (name) => streams[name];
+  // keploy's seeding runs at a URL keploy marked (a query's mark, or a
+  // data: module's media type parameter: workerAnswer). An error the
+  // browser's own call throws in a seeded function or getter keeps, in V8
+  // and WebKit, a stack of its own, made as it was thrown, with the seeding's
+  // frames: they are left out of it before it reaches the caller, and a
+  // stack with none, or that is no string, stays as it was.
+  const marked = new RegExp(${JSON.stringify(`[?&;]${WORKER_PARAM}=`)});
+  const unmark = (s) => s.split('\\n').filter((l) => !marked.test(l)).join('\\n');
+  const thrown = (e) => {
+    try {
+      const d = Object.getOwnPropertyDescriptor(e, 'stack');
+      const s = d.get ? d.get.call(e) : d.value;
+      if (typeof s === 'string' && marked.test(s)) {
+        if (d.get) d.set.call(e, unmark(s));
+        else Object.defineProperty(e, 'stack', { value: unmark(s) });
+      }
+    } catch (x) {}
+    return e;
+  };
 ${DRAW_JS}
   const M = ${JSON.stringify(`${WORKER_PARAM}=${kind}.${token}`)};
   const strip = (h) => {
@@ -1309,27 +1337,27 @@ ${DRAW_JS}
         const d = Object.getOwnPropertyDescriptor(L, name);
         if (!d || typeof d.get !== 'function') continue;
         const get = d.get;
+        const read = (o) => { try { return get.call(o); } catch (e) { throw thrown(e); } };
         const v = name === 'href'
-          ? { get href() { return strip(get.call(this)); } }
-          : { get search() { const s = get.call(this); const i = s.indexOf(M); if (i < 1) return s; const t = s.slice(0, i - 1); return t === '?' ? '' : t; } };
+          ? { get href() { return strip(read(this)); } }
+          : { get search() { const s = read(this); const i = s.indexOf(M); if (i < 1) return s; const t = s.slice(0, i - 1); return t === '?' ? '' : t; } };
         Object.defineProperty(L, name, { get: Object.getOwnPropertyDescriptor(v, name).get, set: d.set, enumerable: d.enumerable, configurable: true });
       } catch (e) {}
     }
     try {
       const t = L.toString;
-      if (typeof t === 'function') define(L, 'toString', { toString() { return strip(t.call(this)); } }.toString);
+      if (typeof t === 'function') define(L, 'toString', { toString() { let h; try { h = t.call(this); } catch (e) { throw thrown(e); } return strip(h); } }.toString);
     } catch (e) {}
   }
   // Firefox reads a stack through its prototype's getter, and the stack
   // goes on through the code that queued what runs: keploy's answer, at a
   // URL keploy marked. A stack read here shows no frame at such a URL.
-  const marked = new RegExp(${JSON.stringify(`[?&]${WORKER_PARAM}=`)});
   for (const C of [g.Error, g.DOMException]) {
     try {
       const d = Object.getOwnPropertyDescriptor(C.prototype, 'stack');
       const get = d.get;
       if (typeof get !== 'function') continue;
-      const v = { get stack() { const s = get.call(this); return typeof s === 'string' ? s.split('\\n').filter((l) => !marked.test(l)).join('\\n') : s; } };
+      const v = { get stack() { const s = get.call(this); return typeof s === 'string' ? unmark(s) : s; } };
       Object.defineProperty(C.prototype, 'stack', { get: Object.getOwnPropertyDescriptor(v, 'stack').get, set: d.set, enumerable: d.enumerable, configurable: true });
     } catch (e) {}
   }
@@ -1378,7 +1406,9 @@ export function cspAllowsData(headers: Record<string, string>): boolean {
  * imports its seeding (the route answers
  * that import, marked 'p') and then the app's script. Chromium and WebKit
  * let the route reach none of what a Shared Worker loads after its script,
- * so a module Shared Worker imports its seeding as a data: module, which
+ * so a module Shared Worker imports its seeding as a data: module (its
+ * media type carries keploy's mark as a parameter, so a stack leaves the
+ * seeding's frames out: workerScript), which
  * runs before every module the app's script imports; where its policy
  * refuses data: scripts (dataOk false), its seeding runs in the answer
  * itself, which then imports the app's script (import()), and holds each
@@ -1391,7 +1421,7 @@ export function workerAnswer(token: string, n: number, kind: 'w' | 'm' | 's' | '
   if (kind === 'w' || kind === 's') return `${workerScript(token, n, kind)}queueMicrotask(importScripts.bind(globalThis, ${url}));\n`;
   if (kind === 'm') return `import ${JSON.stringify(markWorker(own, 'p', token, n))};\nimport ${url};\n`;
   const seeding = workerScript(token, n, 'x');
-  if (dataOk) return `import ${JSON.stringify(`data:text/javascript;base64,${Buffer.from(seeding).toString('base64')}`)};\nimport ${url};\n`;
+  if (dataOk) return `import ${JSON.stringify(`data:text/javascript;${WORKER_PARAM}=x.${token};base64,${Buffer.from(seeding).toString('base64')}`)};\nimport ${url};\n`;
   return `${seeding}const held = [];
 const hold = (e) => { held.push(e); };
 addEventListener('connect', hold);
