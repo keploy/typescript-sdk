@@ -1810,13 +1810,16 @@ test('workerRoutes keeps keploy\'s route ahead of every route the test adds to i
   // The context, for a request of no page: aborted, then left to keploy.
   await context.route(() => true, (route) => route.abort());
   assert.deepEqual(await r.ask(w, answerOf(200, 'app()')), [['abort']]);
+  // After the context's unrouteAll, with no route added after it, keploy's
+  // routes are back: its first answers a request of no page.
   await context.unrouteAll();
-  await context.route(() => true, (route) => route.fallback());
   assert.deepEqual(await r.ask(w, answerOf(200, 'app()')), seeded(1));
+  await context.route(() => true, (route) => route.fallback());
+  assert.deepEqual(await r.ask(w, answerOf(200, 'app()')), seeded(2));
   // After the page's unrouteAll, keploy's route is ahead of the next again.
   await page.unrouteAll();
   await page.route(() => true, pass);
-  assert.deepEqual(await r.ask(w, answerOf(200, 'app()'), undefined, page), seeded(2));
+  assert.deepEqual(await r.ask(w, answerOf(200, 'app()'), undefined, page), seeded(3));
   assert.deepEqual(heard, ['http://h/w.js']);
   // One route of keploy's ahead on each, the one it replaced taken off;
   // the context's last route stays last.
