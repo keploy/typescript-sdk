@@ -78,6 +78,7 @@ async function pageServer(j) {
       j.add({ page: 'slowdoc sent' });
       res.writeHead(200, { 'content-type': 'text/html' });
       res.write('<html><body>loading');
+      res.on('finish', () => j.add({ page: 'slowdoc answered' }));
       void released.then(() => res.end('</body></html>'));
       return;
     }
@@ -442,28 +443,34 @@ for (const engine of ['chromium', 'firefox', 'webkit']) {
   });
 }
 
-test('settle: a route change inside the page cancels nothing, so its call in flight is waited for', async () => {
+// Settle rows where a call is still waited for: the page server answers it
+// only once settle's step has begun (the rows' reporter asks /release then),
+// so the test ends by settle's own wait, with no deadline on its body. The
+// test passes, settle's step names the call (method, URL), and the test's
+// end comes after the call's answer. A settle that did not wait for it ends
+// the test with the call unanswered.
+async function waitedFor(title, method, call) {
   const j = journal();
   const a = await fakeAgent(j);
   const p = await pageServer(j);
   try {
-    const { tests, out } = await playwright(['settle.spec.ts', '-g', 'route change inside the page'], { ...keployEnv(a.url), SLOW_BASE: p.url, NO_RELEASE: '1', PW_TIMEOUT: '4000' });
-    const t = tests['a call in flight across a route change inside the page'];
-    assert.equal(t.status, 'timedOut', out);
-    assert.ok(t.steps.some((s) => /^keploy: wait for the test's 1 call\(s\) in flight .*\/slow$/.test(s)), t.steps.join('\n'));
+    const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, NO_RELEASE: '1', RELEASE_AT_STEP: `${p.url}/release` });
+    const t = tests[title];
+    assert.equal(t.status, 'passed', out);
+    const named = new RegExp(`^keploy: wait for the test's 1 call\\(s\\) in flight before its browser context closes: ${method} http://127\\.0\\.0\\.1:\\d+${call}$`);
+    assert.ok(t.steps.some((s) => named.test(s)), t.steps.join('\n'));
+    const name = call.slice(1);
+    const order = j.events.map((e) => (e.page ? e.page : e.agent.path));
+    assert.deepEqual(order.filter((e) => e === `${name} sent` || e === `${name} answered` || e === '/agent/scope/end'), [`${name} sent`, `${name} answered`, '/agent/scope/end'], order.join(', '));
   } finally { await p.close(); await a.close(); }
+}
+
+test('settle: a route change inside the page cancels nothing, so its call in flight is waited for', async () => {
+  await waitedFor('a call in flight across a route change inside the page', 'GET', '/slow');
 });
 
 test('settle: a navigation answered 204 replaces no document, so a call in flight is still waited for', async () => {
-  const j = journal();
-  const a = await fakeAgent(j);
-  const p = await pageServer(j);
-  try {
-    const { tests, out } = await playwright(['settle.spec.ts', '-g', 'navigation answered 204'], { ...keployEnv(a.url), SLOW_BASE: p.url, NO_RELEASE: '1', PW_TIMEOUT: '4000' });
-    const t = tests['a call in flight across a navigation answered 204'];
-    assert.equal(t.status, 'timedOut', out);
-    assert.ok(t.steps.some((s) => /^keploy: wait for the test's 1 call\(s\) in flight .*\/slow$/.test(s)), t.steps.join('\n'));
-  } finally { await p.close(); await a.close(); }
+  await waitedFor('a call in flight across a navigation answered 204', 'GET', '/slow');
 });
 
 test('an unnamed Playwright project claims with the key ".", and its tests name no project', async () => {
@@ -572,21 +579,11 @@ for (const [title, why, call] of [
 }
 
 test('settle: a beacon from a page that stays is still waited for', async () => {
-  const j = journal();
-  const a = await fakeAgent(j);
-  const p = await pageServer(j);
-  try {
-    const title = 'a beacon in flight from the page';
-    const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, NO_RELEASE: '1', PW_TIMEOUT: '4000' });
-    const t = tests[title];
-    assert.equal(t.status, 'timedOut', out);
-    const named = /^keploy: wait for the test's 1 call\(s\) in flight before its browser context closes: POST http:\/\/127\.0\.0\.1:\d+\/beacon$/;
-    assert.ok(t.steps.some((s) => named.test(s)), t.steps.join('\n'));
-  } finally { await p.close(); await a.close(); }
+  await waitedFor('a beacon in flight from the page', 'POST', '/beacon');
 });
 
-// Settle rows where nothing was cancelled: the call is still waited for, and
-// the test times out naming it.
+// Settle rows where nothing was cancelled: the call is still waited for
+// (waitedFor).
 for (const [title, why, call] of [
   ['a call in flight across a navigation answered 205', 'a navigation answered 205 replaces no document', '/slow'],
   ['a call in flight across a download', 'a navigation answered with an attachment (a download, "Attachment") replaces no document', '/slow'],
@@ -598,16 +595,7 @@ for (const [title, why, call] of [
   ['a service worker call in flight while another page of the test closes', 'another page closing cancels nothing of a service worker', '/slow'],
 ]) {
   test(`settle: ${why}, so the call is still waited for`, async () => {
-    const j = journal();
-    const a = await fakeAgent(j);
-    const p = await pageServer(j);
-    try {
-      const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, NO_RELEASE: '1', PW_TIMEOUT: '4000' });
-      const t = tests[title];
-      assert.equal(t.status, 'timedOut', out);
-      const named = new RegExp(`^keploy: wait for the test's 1 call\\(s\\) in flight before its browser context closes: GET http://127\\.0\\.0\\.1:\\d+${call}$`);
-      assert.ok(t.steps.some((s) => named.test(s)), t.steps.join('\n'));
-    } finally { await p.close(); await a.close(); }
+    await waitedFor(title, 'GET', call);
   });
 }
 
