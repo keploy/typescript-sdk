@@ -1528,21 +1528,22 @@ function heldWorker(t, load) {
   assert.equal(body.split('await import("http://h/c.js")').length, 2, body.slice(-400));
   const events = new EventTarget();
   const href = markWorker('http://h/c.js', 'x', t);
+  const listeners = { added: [], removed: [] };
   const w = workerAt(href, '', {
-    addEventListener: events.addEventListener.bind(events),
-    removeEventListener: events.removeEventListener.bind(events),
+    addEventListener: (type, f) => { listeners.added.push([type, f]); events.addEventListener(type, f); },
+    removeEventListener: (type, f) => { listeners.removed.push([type, f]); events.removeEventListener(type, f); },
     dispatchEvent: events.dispatchEvent.bind(events),
     MessageEvent, load,
   });
   const done = w.run(`(async () => { ${body.replace('await import(', 'await load(')} })()`);
-  return { w, events, done };
+  return { w, events, done, listeners };
 }
 
-test('workerAnswer: a module Shared Worker whose policy refuses data: runs its seeding in its answer, then imports the app\'s script; each connect event before that script has run is held and given after, in order, with its ports; one after goes to the app\'s handler as it comes', async () => {
+test('workerAnswer: a module Shared Worker whose policy refuses data: runs its seeding in its answer, then imports the app\'s script; each connect event before that script has run is held and given after, in order, with its ports; then it holds none, and one after goes to the app\'s handler as it comes', async () => {
   const t = '89'.repeat(16);
   let loaded;
   const got = [];
-  const { w, events, done } = heldWorker(t, () => new Promise((resolve) => { loaded = resolve; }));
+  const { w, events, done, listeners } = heldWorker(t, () => new Promise((resolve) => { loaded = resolve; }));
   assert.deepEqual(w.draws(), workerAt(markWorker('http://h/c.js', 'x', t), workerScript(t, 0, 'x')).draws());
   assert.equal(w.run('location.href'), 'http://h/c.js');
   const a = new MessageChannel();
@@ -1554,6 +1555,9 @@ test('workerAnswer: a module Shared Worker whose policy refuses data: runs its s
   assert.deepEqual(got, []);
   loaded();
   await done;
+  // It holds no more once the app's script has run.
+  assert.equal(listeners.added.length, 1);
+  assert.deepEqual(listeners.removed, listeners.added);
   assert.equal(got.length, 2);
   assert.ok(got[0] === a.port1 && got[1] === b.port1);
   const c = new MessageChannel();

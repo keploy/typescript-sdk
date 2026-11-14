@@ -1439,6 +1439,6 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
     } catch {
       // The worker loads the app's script itself, and fails as it would.
     }
-    await fulfill({ status, headers, body: workerAnswer(m.token, n, m.kind, m.url, m.kind !== 'x' || cspAllowsData(headers)) });
+    await fulfill({ status, headers, body: workerAnswer(m.token, n, m.kind, m.url, cspAllowsData(headers)) });
   });
 }
