@@ -30,7 +30,9 @@
 //     text;
 //   - given(name, value) tells keploy a value the test made itself (a
 //     session token it signs, a name it stamps with the time), which keploy
-//     follows where the test's calls carry it.
+//     follows where the test's calls carry it; given in a test.beforeAll, it
+//     is the worker's, and keploy gives it to each test the worker begins
+//     after it.
 // Any answer of the agent this package cannot trust fails the test.
 
 import { test as base, expect } from '@playwright/test';
@@ -56,7 +58,8 @@ function joining(): Joining {
 let client: AgentClient | null = null;
 // The project directory test files are named relative to.
 let projectDir = '';
-// The test this worker has open, if any.
+// The test this worker has open, if any: a value given while none is, is
+// the worker's.
 let open: TestRef | null = null;
 
 type WorkerFixtures = { keployWorker: void };
@@ -119,11 +122,20 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
 });
 
 /**
- * given tells keploy a value the open test made itself, as an incoming
- * request's value is for a server test: keploy follows it where the test's
- * calls carry it, so a replay that makes a new value is compared by that
- * name, never by guessing. Give a distinctive value (a name with a nonce, a
- * signed token), whole as the calls carry it. Returns value.
+ * given tells keploy a value the test made itself, as an incoming request's
+ * value is for a server test: keploy follows it where the test's calls carry
+ * it, so a replay that makes a new value is compared by that name, never by
+ * guessing. Give a distinctive value (a name with a nonce, a signed token),
+ * whole as the calls carry it. Returns value.
+ *
+ * Given in a test or its beforeEach and afterEach hooks, the value is that
+ * test's. Given while none of the worker's tests is open (a test.beforeAll
+ * of this package's test, which runs once the worker claimed keploy's run),
+ * it is the worker's: keploy gives it to each test the worker begins after
+ * it, so a name a test file's setup mints once is followed in each of its
+ * tests. A process no worker of this package's test runs in (a test file's
+ * top level, globalSetup) has no test or worker to give it to, and given
+ * fails there, naming where to give it instead.
  * Without keploy it returns value and does nothing else.
  */
 export async function given(name: string, value: string): Promise<string> {
@@ -131,11 +143,24 @@ export async function given(name: string, value: string): Promise<string> {
   if (j.mode === 'inert') return value;
   if (j.mode === 'refused') throw new KeployError(j.refusal);
   const c = client;
-  if (c === null || open === null) {
-    throw new KeployError(`keploy: the value ${name} was given while no test was open: call given inside a test of @keploy/playwright's test, ` +
-      'or in its beforeEach or afterEach hooks');
+  if (c === null) {
+    throw new KeployError(`keploy: the value ${name} was given where no worker of @keploy/playwright's test has claimed keploy's run, ` +
+      'so keploy has no test and no worker to give it to: give it in a test of @keploy/playwright\'s test, in its beforeEach or afterEach hooks, ' +
+      'or in its test.beforeAll (never at a test file\'s top level, in globalSetup, or in a hook of @playwright/test\'s own test)');
   }
-  await c.given(name, value, sourceOf(new Error().stack ?? ''));
+  const outside = open === null;
+  try {
+    await c.given(name, value, sourceOf(new Error().stack ?? ''));
+  } catch (err) {
+    if (outside && err instanceof KeployError && err.code === 'not_open') {
+      // This worker claimed the run, so the refusal most likely comes from
+      // an agent that holds no value given outside a test.
+      throw new KeployError(`${err.message}; ${name} was given outside every test (a test.beforeAll) by a worker that claimed the run, ` +
+        'which a keploy agent that holds no value given outside a test refuses: use a keploy whose agent gives such a value ' +
+        'to each later test of its worker, or give it in each test or its beforeEach hook', err.status, err.code);
+    }
+    throw err;
+  }
   return value;
 }
 

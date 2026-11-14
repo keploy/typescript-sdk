@@ -220,14 +220,63 @@ test('a malformed KEPLOY_MOCK_AGENT fails every test, naming it', async () => {
   }
 });
 
-test('a value given outside a test fails, and is not sent', async () => {
+test('a value given in a test.beforeAll is sent once, after the claim and outside every test, and the tests after it run', async () => {
   const j = journal();
   const a = await fakeAgent(j);
   try {
     const { tests } = await playwright(['given-outside.spec.ts'], keployEnv(a.url));
-    assert.equal(tests['after a given outside'].status, 'failed');
-    assert.match(tests['after a given outside'].error, /the value early was given while no test was open/);
-    assert.ok(!calls(j).some((c) => c.path === '/agent/scope/given'));
+    assert.deepEqual(Object.fromEntries(Object.entries(tests).map(([k, t]) => [k, t.status])),
+      { 'w › first': 'passed', 'w › second': 'passed', 'later › third': 'passed', 'last › fourth': 'passed' });
+    const r = (n) => ref('given-outside.spec.ts', n);
+    const g = (name, line) => ['/agent/scope/given', { name, value: `${name}-value-1`, source: `test/fixtures/given-outside.spec.ts:${line}` }];
+    const ran = (n) => [['/agent/scope/begin', { ...r(n), canSkip: true }], ['/agent/scope/end', { ...r(n), outcome: 'passed' }]];
+    assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
+      ['/agent/instance', { key: 'p1', dir: fs.realpathSync(PKG) }],
+      g('early', 7), ...ran('w › first'), ...ran('w › second'),
+      g('late', 16), ...ran('later › third'),
+      g('over', 23), ...ran('last › fourth'),
+    ]);
+  } finally { await a.close(); }
+});
+
+test('a value given outside a test that keploy refuses fails the tests after it with keploy\'s reason, naming an agent that holds none when it says not_open', async () => {
+  const j = journal();
+  const notOpen = (name) => ({ status: 422, body: { error: 'not_open', message: `a value was given as ${name} while no test was open: keploy holds a given value for the test that gave it`, remedy: 'give it inside a test' } });
+  const a = await fakeAgent(j, (c) => {
+    if (c.path !== '/agent/scope/given') return undefined;
+    if (c.body.name === 'over') return { status: 400, body: { error: 'bad_request', message: 'test worker run gave more than 64 values outside its tests', remedy: 'give only the values the test hands the application' } };
+    if (c.body.name === 'late' || c.body.name === 'seed') return notOpen(c.body.name);
+    return undefined;
+  });
+  const holdsNone = /late was given outside every test \(a test\.beforeAll\) by a worker that claimed the run, which a keploy agent that holds no value given outside a test refuses: use a keploy whose agent gives such a value to each later test of its worker, or give it in each test or its beforeEach hook/;
+  try {
+    let { tests } = await playwright(['given-outside.spec.ts'], keployEnv(a.url));
+    assert.equal(tests['w › first'].status, 'passed');
+    assert.equal(tests['w › second'].status, 'passed');
+    // Given after the worker's earlier tests ended: still outside every test.
+    assert.equal(tests['later › third'].status, 'failed');
+    assert.match(tests['later › third'].error, /keploy: a value was given as late while no test was open: keploy holds a given value for the test that gave it \(give it inside a test\)/);
+    assert.match(tests['later › third'].error, holdsNone);
+    // Any other refusal is keploy's own text, as it is.
+    assert.equal(tests['last › fourth'].status, 'failed');
+    assert.match(tests['last › fourth'].error, /keploy: test worker run gave more than 64 values outside its tests \(give only the values the test hands the application\)/);
+    assert.doesNotMatch(tests['last › fourth'].error, /a keploy agent that holds no value/);
+    // A value an open test gives that keploy refuses as not_open is keploy's own text, as it is.
+    ({ tests } = await playwright(['basic.spec.ts'], keployEnv(a.url)));
+    assert.equal(tests['g › a'].status, 'failed');
+    assert.match(tests['g › a'].error, /keploy: a value was given as seed while no test was open/);
+    assert.doesNotMatch(tests['g › a'].error, /a keploy agent that holds no value/);
+  } finally { await a.close(); }
+});
+
+test('a value given where no worker of this package\'s test claimed the run fails, naming where to give it, and is not sent', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  try {
+    const { tests } = await playwright(['given-unclaimed.spec.ts'], keployEnv(a.url));
+    assert.equal(tests['after a given with no worker'].status, 'failed');
+    assert.match(tests['after a given with no worker'].error, /keploy: the value early was given where no worker of @keploy\/playwright's test has claimed keploy's run, so keploy has no test and no worker to give it to: give it in a test of @keploy\/playwright's test, in its beforeEach or afterEach hooks, or in its test\.beforeAll \(never at a test file's top level, in globalSetup, or in a hook of @playwright\/test's own test\)/);
+    assert.deepEqual(calls(j), []);
   } finally { await a.close(); }
 });
 
