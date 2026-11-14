@@ -14,6 +14,11 @@ import { test } from '../../dist';
 const base = process.env.DRAWS_BASE ?? '';
 const keep = (name: string, v: unknown): void => fs.writeFileSync(`${process.env.MARKER_DIR}/${name}.json`, JSON.stringify(v));
 
+// The page starts its Shared Workers as it loads, before the browser can
+// answer which Service Workers its origin has: with Playwright blocking
+// them, keploy knows at once that none can answer, and seeds them.
+test.use({ serviceWorkers: 'block' });
+
 const workers = async (page: Page): Promise<void> => {
   await page.goto(`${base}/wk`);
   await page.waitForFunction(() => (window as unknown as { __w: unknown[] }).__w.length >= 17, null, { timeout: 20000 });

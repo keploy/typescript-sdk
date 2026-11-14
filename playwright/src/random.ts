@@ -101,9 +101,11 @@ export function pageAddress(at: unknown): string {
  * Web Worker a seeded Web Worker started where the route does not reach its
  * script (NESTED_JS), 'service' for a
  * Service Worker a document registered, 'controlled' for a worker whose
- * script a Service Worker may answer (initScript).
+ * script a Service Worker may answer, 'early' for a Shared Worker started
+ * before keploy knew whether a Service Worker may answer its script
+ * (initScript).
  */
-export type Unplaced = 'own' | 'frame' | 'popup' | 'uncounted' | 'nostorage' | 'worker' | 'shared' | 'routed' | 'service' | 'controlled' | 'nested';
+export type Unplaced = 'own' | 'frame' | 'popup' | 'uncounted' | 'nostorage' | 'worker' | 'shared' | 'routed' | 'service' | 'controlled' | 'early' | 'nested';
 
 // The next step for a Service Worker the tests do not need.
 const BLOCK = 'if the tests do not need it, set serviceWorkers: \'block\' in the project\'s use (Playwright then registers none, and keploy seeds the workers it would have answered)';
@@ -113,7 +115,7 @@ const BLOCK = 'if the tests do not need it, set serviceWorkers: \'block\' in the
 const KIDS = 'and so does each worker it starts, so their draws may differ at replay';
 
 // A worker keploy cannot reach: its line's reason (unplacedLine).
-const UNREACHED: Record<'worker' | 'shared' | 'routed' | 'service' | 'nested', string> = {
+const UNREACHED: Record<'worker' | 'shared' | 'routed' | 'service' | 'early' | 'nested', string> = {
   worker: 'it is a worker started from a script keploy cannot mark (a blob: or data: URL, or a URL the browser refused with keploy\'s mark, as a Trusted Types policy may), ' +
     'so keploy cannot put its seeding ahead of the script; start it from the script\'s http(s) URL to seed it.',
   shared: 'it is a Shared Worker, and Firefox does not let keploy reach a Shared Worker\'s script to put its seeding ahead of it; ' +
@@ -123,11 +125,14 @@ const UNREACHED: Record<'worker' | 'shared' | 'routed' | 'service' | 'nested', s
     'for the worker\'s script to seed it.',
   service: 'keploy cannot put its seeding ahead of a Service Worker\'s script, and a worker whose script the Service Worker may answer starts unseeded (each one is named); ' +
     `${BLOCK}.`,
+  early: 'it is a Shared Worker started before the browser told keploy which Service Workers the page\'s origin has (keploy asks as each document begins, ' +
+    'and a document that cannot read its Service Workers, as a sandboxed one, is never told), and a Service Worker whose scope holds the worker\'s URL ' +
+    `would see keploy's __keploy_worker mark in the script's URL, so keploy starts the worker as the app asked; ${BLOCK}.`,
   nested: 'it is a worker that a worker started, and Chromium and Firefox do not let keploy reach its script to put its seeding ahead of it; ' +
     'record and replay the test in WebKit to seed it.',
 };
 
-const UNPLACED: Record<Exclude<Unplaced, 'uncounted' | 'worker' | 'shared' | 'routed' | 'service' | 'controlled' | 'nested'>, string> = {
+const UNPLACED: Record<Exclude<Unplaced, 'uncounted' | 'worker' | 'shared' | 'routed' | 'service' | 'controlled' | 'early' | 'nested'>, string> = {
   own: 'it is in a page the test opened, and it drew before keploy named that page: a script the test added with context.addInitScript ' +
     'runs in each of the page\'s documents before keploy\'s, and so does a draw the test makes there before newPage returns.',
   frame: 'it is a frame keploy cannot place among its parent\'s frames (one in a closed shadow root or in an object or embed element, ' +
@@ -155,8 +160,8 @@ export function unplacedLine(name: string, at: string, why: Unplaced = 'popup', 
       `a Service Worker${by === '' ? '' : ` (at ${by})`} may answer the worker's script, and it would see keploy's __keploy_worker mark in the script's URL, so keploy starts the worker as the app asked; ` +
       `${BLOCK}.`;
   }
-  if (why === 'worker' || why === 'shared' || why === 'routed' || why === 'service' || why === 'nested') {
-    const what = why === 'shared' ? 'Shared Worker' : why === 'service' ? 'Service Worker' : 'worker';
+  if (why === 'worker' || why === 'shared' || why === 'routed' || why === 'service' || why === 'early' || why === 'nested') {
+    const what = why === 'shared' || why === 'early' ? 'Shared Worker' : why === 'service' ? 'Service Worker' : 'worker';
     return `keploy: in ${name}, the ${what} at ${at} draws the browser's own random numbers, ${why === 'service' ? 'so its draws may differ at replay' : KIDS}: ${UNREACHED[why]}`;
   }
   const n = Math.floor(Number(others));
@@ -620,6 +625,11 @@ export const DOC_KEY = '__keploy_random_doc';
 // name in the seeding (initScript, workerMark); the fixture's route takes it
 // off before the request leaves the browser.
 export const WORKER_PARAM = '__keploy_worker';
+
+// The BroadcastChannel, by the context's mark, on which the documents of a
+// context say the scopes of the Service Worker registrations they make and
+// find (initScript).
+export const SW_CHANNEL = '__keploy_service_workers_';
 
 // A browser script's streams: hash, a string's 128 bits (cyrb128), and
 // stream, sfc32 over them, 32 random bits a call. A replay draws what its
@@ -1217,28 +1227,89 @@ ${DRAW_JS}
   // Playwright blocks (serviceWorkers: 'block' answers register with no
   // registration) says nothing. A worker's script request reaches a Service
   // Worker, which would see keploy's mark: a Web Worker's through its
-  // document's controller, a Shared Worker's through the Service Worker
-  // whose scope holds its URL, which keploy takes to be the controller, one
-  // this document registered or one registered for its origin as it began.
-  // Such a worker starts as the app asked and says so (servedBy). A Service
+  // document's controller, a Shared Worker's through the Service Worker of
+  // the registration whose scope its URL begins with. So a Shared Worker is
+  // marked only when keploy knows that no registration's scope holds its
+  // URL; one started before keploy knows, or one a known registration's
+  // scope holds, starts as the app asked and says so (servedBy), as does a
+  // worker of a controlled document. keploy knows the registrations of the
+  // document's origin once the browser answers the getRegistrations it asks
+  // as the document begins, and keeps them current: each document of the
+  // context says on keploy's channel the scope of each register it calls
+  // (before the browser registers it) and of each registration that answer
+  // finds, and hears what the others say. A context Playwright blocks
+  // registers none, and keploy knows that as it begins (the context's first
+  // document finds none: the fixture's context is a new one). A document with
+  // no Service Workers (an insecure context) has none to know. A Service
   // Worker is named by its script's address ('' when keploy cannot read it):
-  // the controller; else the one this document registered last; else, of a
-  // registration found as it began, the one that answers (active), else the
-  // one next.
-  let registered = null;
+  // the controller; else that of the registration with the longest scope
+  // that holds the worker's URL: its active one, else its waiting one, else
+  // its installing one, or the script this document's register named.
   const swAddress = (w) => { try { return addressOf(new U(String(w.scriptURL))); } catch (e) { return ''; } };
+  // The registrations keploy knows of, by scope, and the scopes of those this
+  // document's getRegistrations found (the browser's own word).
+  const regs = new Map();
+  const found = new Set();
+  let known = false;
+  let channel = null;
+  let post = null;
+  const apply = Reflect.apply;
+  // With no channel, nothing is said.
+  const say = (m) => { try { apply(post, channel, [m]); } catch (e) {} };
+  let realRegister = null;
+  try { realRegister = g.ServiceWorkerContainer.prototype.register; } catch (e) { realRegister = null; }
+  try {
+    if (/Service Worker registration blocked by Playwright/.test(Function.prototype.toString.call(realRegister))) known = true;
+  } catch (e) {
+    // No register to read: as the browser's own.
+  }
+  if (shared) {
+    try {
+      const BC = g.BroadcastChannel;
+      post = BC.prototype.postMessage;
+      channel = new BC(${JSON.stringify(SW_CHANNEL)} + mark);
+      // A message of another shape (another script's on this channel) is
+      // let be: nothing it holds is read but a string scope and address.
+      channel.onmessage = (e) => {
+        const m = e.data;
+        const scope = m !== null && typeof m === 'object' ? m.scope : undefined;
+        if (typeof scope !== 'string') return;
+        if (m.gone === true) {
+          if (!found.has(scope)) regs.delete(scope);
+        } else if (typeof m.at === 'string' && !regs.has(scope)) regs.set(scope, m.at);
+      };
+    } catch (e) {
+      // No channel here: this document knows only its own.
+    }
+  }
   try {
     const proto = g.ServiceWorkerContainer.prototype;
-    const realRegister = proto.register;
     if (typeof realRegister === 'function') {
-      define(proto, 'register', { register(url) {
-        const p = realRegister.apply(this, arguments);
+      define(proto, 'register', { register(url, options) {
         let at = '';
-        try { const d = docNow(); at = addressOf(new U(String(url), d ? d.baseURI : location.href)); } catch (e) { at = ''; }
+        let scope = '';
+        try {
+          const d = docNow();
+          const base = d ? d.baseURI : location.href;
+          const su = new U(String(url), base);
+          at = addressOf(su);
+          const sc = options !== null && typeof options === 'object' && options.scope !== undefined ? new U(String(options.scope), base) : new U('./', su);
+          sc.hash = '';
+          scope = sc.href;
+        } catch (e) { scope = ''; }
+        // Known before the browser registers it: here, and in each other
+        // document of the context once it hears it.
+        const had = regs.has(scope);
+        if (!had) { regs.set(scope, at); say({ scope, at }); }
+        const p = realRegister.apply(this, arguments);
         try {
           p.then((r) => {
-            if (!r) return;
-            registered = at;
+            if (!r) {
+              // Playwright's block registered none: what this register held
+              // goes, unless the browser found that registration.
+              if (!found.has(scope)) { regs.delete(scope); say({ scope, gone: true }); }
+              return;
+            }
             if (tell !== null) { const t = tell(at, 'service', 0); if (t && typeof t.catch === 'function') t.catch(() => {}); }
           }, () => {});
         } catch (e) {
@@ -1252,17 +1323,39 @@ ${DRAW_JS}
     // takes no property: its registrations say nothing.
   }
   try {
-    g.navigator.serviceWorker.getRegistrations().then((rs) => {
-      if (registered === null && rs.length > 0) registered = swAddress(rs[0].active || rs[0].waiting || rs[0].installing);
-    }, () => {});
+    const c = g.navigator.serviceWorker;
+    if (c === undefined) known = true;
+    else {
+      c.getRegistrations().then((rs) => {
+        for (const r of rs) {
+          const s = String(r.scope);
+          found.add(s);
+          if (!regs.has(s)) {
+            const a = swAddress(r.active || r.waiting || r.installing);
+            regs.set(s, a);
+            say({ scope: s, at: a });
+          }
+        }
+        known = true;
+      }, () => {});
+    }
   } catch (e) {
-    // No Service Worker here (an opaque origin): none can answer.
+    // No Service Worker can be read here (an opaque origin): keploy does not
+    // know.
   }
-  const servedBy = (name) => {
+  // The address of the Service Worker that may answer the script of a worker
+  // at href ('' when keploy cannot read it); null when none may; false for
+  // a Shared Worker started before keploy knows.
+  const servedBy = (name, href) => {
     let c = null;
     try { c = g.navigator.serviceWorker.controller; } catch (e) { c = null; }
     if (c) return swAddress(c);
-    return name === 'SharedWorker' ? registered : null;
+    if (name !== 'SharedWorker') return null;
+    let best = '';
+    let by = null;
+    for (const [s, a] of regs) if (href.startsWith(s) && s.length > best.length) { best = s; by = a; }
+    if (by !== null) return by;
+    return known ? null : false;
   };
   const wrap = (name, tokenOf) => {
     const Real = g[name];
@@ -1286,8 +1379,8 @@ ${DRAW_JS}
       // Its token is taken whoever answers it: the next worker's place does
       // not hang on when a Service Worker came.
       let why = u.protocol !== 'http:' && u.protocol !== 'https:' ? 'worker' : tokenOf(u, o);
-      const by = why !== null && why.length === 32 ? servedBy(name) : null;
-      if (by !== null) why = 'controlled';
+      const by = why !== null && why.length === 32 ? servedBy(name, u.href) : null;
+      if (by !== null) why = by === false ? 'early' : 'controlled';
       if (why !== null && why.length === 32) {
         const h = u.href;
         const i = h.indexOf('#');
@@ -1299,7 +1392,7 @@ ${DRAW_JS}
       }
       const w = construct(Real, args, new.target);
       if (why !== '' && tell !== null) {
-        try { const r = tell(at, why === 'shared' || why === 'controlled' ? why : 'worker', why === 'controlled' ? by : 0); if (r && typeof r.catch === 'function') r.catch(() => {}); } catch (e) {}
+        try { const r = tell(at, why === 'shared' || why === 'controlled' || why === 'early' ? why : 'worker', why === 'controlled' ? by : 0); if (r && typeof r.catch === 'function') r.catch(() => {}); } catch (e) {}
       }
       return w;
     } }[name];

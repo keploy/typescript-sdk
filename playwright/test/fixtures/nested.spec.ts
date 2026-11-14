@@ -10,6 +10,11 @@ import { test } from '../../dist';
 // keeps them, under its title.
 const base = process.env.DRAWS_BASE ?? '';
 
+// The page starts its Shared Workers as it loads, before the browser can
+// answer which Service Workers its origin has: with Playwright blocking
+// them, keploy knows at once that none can answer, and seeds them.
+test.use({ serviceWorkers: 'block' });
+
 test('nested', async ({ page }) => {
   await page.goto(`${base}/nw`);
   await page.waitForFunction(() => {

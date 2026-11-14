@@ -3,7 +3,7 @@
 // a page. No browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DOC_KEY, ENV_SEED_RANDOM, FAKER, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, esmFile, exportOf, fakerLine, fakersIn, fakersOf, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatFaker, seatRandom, seedFaker, seedingFromEnv, setAside, unplacedLine, unseededLine, WORKER_PARAM, markWorker, workerMark, workerScript, workerRoutes, workerAnswer, cspAllowsData } from '../dist/random.js';
+import { DOC_KEY, ENV_SEED_RANDOM, FAKER, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, esmFile, exportOf, fakerLine, fakersIn, fakersOf, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatFaker, seatRandom, seedFaker, seedingFromEnv, setAside, unplacedLine, unseededLine, WORKER_PARAM, SW_CHANNEL, markWorker, workerMark, workerScript, workerRoutes, workerAnswer, cspAllowsData } from '../dist/random.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -1463,6 +1463,11 @@ test('the lines for a worker keploy cannot reach say what it is, that each worke
     'record and replay the test in Chromium or WebKit to seed it.');
   assert.equal(unplacedLine('t', 'http://h/b.js', 'nested'), 'keploy: in t, the worker at http://h/b.js draws the browser\'s own random numbers, ' + KIDS +
     'it is a worker that a worker started, and Chromium and Firefox do not let keploy reach its script to put its seeding ahead of it; record and replay the test in WebKit to seed it.');
+  assert.equal(unplacedLine('t', 'http://h/s.js', 'early'), 'keploy: in t, the Shared Worker at http://h/s.js draws the browser\'s own random numbers, ' + KIDS +
+    'it is a Shared Worker started before the browser told keploy which Service Workers the page\'s origin has (keploy asks as each document begins, ' +
+    'and a document that cannot read its Service Workers, as a sandboxed one, is never told), and a Service Worker whose scope holds the worker\'s URL ' +
+    'would see keploy\'s __keploy_worker mark in the script\'s URL, so keploy starts the worker as the app asked; if the tests do not need it, ' +
+    'set serviceWorkers: \'block\' in the project\'s use (Playwright then registers none, and keploy seeds the workers it would have answered).');
   assert.match(unplacedLine('t', 'http://h/w.js', 'routed'),/^keploy: in t, the worker at http:\/\/h\/w\.js draws the browser's own random numbers, and so does each worker it starts, so their draws may differ at replay: a route of the test's own /);
 });
 
@@ -1509,7 +1514,7 @@ test('a Service Worker a document registers is named once the browser registers 
   assert.deepEqual(await d.run('navigator.serviceWorker.register("/sw.js")'), { active: { scriptURL: 'http://h/sw.js' } });
 });
 
-test('a worker whose script a Service Worker may answer starts as the app asked, unmarked, and is named with that Service Worker: a Web Worker of a controlled document, a Shared Worker of a document that is controlled, registered one or found one registered as it began; the next worker at its path keeps its place', async () => {
+test('a worker whose script a Service Worker may answer starts as the app asked, unmarked, and is named with that Service Worker: a Web Worker of a controlled document, a Shared Worker of a document that is controlled, or whose URL the scope of a registration it made or found as it began holds; the next worker at its path keeps its place', async () => {
   const run = async (sw, script, before = '') => {
     const told = [];
     const w = workerGlobals();
@@ -1531,13 +1536,13 @@ test('a worker whose script a Service Worker may answer starts as the app asked,
   assert.deepEqual(r.made[1], ['/s.js', null]);
   assert.deepEqual(r.told, [['http://h/sw.js', 'service'], ['http://h/s.js', 'controlled', 'http://h/sw.js']]);
   // A registration of its origin found as the document began.
-  const f = await run(swGlobals({ regs: [{ active: null, waiting: null, installing: { scriptURL: 'http://h/old.js?x' } }] }), 'new Worker("/w.js"); new SharedWorker("/s.js");');
+  const f = await run(swGlobals({ regs: [{ scope: 'http://h/', active: null, waiting: null, installing: { scriptURL: 'http://h/old.js?x' } }] }), 'new Worker("/w.js"); new SharedWorker("/s.js");');
   assert.equal(f.made[0][1].kind, 'w');
   assert.deepEqual([f.made[1], f.told], [['/s.js', null], [['http://h/s.js', 'controlled', 'http://h/old.js']]]);
   // A registration found is named by its active Service Worker, else its
   // waiting one, else its installing one.
   const sws = { a: { scriptURL: 'http://h/a.js' }, b: { scriptURL: 'http://h/b.js' }, c: { scriptURL: 'http://h/c.js' } };
-  for (const [reg, named] of [[{ active: sws.a, waiting: sws.b, installing: sws.c }, 'http://h/a.js'], [{ active: null, waiting: sws.b, installing: sws.c }, 'http://h/b.js']]) {
+  for (const [reg, named] of [[{ scope: 'http://h/', active: sws.a, waiting: sws.b, installing: sws.c }, 'http://h/a.js'], [{ scope: 'http://h/', active: null, waiting: sws.b, installing: sws.c }, 'http://h/b.js'], [{ scope: 'http://h/', active: null, waiting: null, installing: sws.c }, 'http://h/c.js']]) {
     assert.deepEqual((await run(swGlobals({ regs: [reg] }), 'new SharedWorker("/s.js");')).told, [['http://h/s.js', 'controlled', named]]);
   }
   // The one this document registered is named, even when one found as
@@ -1545,7 +1550,7 @@ test('a worker whose script a Service Worker may answer starts as the app asked,
   {
     const told = [];
     const w = workerGlobals();
-    const d = documentAt(initScript(S1, 'tell'), '/p', new Map(), 't0', { report: 'tell', told, globals: { ...w.globals, ...swGlobals({ regs: [{ active: sws.a }], late: true }).globals } });
+    const d = documentAt(initScript(S1, 'tell'), '/p', new Map(), 't0', { report: 'tell', told, globals: { ...w.globals, ...swGlobals({ regs: [{ scope: 'http://h/', active: sws.a }], late: true }).globals } });
     await d.run('navigator.serviceWorker.register("/sw.js")');
     await new Promise((r) => setTimeout(r, 60));
     d.run('new SharedWorker("/s.js");');
@@ -1576,6 +1581,149 @@ test('a worker whose script a Service Worker may answer starts as the app asked,
   d.run('new Worker("/w.js");');
   const plain = await run(swGlobals(), 'new Worker("/w.js"); new Worker("/w.js");');
   assert.deepEqual([workerMark(w.made[0][0]), workerMark(w.made[1][0])], [null, plain.made[1][1]]);
+});
+
+// The BroadcastChannels of one browser context: a message reaches each other
+// channel of its name, a turn later, as a structured clone.
+const channels = () => {
+  const all = [];
+  // What a handler threw: a page's error event would see it.
+  const thrown = [];
+  class BroadcastChannel {
+    constructor(name) { this.name = String(name); this.onmessage = null; all.push(this); }
+    postMessage(m) {
+      const d = m === undefined ? undefined : JSON.parse(JSON.stringify(m));
+      for (const c of all) {
+        if (c !== this && c.name === this.name) setImmediate(() => { try { if (c.onmessage) c.onmessage({ data: d }); } catch (e) { thrown.push(e); } });
+      }
+    }
+  }
+  return { BroadcastChannel, all, thrown };
+};
+
+test('a Shared Worker is marked only once keploy knows no registration\'s scope holds its URL: one started before the browser answers, or where it never does, starts as the app asked and is named; the longest scope that holds it names its Service Worker; one with no Service Workers, or in a context Playwright blocks, is marked at once', async () => {
+  const start = (sw, extra = {}) => {
+    const told = [];
+    const w = workerGlobals();
+    const d = documentAt(initScript(S1, 'tell'), '/p', new Map(), 't0', { report: 'tell', told, globals: { ...w.globals, ...sw.globals, ...extra } });
+    return { d, told, made: () => w.made.map(([u]) => [u, workerMark(u)]) };
+  };
+  // Before the answer: unmarked, named; once it has come with none, the next
+  // is marked, and a Web Worker is marked either way.
+  const e = start(swGlobals({ late: true }));
+  e.d.run('new SharedWorker("/s.js"); new Worker("/w.js");');
+  await new Promise((r) => setTimeout(r, 60));
+  e.d.run('new SharedWorker("/s.js");');
+  assert.deepEqual(e.made().map(([u, m]) => [m ? m.url : u, m && m.kind]), [['/s.js', null], ['http://h/w.js', 'w'], ['http://h/s.js', 's']]);
+  assert.deepEqual(e.told, [['http://h/s.js', 'early']]);
+  // A browser that never answers (getRegistrations refused), or a document
+  // that cannot read its Service Workers: never known.
+  const refused = swGlobals();
+  refused.globals.ServiceWorkerContainer.prototype.getRegistrations = () => Promise.reject(new Error('SecurityError'));
+  const r = start(refused);
+  await turn();
+  r.d.run('new SharedWorker("/s.js");');
+  assert.deepEqual([r.made(), r.told], [[['/s.js', null]], [['http://h/s.js', 'early']]]);
+  const o = start({ globals: { navigator: Object.defineProperty({}, 'serviceWorker', { get() { throw new Error('SecurityError: sandboxed'); } }) } });
+  await turn();
+  o.d.run('new SharedWorker("/s.js");');
+  assert.deepEqual([o.made(), o.told], [[['/s.js', null]], [['http://h/s.js', 'early']]]);
+  // No Service Workers here (an insecure context): marked at once.
+  const n = start({ globals: { navigator: {} } });
+  n.d.run('new SharedWorker("/s.js");');
+  assert.deepEqual([n.made()[0][1].kind, n.told], ['s', []]);
+  // Scopes: one that does not hold the URL leaves it marked; of two that
+  // do, the longest names the Service Worker.
+  const regs = [{ scope: 'http://h/a/b/', active: { scriptURL: 'http://h/ab.js' } }, { scope: 'http://h/a/', active: { scriptURL: 'http://h/a/sw.js' } }];
+  const s = start(swGlobals({ regs }));
+  await turn();
+  s.d.run('new SharedWorker("/s.js"); new SharedWorker("/a/s.js"); new SharedWorker("/a/b/s.js"); new SharedWorker("/a/bs.js");');
+  assert.deepEqual(s.made().map(([u, m]) => [m ? m.url : u, m && m.kind]), [['http://h/s.js', 's'], ['/a/s.js', null], ['/a/b/s.js', null], ['/a/bs.js', null]]);
+  assert.deepEqual(s.told, [['http://h/a/s.js', 'controlled', 'http://h/a/sw.js'], ['http://h/a/b/s.js', 'controlled', 'http://h/ab.js'], ['http://h/a/bs.js', 'controlled', 'http://h/a/sw.js']]);
+  // A register of this document's own, before the answer, at the scope it
+  // names (else its script's directory): known at once.
+  const own = start(swGlobals({ late: true }));
+  own.d.run('const c = navigator.serviceWorker; c.register("/x/sw.js"); c.register("/sw2.js", { scope: "/y/#f" }); c.register("/v/sw.js", { type: "module" }); c.register("/n/sw.js", null); ' +
+    'new SharedWorker("/x/s.js"); new SharedWorker("/y/s.js"); new SharedWorker("/v/s.js"); new SharedWorker("/n/s.js"); new SharedWorker("/z/s.js");');
+  assert.deepEqual(own.made().map(([, m]) => m), [null, null, null, null, null]);
+  assert.deepEqual(own.told.slice(0, 5), [['http://h/x/s.js', 'controlled', 'http://h/x/sw.js'], ['http://h/y/s.js', 'controlled', 'http://h/sw2.js'],
+    ['http://h/v/s.js', 'controlled', 'http://h/v/sw.js'], ['http://h/n/s.js', 'controlled', 'http://h/n/sw.js'], ['http://h/z/s.js', 'early']]);
+  // A register at a URL keploy cannot read holds no scope that can hold a worker's URL.
+  const bad = start(swGlobals());
+  await turn();
+  bad.d.run('navigator.serviceWorker.register("http://["); new SharedWorker("/s.js");');
+  assert.equal(bad.made()[0][1].kind, 's');
+  // Playwright's block (its own register, which registers none): known at
+  // once, so marked before the answer; its register says nothing, and its
+  // scope is not kept.
+  const blocked = swGlobals({ late: true });
+  blocked.globals.ServiceWorkerContainer.prototype.register = async () => { void 'Service Worker registration blocked by Playwright'; };
+  const b = start(blocked);
+  b.d.run('new SharedWorker("/s.js"); navigator.serviceWorker.register("/sw.js");');
+  await turn();
+  b.d.run('new SharedWorker("/t.js");');
+  assert.deepEqual([b.made().map(([, m]) => m.kind), b.told], [['s', 's'], []]);
+  // A register that answers none after the browser found a registration
+  // at its scope: that one is kept.
+  const slow = swGlobals({ late: true, regs: [{ scope: 'http://h/', active: { scriptURL: 'http://h/old.js' } }] });
+  slow.globals.ServiceWorkerContainer.prototype.register = () => new Promise((ok) => setTimeout(() => ok(undefined), 40));
+  const k = start(slow);
+  k.d.run('navigator.serviceWorker.register("/sw.js");');
+  await new Promise((r) => setTimeout(r, 80));
+  k.d.run('new SharedWorker("/s.js");');
+  assert.deepEqual([k.made(), k.told], [[['/s.js', null]], [['http://h/s.js', 'controlled', 'http://h/sw.js']]]);
+});
+
+test('the documents of a context say on keploy\'s channel each registration they make or find: another document\'s next Shared Worker that its scope holds starts as the app asked and is named with it; one Playwright\'s block answered with none is taken back, but not one a document found; a message keploy did not make changes nothing', async () => {
+  const bus = channels();
+  const doc = (sw) => {
+    const told = [];
+    const w = workerGlobals();
+    const d = documentAt(initScript(S1, 'tell', 'm1'), '/p', new Map(), 't0', { report: 'tell', told, globals: { ...w.globals, ...sw.globals, BroadcastChannel: bus.BroadcastChannel } });
+    return { d, told, made: () => w.made.map(([u]) => workerMark(u)) };
+  };
+  const a = doc(swGlobals());
+  const b = doc(swGlobals());
+  await turn();
+  a.d.run('navigator.serviceWorker.register("/app/sw.js");');
+  await turn();
+  b.d.run('new SharedWorker("/app/s.js"); new SharedWorker("/s.js");');
+  assert.deepEqual(b.made().map((m) => m && m.kind), [null, 's']);
+  assert.deepEqual(b.told, [['http://h/app/s.js', 'controlled', 'http://h/app/sw.js']]);
+  assert.deepEqual(bus.all.map((c) => c.name), [`${SW_CHANNEL}m1`, `${SW_CHANNEL}m1`]);
+  // A registration a document finds as it begins is said to the others.
+  const c = doc(swGlobals({ regs: [{ scope: 'http://h/f/', active: { scriptURL: 'http://h/f/sw.js' } }] }));
+  await turn(); await turn();
+  a.d.run('new SharedWorker("/f/s.js");');
+  assert.deepEqual(a.told, [['http://h/app/sw.js', 'service'], ['http://h/f/s.js', 'controlled', 'http://h/f/sw.js']]);
+  // Playwright's block: a register said, then taken back once it answers
+  // none; c keeps the scope it found.
+  const blocked = swGlobals();
+  blocked.globals.ServiceWorkerContainer.prototype.register = async () => undefined;
+  const p = doc(blocked);
+  await turn();
+  p.d.run('navigator.serviceWorker.register("/q/sw.js"); navigator.serviceWorker.register("/f/sw.js");');
+  await turn();
+  b.d.run('new SharedWorker("/q/s.js");');
+  assert.equal(b.made()[2], null);
+  await turn(); await turn();
+  b.d.run('new SharedWorker("/q/s.js");');
+  c.d.run('new SharedWorker("/f/s.js");');
+  assert.equal(b.made()[3].kind, 's');
+  assert.deepEqual([c.made(), c.told], [[null], [['http://h/f/s.js', 'controlled', 'http://h/f/sw.js']]]);
+  // Another script's messages on the channel, of any other shape, and one
+  // at a scope already known: nothing changes, and nothing throws.
+  const page = new bus.BroadcastChannel(`${SW_CHANNEL}m1`);
+  for (const m of [null, undefined, 1, 'x', { scope: ['http://h/'], at: 'http://h/x.js' }, { scope: 'http://h/', at: 2 }, { scope: 'http://h/app/', gone: 'yes' }, { scope: 'http://h/app/', at: 'http://h/other.js' }]) page.postMessage(m);
+  await turn();
+  b.d.run('new SharedWorker("/s.js"); new SharedWorker("/app/t.js");');
+  assert.deepEqual(b.made().slice(4).map((m) => m && m.kind), ['s', null]);
+  assert.deepEqual(b.told.at(-1), ['http://h/app/t.js', 'controlled', 'http://h/app/sw.js']);
+  assert.deepEqual(bus.thrown, []);
+  // Where Shared Workers are not marked (Firefox), no channel opens.
+  const before = bus.all.length;
+  documentAt(initScript(S1, 'tell', 'm1', false), '/p', new Map(), 't0', { report: 'tell', told: [], globals: { ...workerGlobals().globals, ...swGlobals().globals, BroadcastChannel: bus.BroadcastChannel } });
+  assert.equal(bus.all.length, before);
 });
 
 test('a worker\'s seeding draws the same numbers for a token and instance every run, others for another; its location shows no mark, its own query and fragment kept', () => {

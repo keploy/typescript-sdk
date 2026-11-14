@@ -182,7 +182,7 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
       let opened: (page: Page | null | undefined) => Promise<boolean> = async () => false;
       await context.exposeBinding(report, async (source, at: unknown, why: unknown, above: unknown) => {
         const a = pageAddress(at);
-        const w: Unplaced = why === 'frame' || why === 'uncounted' || why === 'nostorage' || why === 'worker' || why === 'shared' || why === 'service' || why === 'controlled'
+        const w: Unplaced = why === 'frame' || why === 'uncounted' || why === 'nostorage' || why === 'worker' || why === 'shared' || why === 'service' || why === 'controlled' || why === 'early'
           ? why : (await opened(source.page)) ? 'own' : 'popup';
         // Once for each address and reason: two documents at one address
         // (about:blank) may have no place for two reasons.

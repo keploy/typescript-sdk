@@ -32,7 +32,7 @@ export const BLANK_DRAWS = '({ random: [Math.random(), Math.random()], bytes: Ar
  * is the window's frameElement, read through a getter. doc is its document
  * (with URL beside it), for a document whose frames the row makes. opener
  * is the window's opener (none when undefined). globals: more of the
- * window's globals (its URL, Worker, SharedWorker).
+ * window's globals (its URL, Worker, SharedWorker, navigator).
  */
 export const OTHER = Symbol('a parent of another origin');
 export function documentAt(script, path = '/p', storage = new Map(), page = 't0', { report = '', told = [], origin = 'http://h', href = undefined, parent = undefined, doc = undefined, frames = undefined, element = undefined, opener = undefined, globals = {} } = {}) {
@@ -41,7 +41,9 @@ export function documentAt(script, path = '/p', storage = new Map(), page = 't0'
     getRandomValues(a) { if (!(this instanceof Crypto)) throw new TypeError('Illegal invocation'); return webcrypto.getRandomValues(a); }
     randomUUID() { if (!(this instanceof Crypto)) throw new TypeError('Illegal invocation'); return webcrypto.randomUUID(); }
   }
-  const ctx = { location: { origin, pathname: path, href: href ?? `${origin}${path}` }, Crypto, crypto: new Crypto() };
+  // Its navigator has no Service Workers, as an insecure context's, unless
+  // globals give one.
+  const ctx = { location: { origin, pathname: path, href: href ?? `${origin}${path}` }, Crypto, crypto: new Crypto(), navigator: {} };
   if (storage === null) {
     Object.defineProperty(ctx, 'sessionStorage', { get() { throw new Error('SecurityError: no session storage here'); } });
   } else {

@@ -678,6 +678,11 @@ async function drawsServer() {
         'self.addEventListener(\'fetch\', (e) => { seen.push(e.request.url); }); self.addEventListener(\'message\', (e) => e.source.postMessage({ kind: \'sw-seen\', seen }));',
       '/swk/w.js': `postMessage({ kind: 'sw-ded', href: location.href, draws: ${DRAWS} });`,
       '/swk/s.js': `onconnect = (e) => e.ports[0].postMessage({ kind: 'sw-shared', href: location.href, draws: ${DRAWS} });`,
+      // service-known.spec.ts's: /swr/sw.js (scope /swr/) keeps the URL of
+      // each request it is asked and answers a message with them; /swr/s.js
+      // is a Shared Worker its scope holds.
+      '/swr/sw.js': 'const seen = []; self.addEventListener(\'fetch\', (e) => { seen.push(e.request.url); }); self.addEventListener(\'message\', (e) => e.source.postMessage({ kind: \'sw-seen\', seen }));',
+      '/swr/s.js': `onconnect = (e) => e.ports[0].postMessage({ kind: 'swr-shared', href: location.href, draws: ${DRAWS} });`,
     }[u.pathname];
     if (sw !== undefined) { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end(sw); return; }
     res.writeHead(200, { 'content-type': 'text/html' });
@@ -705,7 +710,7 @@ async function drawsServer() {
     // /nest holds /frame of its own origin.
     if (u.pathname === '/nest') { res.end(page('<iframe src="/frame"></iframe>')); return; }
     // /long/... is a page at an address of any length.
-    if (u.pathname.startsWith('/long/')) { res.end(page('')); return; }
+    if (u.pathname.startsWith('/long/') || u.pathname === '/swr/p') { res.end(page('')); return; }
     // places.spec.ts's: /host puts in a (/fa, its own origin), c (/fc) and
     // w (/fw, both cross-site) in the order ?order= names; /race holds r0
     // and r1 at /fr, and /fr answers late the one ?slow= names; /nested
@@ -1641,6 +1646,62 @@ for (const engine of ENGINES) {
       if (engine !== 'firefox') assert.deepEqual(byKind(q, 'service worker blocked')['sw-shared'].draws, off['sw-shared'].draws);
       assert.notDeepEqual(byKind(q, 'service worker')['sw-ded'].draws, on['sw-ded'].draws);
       assert.deepEqual(q.seen.filter((u) => u.includes('__keploy_worker')), []);
+    } finally { await rep.close(); await rec.close(); }
+  });
+}
+
+// service-known.spec.ts's tests.
+const KNOWN_TITLES = ['shared worker early', 'shared worker announced', 'shared worker known'];
+
+for (const engine of ENGINES) {
+  test(`seeded, in ${engine}: a Shared Worker is marked only once keploy knows no Service Worker's scope holds its URL: one started before the browser answers starts as the app asked and is named; one whose URL the scope of a registration another page made holds starts as the app asked, so that Service Worker sees no mark, and is named with it; one started once the browser said there is none draws from the test's seed, the same at replay (in Firefox, whose route does not reach a Shared Worker's script, each is named for that)`, async () => {
+    const j = journal();
+    const rec = await fakeAgent(j);
+    let kept = {};
+    const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+      ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+    const env = (url) => ({ ...keployEnv(url), PW_BROWSER: engine });
+    const specs = ['service-known.spec.ts'];
+    try {
+      const r = await drawRun(j, env(rec.url), specs, KNOWN_TITLES);
+      const facts = JSON.stringify(r.drew);
+      const said = (title) => r.tests[title].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${title}, `)).map((l) => l.replace(/127\.0\.0\.1:\d+\//g, '127.0.0.1:<port>/')).sort();
+      const at = (p) => `http://127.0.0.1:<port>/${p}`;
+      const ff = engine === 'firefox';
+      const early = r.drew['shared worker early'].w[0];
+      const origin = new URL(early.href).origin;
+      // Early: as the app asked, named for that.
+      assert.equal(early.href, `${origin}/swk/s.js`, facts);
+      assert.deepEqual(said('shared worker early'), [
+        unplacedLine('shared worker early', at('swk/s.js'), ff ? 'shared' : 'early'),
+        sharedWorkerLine('shared worker early', at('swk/s.js')),
+      ].sort(), facts);
+      // Announced: named with the Service Worker the other page registered,
+      // which sees no mark.
+      const ann = r.drew['shared worker announced'];
+      assert.equal(ann.w[0].href, `${origin}/swr/s.js`, facts);
+      assert.deepEqual(said('shared worker announced'), [
+        unplacedLine('shared worker announced', at('swr/sw.js'), 'service'),
+        ff ? unplacedLine('shared worker announced', at('swr/s.js'), 'shared') : unplacedLine('shared worker announced', at('swr/s.js'), 'controlled', 0, at('swr/sw.js')),
+        sharedWorkerLine('shared worker announced', at('swr/s.js')),
+      ].sort(), facts);
+      assert.equal(ann.seen.kind, 'sw-seen', facts);
+      assert.deepEqual(ann.seen.seen.filter((u) => u.includes('__keploy_worker')), [], facts);
+      // Known: seeded (Chromium, WebKit), and only the settle line is said.
+      const known = r.drew['shared worker known'].w[0];
+      assert.equal(known.href, `${origin}/swk/s.js`, facts);
+      assert.deepEqual(said('shared worker known'), [
+        ...(ff ? [unplacedLine('shared worker known', at('swk/s.js'), 'shared')] : []),
+        sharedWorkerLine('shared worker known', at('swk/s.js')),
+      ].sort(), facts);
+      assert.deepEqual(r.seen.filter((u) => u.includes('__keploy_worker')), []);
+      kept = r.seeds;
+      const q = await drawRun(j, env(rep.url), specs, KNOWN_TITLES);
+      const again = q.drew['shared worker known'].w[0];
+      if (ff) assert.notDeepEqual(again.draws, known.draws, facts);
+      else assert.deepEqual(again.draws, known.draws, facts);
+      // The early one is not seeded: it draws other numbers at replay.
+      assert.notDeepEqual(q.drew['shared worker early'].w[0].draws, early.draws, facts);
     } finally { await rep.close(); await rec.close(); }
   });
 }
