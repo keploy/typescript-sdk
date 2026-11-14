@@ -44,8 +44,9 @@
 //     test's recording, so a replay's pages make the calls the recording's
 //     made; each page draws its own, named by its place in the test's
 //     order; the test process draws Math.random from that seed too, from
-//     the test's begin to its end, so data the test makes there (a name
-//     stamped with Math.random()) is the recording's; KEPLOY_SEED_RANDOM=off
+//     the test's begin to its end, and so do @faker-js/faker's prebuilt
+//     instances and those the suite gives seedFaker, so data the test makes
+//     there (a name stamped with Math.random()) is the recording's; KEPLOY_SEED_RANDOM=off
 //     or the option keploySeedRandom: false turns it off, and the worker
 //     says once what that costs.
 // Any answer of the agent this package cannot trust fails the test.
@@ -62,6 +63,7 @@ import { OFF_LINE, SEEDED_LINE, besideOf, fakerLine, fakersOf, freshSeed, initSc
 import { Inflight } from './settle';
 
 export { expect, KeployError };
+export { seedFaker } from './random';
 export type { TestRef, Outcome };
 
 let joined: Joining | null = null;

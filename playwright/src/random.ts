@@ -53,8 +53,9 @@ export const SEEDED_LINE = 'keploy: each test\'s random numbers are seeded from 
   '(its beforeEach and afterEach hooks too). ' +
   'Web Workers and Service Workers keep the browser\'s own, and so does a page the app opens that keploy cannot place (each one is named); ' +
   'the test process keeps its own crypto, and its own Math.random and faker outside every test (beforeAll, afterAll, a file as it loads) ' +
-  'and while a worker fixture registered with this package\'s test.extend or test.use is set up; a faker instance the suite makes itself ' +
-  '(new Faker(...)) as a file loads draws its own, and one it seeds itself (faker.seed(n)) draws as seeded. ' +
+  'and while a worker fixture registered with this package\'s test.extend or test.use is set up. ' +
+  'Own Faker instances, those the suite makes itself as a file loads (new Faker(...)), draw their own: seed them with seedFaker(instance, name) ' +
+  'from this package. An instance the test seeds itself (faker.seed(n)) draws as seeded. ' +
   `To turn it off, record and replay with ${ENV_SEED_RANDOM}=off, or set use: { ${OPTION_SEED_RANDOM}: false } in the Playwright config.`;
 
 /**
@@ -468,24 +469,43 @@ export function fakerLine(problem: string): string {
     'Fix what the message names (an ES module needs Node 20.19, 22.12 or later to be loaded here), or seed it in a beforeEach (faker.seed(n)).';
 }
 
+// The faker instances the suite gave seedFaker outside a test's own code (as
+// a file loads, in beforeAll, while a worker fixture is set up), each by the
+// name it was given: every seat seats them.
+const ownFakers = new Map<Randomizer, string>();
+
+// The seat in place now, if any: seedFaker seats an instance on it at once.
+let fakerSeatNow: { aside: Set<object>; add: (stream: string, r: Randomizer) => void } | null = null;
+
+// The stream of a test's seed that an instance given to seedFaker under name
+// draws from: never one of a prebuilt instance's, whatever the name.
+function ownStream(name: string): string {
+  return `${FAKER} own ${name}`;
+}
+
 /**
- * Puts the draws of each faker instance in found on a stream of the test's
- * seed, named by the instance's name, until the returned function puts its
- * own back: so a replay makes the names, emails and IDs its recording made,
- * and one instance's draws move neither another's nor Math.random's. Called
- * just after seatRandom: while setAside holds under that seat (a worker
- * fixture being set up), an instance draws its own. A test that seeds an
- * instance itself (faker.seed(n)) draws that instance's own from then on,
- * seeded as it asked. An instance's own generator does not move while
- * seated, so outside every test it goes on as if no test had drawn.
+ * Puts the draws of each faker instance in found, and of each one the suite
+ * gave seedFaker, on a stream of the test's seed named by the instance's
+ * name, until the returned function puts its own back: so a replay makes the
+ * names, emails and IDs its recording made, and one instance's draws move
+ * neither another's nor Math.random's. An instance is seated once, by the
+ * first name it has (found's before seedFaker's). Called just after
+ * seatRandom: while setAside holds under that seat (a worker fixture being
+ * set up), an instance draws its own. A test that seeds an instance itself
+ * (faker.seed(n)) draws that instance's own from then on, seeded as it
+ * asked. An instance's own generator does not move while seated, so outside
+ * every test it goes on as if no test had drawn.
  */
 export function seatFaker(seed: string, found: Fakers['found']): () => void {
   const aside = asideNow;
   const puts: Array<() => void> = [];
-  for (const [name, r] of found) {
+  const done = new Set<Randomizer>();
+  const add = (stream: string, r: Randomizer): void => {
+    if (done.has(r)) return;
+    done.add(r);
     const own = r.next;
     const ownSeed = r.seed;
-    const draw = processRandom(seed, `${FAKER} ${name}`);
+    const draw = processRandom(seed, stream);
     const seated: Randomizer = {
       next(this: unknown): number { return aside.size > 0 ? Reflect.apply(own, this, []) as number : draw(); },
       seed(this: unknown, ...args: unknown[]): unknown {
@@ -500,8 +520,48 @@ export function seatFaker(seed: string, found: Fakers['found']): () => void {
     r.next = seated.next;
     r.seed = seated.seed;
     puts.push(put);
+  };
+  for (const [name, r] of found) add(`${FAKER} ${name}`, r);
+  for (const [r, name] of ownFakers) add(ownStream(name), r);
+  const seat = { aside, add };
+  fakerSeatNow = seat;
+  return () => {
+    if (fakerSeatNow === seat) fakerSeatNow = null;
+    for (const p of puts) p();
+  };
+}
+
+/**
+ * Seeds a faker instance the suite makes itself (new Faker(...),
+ * new SimpleFaker(...)) from each test's seed, as the instances
+ * @faker-js/faker makes as it loads are seeded: from the test's begin to its
+ * end, on a stream of the seed named by name, so a replay makes the names,
+ * emails and IDs its recording made. Returns the instance:
+ *
+ *   const fakerMine = seedFaker(new Faker({ locale: [de, en] }), 'mine');
+ *
+ * Give each instance its own name: two given one name make the same data.
+ * One given as a file loads, in beforeAll or while a worker fixture is set
+ * up is seeded in every test after; one given in a test (its beforeEach, its
+ * body, a test fixture) from then to that test's end. A test that seeds the
+ * instance itself (fakerMine.seed(n)) draws it as it seeded it. Throws,
+ * naming the next step, when instance is no faker instance this package can
+ * seed or name is empty.
+ */
+export function seedFaker<T>(instance: T, name: string): T {
+  const r = randomizerOf(instance);
+  if (r === null) {
+    throw new TypeError(`keploy: seedFaker(instance, name) was given no faker instance it can seed: give it an instance of ${FAKER} 8, 9 or 10 ` +
+      '(new Faker(...) or new SimpleFaker(...))');
   }
-  return () => { for (const p of puts) p(); };
+  if (typeof name !== 'string' || name.trim() === '') {
+    throw new TypeError('keploy: seedFaker(instance, name) was given no name: give each instance its own name (such as \'mine\'), ' +
+      'which names the stream of each test\'s seed it draws from');
+  }
+  const seat = fakerSeatNow;
+  if (seat === null || seat.aside.size > 0) ownFakers.set(r, name);
+  seat?.add(ownStream(name), r);
+  return instance;
 }
 
 // A key of the page's session storage: how many documents of each path the

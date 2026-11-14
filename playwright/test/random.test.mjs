@@ -3,7 +3,7 @@
 // a page. No browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DOC_KEY, ENV_SEED_RANDOM, FAKER, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, esmFile, exportOf, fakerLine, fakersIn, fakersOf, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatFaker, seatRandom, seedingFromEnv, setAside, unplacedLine, unseededLine } from '../dist/random.js';
+import { DOC_KEY, ENV_SEED_RANDOM, FAKER, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, esmFile, exportOf, fakerLine, fakersIn, fakersOf, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatFaker, seatRandom, seedFaker, seedingFromEnv, setAside, unplacedLine, unseededLine } from '../dist/random.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -38,8 +38,9 @@ test('the lines say what is seeded, what is not, where the seed lives, and how t
     '(its beforeEach and afterEach hooks too). ' +
     'Web Workers and Service Workers keep the browser\'s own, and so does a page the app opens that keploy cannot place (each one is named); ' +
     'the test process keeps its own crypto, and its own Math.random and faker outside every test (beforeAll, afterAll, a file as it loads) ' +
-    'and while a worker fixture registered with this package\'s test.extend or test.use is set up; a faker instance the suite makes itself ' +
-    '(new Faker(...)) as a file loads draws its own, and one it seeds itself (faker.seed(n)) draws as seeded. ' +
+    'and while a worker fixture registered with this package\'s test.extend or test.use is set up. ' +
+    'Own Faker instances, those the suite makes itself as a file loads (new Faker(...)), draw their own: seed them with seedFaker(instance, name) ' +
+    'from this package. An instance the test seeds itself (faker.seed(n)) draws as seeded. ' +
     'To turn it off, record and replay with KEPLOY_SEED_RANDOM=off, or set use: { keploySeedRandom: false } in the Playwright config.');
   assert.equal(OFF_LINE, 'keploy: random numbers are not seeded (KEPLOY_SEED_RANDOM=off, or keploySeedRandom: false), ' +
     'so the test process and the test browser draw their own each run: data a test makes from them (a name, an email, an ID) differs from its recording\'s ' +
@@ -383,6 +384,150 @@ test('seatFaker puts back the seed of an instance the test did not seed, and lea
   un2();
   unseat2();
   assert.equal(c.r.seed, theirs);
+});
+
+// An instance as faker 10 makes one (its fakerCore's randomizer) or faker 8
+// and 9 do (its _randomizer).
+const instance10 = (v) => { const f = fakeRandomizer(v); return { ...f, i: { fakerCore: { randomizer: f.r } } }; };
+const instance9 = (v) => { const f = fakeRandomizer(v); return { ...f, i: { _randomizer: f.r } }; };
+
+test('seedFaker refuses, naming the next step, a value that is no faker instance it can seed, and an empty name', () => {
+  const noInstance = /^keploy: seedFaker\(instance, name\) was given no faker instance it can seed: give it an instance of @faker-js\/faker 8, 9 or 10 \(new Faker\(\.\.\.\) or new SimpleFaker\(\.\.\.\)\)$/;
+  for (const v of [null, undefined, 3, 'faker', {}, { fakerCore: null }, { fakerCore: { randomizer: { next() { return 0; } } } }, { _randomizer: 5 }]) {
+    assert.throws(() => seedFaker(v, 'mine'), (e) => e instanceof TypeError && noInstance.test(e.message), String(v));
+  }
+  const noName = 'keploy: seedFaker(instance, name) was given no name: give each instance its own name (such as \'mine\'), ' +
+    'which names the stream of each test\'s seed it draws from';
+  for (const n of [undefined, null, 3, '', '  ']) {
+    const a = instance10(0.25);
+    assert.throws(() => seedFaker(a.i, n), (e) => e instanceof TypeError && e.message === noName, String(n));
+    // A refused instance is not seeded.
+    const realRandom = Math.random;
+    const unseat = seatRandom(processRandom(S1));
+    const un = seatFaker(S1, []);
+    try {
+      assert.equal(a.r.next(), 0.25);
+    } finally {
+      un();
+      unseat();
+      Math.random = realRandom;
+    }
+  }
+});
+
+test('seedFaker: an instance given outside a test is seated in every seat after, on its own stream of the seed named by its name, never a prebuilt instance\'s; it returns the instance; one name gives two instances the same draws', () => {
+  const realRandom = Math.random;
+  try {
+    const a = instance10(0.25);
+    const b = instance9(0.75);
+    const c = instance10(0.5);
+    const ownA = a.r.next;
+    assert.equal(seedFaker(a.i, 'faker'), a.i);
+    assert.equal(seedFaker(b.i, 'theirs'), b.i);
+    assert.equal(seedFaker(c.i, 'theirs'), c.i);
+    // Given, it still draws its own outside every seat.
+    assert.equal(a.r.next(), 0.25);
+    for (const seed of [S1, S2]) {
+      const unseat = seatRandom(processRandom(seed));
+      const un = seatFaker(seed, []);
+      // Pinned to the stream's name: a recording keeps the seed, not the numbers.
+      const fa = processRandom(seed, '@faker-js/faker own faker');
+      const fb = processRandom(seed, '@faker-js/faker own theirs');
+      const fc = processRandom(seed, '@faker-js/faker own theirs');
+      const prebuilt = processRandom(seed, '@faker-js/faker faker');
+      try {
+        const x = a.r.next();
+        assert.equal(x, fa());
+        assert.notEqual(x, prebuilt());
+        assert.equal(b.r.next(), fb());
+        assert.equal(c.r.next(), fc());
+        assert.equal(Math.random(), processRandom(seed)());
+        // It draws its own while a worker fixture is set up.
+        const back = setAside();
+        assert.equal(a.r.next(), 0.25);
+        back();
+      } finally {
+        un();
+        unseat();
+      }
+      assert.equal(a.r.next, ownA);
+      assert.equal(a.r.next(), 0.25);
+    }
+  } finally { Math.random = realRandom; }
+});
+
+test('seedFaker: an instance given in a test is seated at once until that test\'s end, and not in the seats after; one given while a worker fixture is set up is seated in this seat and every one after; one found prebuilt is seated once, by its found name', () => {
+  const realRandom = Math.random;
+  try {
+    const t = instance10(0.25);
+    const w = instance9(0.75);
+    const p = instance10(0.5);
+    const ownT = t.r.next;
+    const unseat = seatRandom(processRandom(S1));
+    const un = seatFaker(S1, [['faker', p.r]]);
+    try {
+      assert.equal(t.r.next(), 0.25);
+      assert.equal(seedFaker(t.i, 'in a test'), t.i);
+      const ft = processRandom(S1, '@faker-js/faker own in a test');
+      assert.equal(t.r.next(), ft());
+      assert.equal(t.r.next(), ft());
+      // Given again, under another name, it keeps its stream.
+      seedFaker(t.i, 'other');
+      assert.equal(t.r.next(), ft());
+      // A worker fixture being set up gives it: its own until set up, then
+      // the test's stream.
+      const back = setAside();
+      seedFaker(w.i, 'worker');
+      assert.equal(w.r.next(), 0.75);
+      back();
+      assert.equal(w.r.next(), processRandom(S1, '@faker-js/faker own worker')());
+      // A prebuilt instance the suite gives too keeps its found stream.
+      const fp = processRandom(S1, '@faker-js/faker faker');
+      seedFaker(p.i, 'mine too');
+      assert.equal(p.r.next(), fp());
+      assert.equal(p.r.next(), fp());
+    } finally {
+      un();
+      unseat();
+    }
+    assert.equal(t.r.next, ownT);
+    assert.equal(t.r.next(), 0.25);
+    assert.equal(p.r.next(), 0.5);
+    // The next seat: the test's instance draws its own; the worker's is seated.
+    const unseat2 = seatRandom(processRandom(S2));
+    const un2 = seatFaker(S2, []);
+    try {
+      assert.equal(t.r.next(), 0.25);
+      assert.equal(w.r.next(), processRandom(S2, '@faker-js/faker own worker')());
+      assert.equal(p.r.next(), 0.5);
+    } finally {
+      un2();
+      unseat2();
+    }
+    // Given after the seat ended, an instance waits for the next seat.
+    const after = instance10(0.125);
+    seedFaker(after.i, 'after');
+    assert.equal(after.r.next(), 0.125);
+    const unseat3 = seatRandom(processRandom(S1));
+    const un3 = seatFaker(S1, []);
+    try {
+      assert.equal(after.r.next(), processRandom(S1, '@faker-js/faker own after')());
+    } finally {
+      un3();
+      unseat3();
+    }
+    // An older seat put back after a newer one began leaves the newer one in place.
+    const unseat4 = seatRandom(processRandom(S2));
+    const old = seatFaker(S1, []);
+    const newer = seatFaker(S2, []);
+    old();
+    const late = instance10(0.375);
+    seedFaker(late.i, 'late');
+    assert.equal(late.r.next(), processRandom(S2, '@faker-js/faker own late')());
+    newer();
+    unseat4();
+    assert.equal(late.r.next(), 0.375);
+  } finally { Math.random = realRandom; }
 });
 
 test('esmFile: .mjs and .mts files are ES modules and .cjs and .cts are not; any other is one when its nearest package.json says "type": "module"', () => {

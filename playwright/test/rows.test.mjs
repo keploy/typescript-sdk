@@ -1393,13 +1393,13 @@ async function fakerRun(j, env) {
   const { tests, tmp, out } = await playwright(['faker.spec.ts', 'faker-esm.spec.mts'], env);
   for (const [k, t] of Object.entries(tests)) assert.equal(t.status, 'passed', `${k}: ${t.error}\n${out}`);
   const made = {};
-  for (const n of ['made', 'other', 'mine', 'itself', 'outside', 'esm made']) made[n] = JSON.parse(fs.readFileSync(path.join(tmp, `faker-${n}.json`), 'utf8'));
+  for (const n of ['made', 'other', 'mine', 'itself', 'outside', 'esm made', 'own']) made[n] = JSON.parse(fs.readFileSync(path.join(tmp, `faker-${n}.json`), 'utf8'));
   const begins = calls({ events: j.events.slice(from) }).filter((c) => c.path === '/agent/scope/begin').map((c) => c.body);
   const seeds = Object.fromEntries(begins.map((b) => [b.name.replace(/^own › /, ''), b.seed]));
   return { made, seeds, out };
 }
 
-test('seeded: faker\'s instances in the test process make from the test\'s seed in its beforeEach, body and afterEach, in a CommonJS test file and an ES module one, so a replay makes the data its recording made; another test, an opted-out one, a test that seeds faker itself and code outside every test make others', async () => {
+test('seeded: faker\'s instances in the test process make from the test\'s seed in its beforeEach, body and afterEach, in a CommonJS test file and an ES module one, so a replay makes the data its recording made, and so do the suite\'s own instances given to seedFaker or made in a test; another test, an opted-out one, a test that seeds faker itself, code outside every test and an own instance not given make others', async () => {
   const j = journal();
   const rec = await fakeAgent(j);
   let kept = {};
@@ -1417,6 +1417,13 @@ test('seeded: faker\'s instances in the test process make from the test\'s seed 
       assert.notEqual(p.seeds[n], kept[n], n);
       assert.deepEqual(p.made[n], r.made[n], n);
     }
+    // The suite's own instances: one given to seedFaker as the file loads and
+    // one made in the test make the recording's data; one not given, its own.
+    assert.notEqual(p.seeds['own instances'], kept['own instances']);
+    assert.equal(r.made['esm made'].length, 3);
+    assert.deepEqual(p.made.own.mine, r.made.own.mine);
+    assert.equal(p.made.own.inTest, r.made.own.inTest);
+    assert.notEqual(p.made.own.notGiven, r.made.own.notGiven);
     // The opted-out test and the code after the last test make the worker's own.
     assert.notDeepEqual(p.made.mine, r.made.mine);
     assert.notDeepEqual(p.made.outside.made, r.made.outside.made);
@@ -1430,6 +1437,7 @@ test('seeded: faker\'s instances in the test process make from the test\'s seed 
     const r2 = await fakerRun(j, keployEnv(rec.url));
     assert.notDeepEqual(r2.made.made, r.made.made);
     assert.notDeepEqual(r2.made['esm made'], r.made['esm made']);
+    assert.notDeepEqual(r2.made.own.mine, r.made.own.mine);
   } finally { await rep.close(); await rec.close(); }
 });
 

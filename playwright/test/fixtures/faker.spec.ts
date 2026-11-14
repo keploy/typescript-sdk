@@ -1,6 +1,6 @@
 import fs from 'node:fs';
-import { faker, fakerDE, fakerFR } from '@faker-js/faker';
-import { test } from '../../dist';
+import { Faker, de, faker, fakerDE, fakerFR } from '@faker-js/faker';
+import { seedFaker, test } from '../../dist';
 
 // A suite that makes its test data with faker in the test process, as many
 // do: an ID and a name, from faker's default instance and a locale's. Each
@@ -20,6 +20,16 @@ test.beforeEach(() => make());
 test.afterEach(() => {
   make();
   keep(test.info().title, made.get(test.info().title));
+});
+
+// The suite's own instances, made as this file loads: one given to
+// seedFaker draws from the test's seed, one not given draws its own. One
+// made in a test seeds itself from the test's Math.random.
+const mine = seedFaker(new Faker({ locale: [de] }), 'mine');
+const notGiven = new Faker({ locale: [de] });
+test('own instances', () => {
+  const inTest = new Faker({ locale: [de] });
+  keep('own', { mine: [mine.string.uuid(), mine.person.firstName()], notGiven: notGiven.string.uuid(), inTest: inTest.string.uuid() });
 });
 
 test('made', () => { make(); });
