@@ -43,9 +43,17 @@ export class Inflight {
         this.drop((o) => o.frame === f && !o.nav);
       });
       // Nor for the calls of a page that closes. Only that page's calls: a
-      // popup that closes cancels nothing of its opener. (A removed frame's
-      // calls the browser does end, as failed requests.)
+      // popup that closes cancels nothing of its opener.
       p.on('close', () => this.drop((o) => o.frame !== null && pageOf(o.frame) === p));
+      // Nor for the calls of a frame that is gone: removed, or gone with
+      // the document it was in when the page loaded another (a payment
+      // form's frame). Playwright reports no end for the calls such a frame
+      // still had in flight when it went with the page's old document:
+      // ordinary, keepalive (navigator.sendBeacon, fetch with keepalive,
+      // which the browser goes on sending only until the test closes its
+      // context), or the frame's own document request, still loading. Each
+      // frame that goes is reported apart, a frame inside it too.
+      p.on('framedetached', (f) => this.drop((o) => o.frame === f));
     };
     context.pages().forEach(watch);
     context.on('page', watch);

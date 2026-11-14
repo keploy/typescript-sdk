@@ -80,6 +80,16 @@ async function pageServer(j) {
       void released.then(() => res.end('slow'));
       return;
     }
+    // A keepalive call (navigator.sendBeacon, fetch with keepalive): a POST,
+    // answered as /slow is.
+    if (req.url === '/beacon' && req.method === 'POST') {
+      req.resume();
+      req.on('end', () => { j.add({ page: 'beacon sent' }); saw(); });
+      res.on('close', () => { if (!res.writableFinished) j.add({ page: 'beacon cut' }); });
+      res.on('finish', () => j.add({ page: 'beacon answered' }));
+      void released.then(() => res.end('beacon'));
+      return;
+    }
     res.writeHead(404); res.end();
   });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
@@ -361,6 +371,48 @@ for (const [title, why] of [
     } finally { await p.close(); await a.close(); }
   });
 }
+
+// Settle rows where the page loads another document while one of its
+// frames has a call in flight: the frame goes with the old document, and
+// Playwright reports no end for its call, ordinary or keepalive
+// (navigator.sendBeacon, fetch with keepalive, which the browser still
+// sends: the page server sees it), nor for the frame's own document request
+// when that document was still loading. The call is not waited for, so the
+// test does not hang until its timeout.
+for (const [title, why, call] of [
+  ['a beacon its frame sends as the page loads another document', 'its frame sends it as the page loads another document', 'beacon'],
+  ['a beacon its frame had in flight when the page loads another document', 'the page loads another document, though a beacon outlives its frame', 'beacon'],
+  ['a keepalive fetch its frame had in flight when the page loads another document', 'the page loads another document, though a keepalive fetch outlives its frame', 'beacon'],
+  ['a call its frame had in flight when the page loads another document', 'the page loads another document, with an ordinary call of its frame in flight', 'slow'],
+  ['a document its frame was still loading when the page loads another document', 'the page loads another document while the frame\'s own document is still loading', 'slowdoc'],
+]) {
+  test(`settle: a frame's call is not waited for once ${why}`, async () => {
+    const j = journal();
+    const a = await fakeAgent(j);
+    const p = await pageServer(j);
+    try {
+      const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, NO_RELEASE: '1', PW_TIMEOUT: '20000' });
+      const t = tests[title];
+      assert.equal(t.status, 'passed', out);
+      assert.deepEqual(t.steps.filter((s) => s.startsWith('keploy:')), []);
+      assert.ok(j.events.some((e) => e.page === `${call} sent`));
+    } finally { await p.close(); await a.close(); }
+  });
+}
+
+test('settle: a beacon from a page that stays is still waited for', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  const p = await pageServer(j);
+  try {
+    const title = 'a beacon in flight from the page';
+    const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, NO_RELEASE: '1', PW_TIMEOUT: '4000' });
+    const t = tests[title];
+    assert.equal(t.status, 'timedOut', out);
+    const named = /^keploy: wait for the test's 1 call\(s\) in flight before its browser context closes: POST http:\/\/127\.0\.0\.1:\d+\/beacon$/;
+    assert.ok(t.steps.some((s) => named.test(s)), t.steps.join('\n'));
+  } finally { await p.close(); await a.close(); }
+});
 
 // Settle rows where nothing was cancelled: the call is still waited for, and
 // the test times out naming it.
