@@ -1562,19 +1562,60 @@ test('a worker\'s seeding: an error the browser\'s own call throws in a seeded g
 // A context whose route keeps its matcher and handler, and a route of it
 // that records what the handler did. A request is a worker's script load as
 // Chromium shows it (typed script, no sec-fetch-dest) unless as says.
+// A fake browser context for workerRoutes, in Playwright's order: a page's
+// routes before its context's, the last added first; a route that falls
+// back hands the request on, at the URL its fallback gave, to the next
+// route that matches it there. What answered it is what ask returns: the
+// fetches and the fulfill, continue or abort that ended it, or, when no
+// route did, the fallback it went on to the server with.
 function routed() {
   const r = {};
-  const context = { route: async (match, handler) => { r.match = match; r.handler = handler; } };
-  r.ask = async (url, answer, as = { type: 'script', headers: {} }) => {
+  const target = () => {
+    const t = { routes: [] };
+    t.route = async (match, handler) => { t.routes.unshift({ match, handler }); };
+    t.unroute = async (match, handler) => { t.routes = t.routes.filter((x) => !(x.match === match && (handler === undefined || x.handler === handler))); };
+    t.unrouteAll = async () => { t.routes = []; };
+    return t;
+  };
+  const context = target();
+  const pages = [];
+  const listeners = [];
+  context.pages = () => pages.slice();
+  context.on = (event, f) => { if (event === 'page') listeners.push(f); };
+  r.page = () => {
+    const p = target();
+    pages.push(p);
+    for (const f of listeners) f(p);
+    return p;
+  };
+  // keploy's first route's match.
+  r.match = (u) => context.routes[0].match(u);
+  r.ask = async (url, answer, as = { type: 'script', headers: {} }, page = null) => {
     const did = [];
+    let at = url;
+    let over;
+    let ended = false;
+    const request = { url: () => at, resourceType: () => as.type, headers: () => as.headers };
     const route = {
-      request: () => ({ url: () => url, resourceType: () => as.type, headers: () => as.headers }),
+      request: () => request,
       fetch: async (o) => { did.push(['fetch', o.url]); if (answer instanceof Error) throw answer; return answer; },
-      fulfill: async (o) => { did.push(['fulfill', { ...o, body: String(o.body) }]); },
-      continue: async (o) => { did.push(['continue', o.url]); },
-      fallback: async (o) => { did.push(o === undefined ? ['fallback'] : ['fallback', o]); },
+      fulfill: async (o) => { ended = true; did.push(['fulfill', { ...o, body: String(o.body) }]); },
+      continue: async (o) => { ended = true; did.push(['continue', o?.url ?? at]); },
+      abort: async () => { ended = true; did.push(['abort']); },
+      fallback: async (o) => {
+        if (o === undefined || Object.keys(o).length === 0) return;
+        over = { ...over, ...o };
+        if (o.url !== undefined) at = o.url;
+      },
     };
-    await r.handler(route);
+    for (const t of page === null ? [context] : [page, context]) {
+      for (const x of t.routes.slice()) {
+        if (ended) break;
+        if (!t.routes.includes(x) || !x.match(new URL(at))) continue;
+        await x.handler(route, request);
+      }
+    }
+    if (!ended) did.push(over === undefined ? ['fallback'] : ['fallback', over]);
     return did;
   };
   return { r, context };
@@ -1740,6 +1781,51 @@ test('workerAnswer: a module Shared Worker whose app script fails to load fails 
   ch.port1.close(); ch.port2.close();
 });
 
+test('workerRoutes keeps keploy\'s route ahead of every route the test adds to its context or its pages, after unrouteAll too: the test\'s route sees a worker\'s script load at the URL the app asked for; continuing it has keploy answer it with its seeding, answering it itself answers it unseeded and is heard, aborting it aborts it, falling back leaves it to keploy; what the worker\'s own code asks for at its marked URL reaches it with no mark; a module worker\'s seeding never reaches it', async () => {
+  const { r, context } = routed();
+  const before = r.page();
+  const heard = [];
+  const answered = [];
+  await workerRoutes(context, { answered: (q) => answered.push(q.url()), routed: (at) => heard.push(at) });
+  const page = r.page();
+  const t = 'ab'.repeat(16);
+  const w = markWorker('http://h/w.js?a=1', 'w', t);
+  const seen = [];
+  const pass = async (route, q) => { seen.push(q.url()); await route.continue(); };
+  await page.route(() => true, pass);
+  const headers = { 'content-type': 'text/javascript', 'x-a': '1' };
+  const seeded = (n) => [['fetch', 'http://h/w.js?a=1'], ['fulfill', { status: 200, headers, body: workerAnswer(t, n, 'w', 'http://h/w.js?a=1') }]];
+  assert.deepEqual(await r.ask(w, answerOf(200, 'app()'), undefined, page), seeded(0));
+  assert.deepEqual(seen, ['http://h/w.js?a=1']);
+  assert.deepEqual(answered, ['http://h/w.js?a=1']);
+  // The worker's own XMLHttpRequest at its marked URL, and a module
+  // worker's seeding, which keploy answers before any route of the test's.
+  assert.deepEqual(await r.ask(w, undefined, { type: 'xhr', headers: { 'sec-fetch-dest': 'empty' } }, page), [['continue', 'http://h/w.js?a=1']]);
+  assert.deepEqual(await r.ask(markWorker('http://h/m.js', 'p', t, 0), undefined, undefined, page), [['fulfill', { status: 200, contentType: 'text/javascript', body: workerScript(t, 0, 'm') }]]);
+  assert.deepEqual(seen, ['http://h/w.js?a=1', 'http://h/w.js?a=1']);
+  // A page that was open before: the test's route answers the script itself.
+  await before.route(() => true, (route) => route.fulfill({ status: 200, body: 'mine()' }));
+  assert.deepEqual(await r.ask(w, answerOf(200, 'app()'), undefined, before), [['fulfill', { status: 200, body: 'mine()' }]]);
+  assert.deepEqual(heard, ['http://h/w.js']);
+  // The context, for a request of no page: aborted, then left to keploy.
+  await context.route(() => true, (route) => route.abort());
+  assert.deepEqual(await r.ask(w, answerOf(200, 'app()')), [['abort']]);
+  await context.unrouteAll();
+  await context.route(() => true, (route) => route.fallback());
+  assert.deepEqual(await r.ask(w, answerOf(200, 'app()')), seeded(1));
+  // After the page's unrouteAll, keploy's route is ahead of the next again.
+  await page.unrouteAll();
+  await page.route(() => true, pass);
+  assert.deepEqual(await r.ask(w, answerOf(200, 'app()'), undefined, page), seeded(2));
+  assert.deepEqual(heard, ['http://h/w.js']);
+  // One route of keploy's ahead on each, the one it replaced taken off;
+  // the context's last route stays last.
+  for (const x of [context, page, before]) assert.equal(x.routes.filter((y) => y.match === x.routes[0].match).length, 1);
+  assert.equal(context.routes.length, 3);
+  assert.equal(context.routes[2].match(new URL('http://h/w.js?a=1')), true);
+  assert.equal(context.routes[2].match(new URL('http://h/v.js')), false);
+});
+
 test('workerRoutes answers a Shared Worker\'s script with workerAnswer, a module one whose policy refuses data: with its seeding in the answer; each request it fulfills is answered', async () => {
   const { r, context } = routed();
   const answered = [];
@@ -1758,7 +1844,8 @@ test('workerRoutes answers a Shared Worker\'s script with workerAnswer, a module
   // A classic one is not refused by a policy: it imports the app's script.
   const d0 = markWorker('http://h/d.js', 's', t.replace('6', 'a'));
   assert.equal((await r.ask(d0, answerOf(200, 'app()', policy)))[1][1].body, workerAnswer(t.replace('6', 'a'), 0, 's', 'http://h/d.js'));
-  assert.deepEqual(answered, [s0, s0, x0, x1, d0]);
+  // Each at the URL the app asked for: keploy's first route handed it on so.
+  assert.deepEqual(answered, [s0, s0, x0, x1, d0].map((u) => workerMark(u).url));
   // Not answered: what falls back.
   await r.ask(`http://h/m.js?__keploy_worker=s.${t}.3`);
   assert.equal(answered.length, 5);

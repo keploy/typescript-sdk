@@ -17,7 +17,7 @@
 // On by default; KEPLOY_SEED_RANDOM=off or the fixture option
 // keploySeedRandom: false turns it off, and the worker says what that costs.
 
-import type { BrowserContext, Frame, Page, Request } from '@playwright/test';
+import type { BrowserContext, Frame, Page, Request, Route } from '@playwright/test';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
@@ -96,19 +96,23 @@ export function pageAddress(at: unknown): string {
  * another origin that has no session storage to count its documents in, or
  * a frame inside one, 'nostorage' for a top document with no session
  * storage to count its documents in (other than a page's first document),
- * or a frame of its origin inside one.
+ * or a frame of its origin inside one, 'routed' for a worker whose script
+ * a route of the test's own answered itself (workerRoutes).
  */
-export type Unplaced = 'own' | 'frame' | 'popup' | 'uncounted' | 'nostorage' | 'worker' | 'shared';
+export type Unplaced = 'own' | 'frame' | 'popup' | 'uncounted' | 'nostorage' | 'worker' | 'shared' | 'routed';
 
 // A worker keploy cannot reach: its line's reason (unplacedLine).
-const UNREACHED: Record<'worker' | 'shared', string> = {
+const UNREACHED: Record<'worker' | 'shared' | 'routed', string> = {
   worker: 'it is a worker started from a script keploy cannot mark (a blob: or data: URL, or a URL the browser refused with keploy\'s mark, as a Trusted Types policy may), ' +
     'so keploy cannot put its seeding ahead of the script; start it from the script\'s http(s) URL to seed it.',
   shared: 'it is a Shared Worker, and Firefox does not let keploy reach a Shared Worker\'s script to put its seeding ahead of it; ' +
     'record and replay the test in Chromium or WebKit to seed it.',
+  routed: 'a route of the test\'s own answered the worker\'s script itself (route.fulfill), so keploy cannot put its seeding ahead of the script, ' +
+    'and the worker\'s URL, which its location shows, carries keploy\'s __keploy_worker mark; have that route call route.continue() or route.fallback() ' +
+    'for the worker\'s script to seed it.',
 };
 
-const UNPLACED: Record<Exclude<Unplaced, 'uncounted' | 'worker' | 'shared'>, string> = {
+const UNPLACED: Record<Exclude<Unplaced, 'uncounted' | 'worker' | 'shared' | 'routed'>, string> = {
   own: 'it is in a page the test opened, and it drew before keploy named that page: a script the test added with context.addInitScript ' +
     'runs in each of the page\'s documents before keploy\'s, and so does a draw the test makes there before newPage returns.',
   frame: 'it is a frame keploy cannot place among its parent\'s frames (one in a closed shadow root or in an object or embed element, ' +
@@ -130,8 +134,8 @@ const UNPLACED: Record<Exclude<Unplaced, 'uncounted' | 'worker' | 'shared'>, str
  * (othersNow).
  */
 export function unplacedLine(name: string, at: string, why: Unplaced = 'popup', others = 0): string {
-  if (why === 'worker' || why === 'shared') {
-    return `keploy: in ${name}, the ${why === 'worker' ? 'worker' : 'Shared Worker'} at ${at} draws the browser's own random numbers, so its draws may differ at replay: ${UNREACHED[why]}`;
+  if (why === 'worker' || why === 'shared' || why === 'routed') {
+    return `keploy: in ${name}, the ${why === 'shared' ? 'Shared Worker' : 'worker'} at ${at} draws the browser's own random numbers, so its draws may differ at replay: ${UNREACHED[why]}`;
   }
   const n = Math.floor(Number(others));
   const reason = why === 'uncounted'
@@ -1487,7 +1491,51 @@ function workerScriptLoad(r: Request): boolean {
 export type WorkerHooks = {
   /** The route answered this request whole: none of it is in flight. */
   answered?: (r: Request) => void;
+  /**
+   * A route of the test's own answered the script of the worker at at (its
+   * origin and path) itself: it runs unseeded, at its marked URL.
+   */
+  routed?: (at: string) => void;
 };
+
+/** What keploy's routes go on: the test's context, or one of its pages. */
+type Routes = Pick<BrowserContext, 'route' | 'unroute' | 'unrouteAll'>;
+
+/**
+ * Keeps handler at url ahead of every route the test adds to target after
+ * it (route, and routeFromHAR, which adds its own through route): each time
+ * one is added, keploy's is added again, ahead of it, before the one it
+ * replaces is taken off, so no request finds neither. After the test's
+ * unrouteAll, again comes first, then keploy's. Playwright runs a page's
+ * routes before its context's, and the last added first.
+ */
+function keepFirst(target: Routes, url: (u: URL) => boolean, handler: (route: Route) => Promise<void>, again: () => Promise<unknown> = async () => {}): Promise<void> {
+  const route = target.route;
+  const unrouteAll = target.unrouteAll;
+  let now: ((route: Route) => Promise<void>) | null = null;
+  const add = async (): Promise<void> => {
+    const h = (r: Route): Promise<void> => handler(r);
+    const was = now;
+    now = h;
+    await route.call(target, url, h);
+    if (was !== null) await target.unroute(url, was);
+  };
+  target.route = async function (this: Routes, ...args: Parameters<Routes['route']>) {
+    const added = route.apply(this, args);
+    const ahead = add();
+    try {
+      return await added;
+    } finally {
+      await ahead.catch(() => {});
+    }
+  } as Routes['route'];
+  target.unrouteAll = async function (this: Routes, ...args: Parameters<Routes['unrouteAll']>) {
+    await unrouteAll.apply(this, args);
+    await again();
+    await add();
+  } as Routes['unrouteAll'];
+  return add();
+}
 
 /**
  * Answers each marked worker script the test's context asks for with
@@ -1505,9 +1553,19 @@ export type WorkerHooks = {
  * browser's load of a worker's script is answered so (workerScriptLoad): a
  * request the worker's own code makes at its script's marked URL (an
  * XMLHttpRequest's: its fetch and Request ask for no mark, workerScript)
- * goes on to the test's other routes and the app's server with the mark
- * taken off (the URL the app's code meant, as the worker's location shows
- * it), and starts no instance of the token.
+ * goes on to the test's routes and the app's server with the mark taken off
+ * (the URL the app's code meant, as the worker's location shows it), and
+ * starts no instance of the token.
+ *
+ * keploy's route comes first, ahead of every route the test adds to its
+ * context or to one of its pages (keepFirst), so no route of the test's sees
+ * the mark: it hands a worker's script load on to the test's routes at the
+ * URL the app asked for, with the route's continue answering it as above (a
+ * continued script is the app's server's, with keploy's seeding ahead of
+ * it). A route of the test's that answers it itself (fulfill) answers it so,
+ * unseeded, and the test hears of it (routed); one that aborts it aborts
+ * it. One that falls back, or none, leaves it to keploy's last route, the
+ * context's first, which answers it as above.
  */
 export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks = {}): Promise<void> {
   const counts = new Map<string, number>();
@@ -1518,20 +1576,15 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
     for (const [k, v] of Object.entries(h)) if (k !== 'content-encoding' && k !== 'content-length') out[k] = v;
     return out;
   };
-  await context.route((u) => u.searchParams.has(WORKER_PARAM), async (route) => {
-    const fulfill = async (o: Parameters<typeof route.fulfill>[0]): Promise<void> => {
-      await route.fulfill(o);
+  // The worker script loads handed on to the test's routes: each one's mark,
+  // and the route's own fulfill; and their URLs, for the last route.
+  const handed = new WeakMap<Request, { m: WorkerMark; fulfill: Route['fulfill'] }>();
+  const urls = new Set<string>();
+  const answer = async (route: Route, m: WorkerMark, own: Route['fulfill']): Promise<void> => {
+    const fulfill = async (o: Parameters<Route['fulfill']>[0]): Promise<void> => {
+      await own(o);
       hooks.answered?.(route.request());
     };
-    const m = workerMark(route.request().url());
-    if (m === null) {
-      await route.fallback();
-      return;
-    }
-    if (!workerScriptLoad(route.request())) {
-      await route.fallback({ url: m.url });
-      return;
-    }
     if (m.kind === 'p') {
       await fulfill({ status: 200, contentType: 'text/javascript', body: workerScript(m.token, m.n, 'm') });
       return;
@@ -1541,16 +1594,65 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
     let status = 200;
     let headers: Record<string, string> = { 'content-type': 'text/javascript' };
     try {
-      const answer = await route.fetch({ url: m.url });
-      if (!answer.ok()) {
-        await fulfill({ status: answer.status(), headers: headersOf(answer.headers()), body: await answer.body() });
+      const got = await route.fetch({ url: m.url });
+      if (!got.ok()) {
+        await fulfill({ status: got.status(), headers: headersOf(got.headers()), body: await got.body() });
         return;
       }
-      status = answer.status();
-      headers = headersOf(answer.headers());
+      status = got.status();
+      headers = headersOf(got.headers());
     } catch {
       // The worker loads the app's script itself, and fails as it would.
     }
-    await fulfill({ status, headers, body: workerAnswer(m.token, n, m.kind, m.url, cspAllowsData(headers)) });
-  });
+    await fulfill({ status, headers, body: workerAnswer(m.token, n, m.kind as 'w' | 'm' | 's' | 'x', m.url, cspAllowsData(headers)) });
+  };
+  const first = async (route: Route): Promise<void> => {
+    const r = route.request();
+    const m = workerMark(r.url());
+    if (m === null) {
+      await route.fallback();
+      return;
+    }
+    if (!workerScriptLoad(r)) {
+      await route.fallback({ url: m.url });
+      return;
+    }
+    const own = route.fulfill.bind(route);
+    if (m.kind === 'p') {
+      await answer(route, m, own);
+      return;
+    }
+    handed.set(r, { m, fulfill: own });
+    urls.add(new URL(m.url).href);
+    route.continue = async () => answer(route, m, own);
+    route.fulfill = async (o) => {
+      const u = new URL(m.url);
+      hooks.routed?.(u.origin + u.pathname);
+      await own(o);
+    };
+    await route.fallback({ url: m.url });
+  };
+  const last = async (route: Route): Promise<void> => {
+    const h = handed.get(route.request());
+    if (h === undefined) {
+      await route.fallback();
+      return;
+    }
+    await answer(route, h.m, h.fulfill);
+  };
+  const marked = (u: URL): boolean => u.searchParams.has(WORKER_PARAM);
+  const lastUrl = (u: URL): boolean => urls.has(u.href);
+  const route = context.route;
+  const addLast = async (): Promise<void> => {
+    await route.call(context, lastUrl, last);
+  };
+  await addLast();
+  await keepFirst(context, marked, first, addLast);
+  const onPage = (p: Page): void => {
+    keepFirst(p, marked, first).catch(() => {
+      // A page that closed as it opened: none of its requests is left.
+    });
+  };
+  context.pages().forEach(onPage);
+  context.on('page', onPage);
 }

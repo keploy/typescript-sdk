@@ -5,6 +5,7 @@
 // browser's own request events; no time window decides it.
 
 import type { BrowserContext, Frame, Page, Request } from '@playwright/test';
+import { workerMark } from './random';
 
 export class Inflight {
   // Each call's number, in the order the browser reported it.
@@ -24,7 +25,7 @@ export class Inflight {
       // A service worker's call has no frame.
       try { frame = r.frame(); } catch { frame = null; }
       const nav = r.isNavigationRequest();
-      if (!nav && this.shared.get(frame)?.has(noFragment(r.url()))) return;
+      if (!nav && (this.shared.get(frame)?.has(noFragment(r.url())) || sharedScript(r.url()))) return;
       this.open.set(r, { frame, nav, n: ++this.reported });
     });
     context.on('requestfinished', (r) => this.done(r));
@@ -152,6 +153,17 @@ export class Inflight {
 
 function pageOf(f: Frame): Page | null {
   try { return f.page(); } catch { return null; }
+}
+
+/**
+ * Whether url carries keploy's mark for a Shared Worker's script (workerMark:
+ * kind s or x). Settle never waits on such a request, whichever route
+ * answers it: Chromium reports no end for it, as Playwright does not follow
+ * Shared Workers.
+ */
+function sharedScript(url: string): boolean {
+  const k = workerMark(url)?.kind;
+  return k === 's' || k === 'x';
 }
 
 function noFragment(url: string): string {

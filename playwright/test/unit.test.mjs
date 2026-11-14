@@ -9,6 +9,7 @@ import path from 'node:path';
 import { AgentClient, KeployError } from '../dist/agent.js';
 import { decide } from '../dist/join.js';
 import { Inflight, sharedWorkerScript } from '../dist/settle.js';
+import { markWorker } from '../dist/random.js';
 import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
 import { testRef, outcomeOf, sourceOf, keployText, runAgain } from '../dist/index.js';
@@ -298,6 +299,23 @@ test('settle: a call keploy\'s route answered has ended, though the browser repo
   inflight.answered(late);
   ctx.emit('request', late);
   assert.equal(inflight.size, 0);
+});
+
+test('settle: a request whose URL carries keploy\'s mark for a Shared Worker\'s script, classic or module, is not waited for, whichever route answers it (a test\'s own that continues it: no answered); a Web Worker\'s, its seeding\'s, a navigation and a malformed mark are', async () => {
+  const ctx = fakeContext();
+  const inflight = new Inflight(ctx);
+  const page = new EventEmitter();
+  ctx.emit('page', page);
+  const f = { page: () => page };
+  const call = (url, nav = false) => ({ frame: () => f, isNavigationRequest: () => nav, method: () => 'GET', url: () => url });
+  const t = 'cd'.repeat(16);
+  ctx.emit('request', call(markWorker('http://h/s.js', 's', t)));
+  ctx.emit('request', call(markWorker('http://h/x.js?q=1#a', 'x', t)));
+  assert.equal(inflight.size, 0);
+  const waited = [markWorker('http://h/w.js', 'w', t), markWorker('http://h/m.js', 'm', t), markWorker('http://h/m.js', 'p', t, 0), 'http://h/s.js?__keploy_worker=s.zz']
+    .map((u) => call(u)).concat(call(markWorker('http://h/s.js', 's', t), true));
+  for (const r of waited) ctx.emit('request', r);
+  assert.equal(inflight.size, 5);
 });
 
 test('settle: a request of the frame that started a Shared Worker at its script\'s URL (fragment aside), reported before or after, is not waited for; one of another frame, another URL, or a navigation is', async () => {

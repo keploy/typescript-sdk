@@ -1343,19 +1343,23 @@ function workerMarks(seed) {
   return made;
 }
 
+// workers.spec.ts's tests that start the workers at /wk.
+const WK_TITLES = ['workers', 'workers behind routes'];
+
 for (const engine of ENGINES) {
-  test(`seeded, in ${engine}: a page's classic and module Web Workers and its classic and module Shared Workers draw from the test's seed, the same at replay, a module Shared Worker whose policy refuses data: too (each connection that came before its script ran given to it, in order), at the app's location, URLs and stack, loading what sits beside them, a Web Worker's own requests at its script's URL getting the app's script, each worker's fetch and Request asking for its script's own URL and naming it as the Referer with no mark, and the app's server never sees keploy's mark in a URL; in Firefox each Shared Worker draws its own and is named`, async () => {
+  test(`seeded, in ${engine}: a page's classic and module Web Workers and its classic and module Shared Workers draw from the test's seed, the same at replay, a module Shared Worker whose policy refuses data: too (each connection that came before its script ran given to it, in order), at the app's location, URLs and stack, loading what sits beside them, a Web Worker's own requests at its script's URL getting the app's script, each worker's fetch and Request asking for its script's own URL and naming it as the Referer with no mark, and the app's server never sees keploy's mark in a URL, behind the test's own catch-all routes on its context and page too; in Firefox each Shared Worker draws its own and is named; a worker whose script the test's own route answers runs it as given, unseeded, and is named once`, async () => {
     const j = journal();
     const rec = await fakeAgent(j);
     let kept = {};
     const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
       ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
     const env = (url) => ({ ...keployEnv(url), PW_BROWSER: engine });
-    const byKind = (r) => Object.fromEntries(r.drew.workers.map((w) => [w.kind, w]));
+    const byKind = (r, title) => Object.fromEntries(r.drew[title].map((w) => [w.kind, w]));
     try {
-      const r = await drawRun(j, env(rec.url), ['workers.spec.ts'], ['workers']);
-      const w = byKind(r);
-      const [ded, mod, shared, mshared, c1, c2, c1again] = workerMarks(r.seeds.workers);
+      const r = await drawRun(j, env(rec.url), ['workers.spec.ts'], [...WK_TITLES, 'own']);
+      for (const title of WK_TITLES) {
+      const w = byKind(r, title);
+      const [ded, mod, shared, mshared, c1, c2, c1again] = workerMarks(r.seeds[title]);
       assert.deepEqual([ded, mod, shared, mshared, c1, c2, c1again].map((m) => m.kind), ['w', 'm', 's', 'x', 'x', 'x', 'x']);
       assert.notEqual(c1.token, c2.token);
       assert.equal(c1again.token, c1.token);
@@ -1427,28 +1431,39 @@ for (const engine of ENGINES) {
       const model = workerAt('http://h/wk/shared.js', workerScript(shared.token, 0, 's')).draws();
       const mmodel = workerAt('http://h/wk/mshared.js', workerScript(mshared.token, 0, 'x')).draws();
       const cmodel = [c1, c2].map((m) => workerAt('http://h/wk/cshared.js', workerScript(m.token, 0, 'x')).draws());
-      const said = r.tests.workers.stdout.split('\n').filter((l) => l.startsWith('keploy: in workers, ')).map((l) => l.replace(/:\d+\//, ':<port>/'));
+      const said = r.tests[title].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${title}, `)).map((l) => l.replace(/:\d+\//, ':<port>/'));
       const at = (p) => `http://127.0.0.1:<port>/wk/${p}`;
       // Every engine: each Shared Worker script's address, once, is not waited for.
-      const unwaited = ['shared.js', 'mshared.js', 'cshared.js'].map((p) => sharedWorkerLine('workers', at(p)));
+      // Behind the test's routes: the worker whose script its own route
+      // answered, once for its address (it started two there).
+      const unwaited = ['shared.js', 'mshared.js', 'cshared.js'].map((p) => sharedWorkerLine(title, at(p)))
+        .concat(title === 'workers' ? [] : [unplacedLine(title, at('own.js'), 'routed')]);
       if (engine === 'firefox') {
         assert.notDeepEqual(w.shared.draws, model);
         assert.notDeepEqual(w.mshared.draws, mmodel);
         assert.notDeepEqual([w.c1.draws, w.c2.draws], cmodel);
-        assert.deepEqual(said.sort(), [...['shared.js', 'mshared.js', 'cshared.js'].map((p) => unplacedLine('workers', at(p), 'shared')), ...unwaited].sort());
+        assert.deepEqual(said.sort(), [...['shared.js', 'mshared.js', 'cshared.js'].map((p) => unplacedLine(title, at(p), 'shared')), ...unwaited].sort());
       } else {
         assert.deepEqual(w.shared.draws, model);
         assert.deepEqual(w.mshared.draws, mmodel);
         assert.deepEqual([w.c1.draws, w.c2.draws], cmodel);
         assert.deepEqual(said.sort(), [...unwaited].sort());
       }
+      }
+      // The worker whose script the test's own route answered runs that
+      // script, at its marked URL: each start of it is the next.
+      assert.equal(r.drew.own.length, 2);
+      for (const h of r.drew.own) assert.match(h, /^http:\/\/127\.0\.0\.1:\d+\/wk\/own\.js\?__keploy_worker=w\.[0-9a-f]{32}$/);
+      assert.notEqual(r.drew.own[0], r.drew.own[1]);
       // What the app's server was asked for: never keploy's mark, and each
       // worker's script and what it loads.
       assert.deepEqual(r.seen.filter((u) => u.includes('__keploy_worker')), []);
       for (const u of ['/wk/ded.js?x=1', '/wk/dep.js', '/wk/mod.js', '/wk/lib.mjs', '/wk/shared.js', '/wk/mshared.js', '/wk/cshared.js']) assert.ok(r.seen.includes(u), `${u}: ${r.seen.join(' ')}`);
       kept = r.seeds;
-      const q = await drawRun(j, env(rep.url), ['workers.spec.ts'], ['workers']);
-      const p = byKind(q);
+      const q = await drawRun(j, env(rep.url), ['workers.spec.ts'], [...WK_TITLES, 'own']);
+      for (const title of WK_TITLES) {
+      const w = byKind(r, title);
+      const p = byKind(q, title);
       assert.deepEqual([p.ded.draws, p.mod.draws], [w.ded.draws, w.mod.draws]);
       for (const k of ['shared', 'mshared']) {
         if (engine === 'firefox') assert.notDeepEqual(p[k].draws, w[k].draws, k);
@@ -1457,6 +1472,7 @@ for (const engine of ENGINES) {
       for (const k of ['c1', 'c2']) {
         if (engine === 'firefox') assert.notDeepEqual(p[k].draws, w[k].draws, k);
         else assert.deepEqual(p[k].draws, w[k].draws, k);
+      }
       }
       assert.deepEqual(q.seen.filter((u) => u.includes('__keploy_worker')), []);
     } finally { await rep.close(); await rec.close(); }
