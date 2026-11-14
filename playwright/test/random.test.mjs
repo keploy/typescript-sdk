@@ -1763,3 +1763,79 @@ test('workerRoutes answers a Shared Worker\'s script with workerAnswer, a module
   await r.ask(`http://h/m.js?__keploy_worker=s.${t}.3`);
   assert.equal(answered.length, 5);
 });
+
+test('a worker\'s seeding: its fetch and Request ask for its script\'s own URL with no mark, and a fetch whose referrer the browser would pick names that URL with no mark; another URL, a given referrer, a Request with a referrer or policy of its own, what is no string and a worker with no mark are left as they are; what they refuse reaches the caller with no frame at a marked URL', async () => {
+  const t = 'cd'.repeat(16);
+  const plain = 'http://h/w.js?a=1';
+  const href = markWorker(plain, 'w', t);
+  // A Request that keeps what it was made with, and a fetch that keeps what
+  // it was given; each refuses 'bad' with an error whose stack has a frame
+  // at a marked URL.
+  const marked = (m) => { const e = {}; Object.defineProperty(e, 'stack', { value: `E: ${m}\n    at f (${href}:1:2)\n    at g (http://h/a.js:3:4)`, writable: true, configurable: true }); return e; };
+  const given = [];
+  const fakes = () => ({
+    URL,
+    Request: class Request {
+      constructor(u, init) {
+        if (u === 'bad') throw marked('request');
+        this.n = arguments.length;
+        this.u = u;
+        this.referrer = init && init.referrer !== undefined ? init.referrer : 'about:client';
+        this.referrerPolicy = init && init.referrerPolicy !== undefined ? init.referrerPolicy : '';
+      }
+    },
+    fetch: function fetch(...a) { given.push({ self: this, a }); return a[0] === 'bad' ? Promise.reject(marked('fetch')) : Promise.resolve('ok'); },
+  });
+  const w = workerAt(href, workerScript(t, 0, 'w'), fakes());
+  const last = async (code) => { given.length = 0; assert.equal(await w.run(code), 'ok', code); assert.equal(given.length, 1, code); return given[0].a; };
+  const ref = (a) => [a.length, a[0], a[1] && a[1].referrer];
+  // At the script's own URL (an empty URL, a fragment alone): no mark, and
+  // the browser's referrer named with no mark.
+  assert.deepEqual(ref(await last('fetch(\'\')')), [2, plain, plain]);
+  assert.deepEqual(ref(await last('fetch(\'#f\', null)')), [2, `${plain}#f`, plain]);
+  // Another URL, one that is no URL, and what is no string go as given.
+  assert.deepEqual(ref(await last('fetch(\'x.js\')')), [2, 'x.js', plain]);
+  assert.deepEqual(ref(await last('fetch(\'http://[\')')), [2, 'http://[', plain]);
+  assert.equal((await last('globalThis.u = { toString() { return \'\'; } }; fetch(u)'))[0], w.run('u'));
+  // An init: its own referrer kept, its other members read from it whole
+  // (a getter's this is the init), what follows it kept; an init that is a
+  // function is one too; an init that is no object goes as given.
+  assert.deepEqual(ref(await last('fetch(\'\', { referrer: \'http://h/r\' })')), [2, plain, 'http://h/r']);
+  const m = await last('globalThis.o = { get method() { return this === o ? \'POST\' : \'other\'; } }; fetch(\'a\', o, \'more\')');
+  assert.deepEqual([m.length, m[1].method, m[1].body, m[1].referrer, m[2]], [3, 'POST', undefined, plain, 'more']);
+  const f = await last('fetch(\'a\', Object.assign(function () {}, { method: \'PATCH\' }))');
+  assert.deepEqual([f[1].method, f[1].referrer], ['PATCH', plain]);
+  assert.deepEqual(await last('fetch(\'a\', 5)'), ['a', 5]);
+  // fetch is called on what the caller called it on.
+  await last('globalThis.th = {}; fetch.call(th, \'a\')');
+  assert.equal(given[0].self, w.run('th'));
+  // A Request: made at the script's own URL with no mark; given to fetch,
+  // its referrer named with no mark only when it left it to the browser
+  // with the default policy.
+  assert.deepEqual(['new Request(\'\').u', 'new Request(\'#f\').u', 'new Request(\'x.js\').u', 'new Request().n'].map((c) => w.run(c)), [plain, `${plain}#f`, 'x.js', 0]);
+  assert.equal(w.run('new Request(\'\') instanceof Request && Request.prototype.constructor === Request && Request.name'), 'Request');
+  const r = await last('globalThis.r = new Request(\'a\'); fetch(r)');
+  assert.deepEqual([r.length, r[0] === w.run('r'), r[1].referrer], [2, true, plain]);
+  assert.deepEqual([(await last('fetch(new Request(\'a\'), { method: \'PUT\' })'))[1].method, given[0].a[1].referrer], ['PUT', plain]);
+  for (const init of ['{ referrer: \'http://h/r\' }', '{ referrerPolicy: \'no-referrer\' }', '{ referrer: \'about:client\', referrerPolicy: \'origin\' }']) {
+    assert.equal((await last(`fetch(new Request('a', ${init}))`)).length, 1, init);
+  }
+  // What they refuse: no frame at a marked URL on its stack.
+  await assert.rejects(w.run('fetch(\'bad\')'), (e) => e.stack === 'E: fetch\n    at g (http://h/a.js:3:4)');
+  assert.equal(w.run('try { new Request(\'bad\'); } catch (e) { e.stack }'), 'E: request\n    at g (http://h/a.js:3:4)');
+  // A worker with no mark, or whose location cannot be read, keeps the
+  // browser's own fetch and Request; one with no fetch, or no Request,
+  // gets none.
+  const plainFakes = fakes();
+  const p = workerAt(plain, workerScript(t, 0, 'w'), plainFakes);
+  assert.equal(p.run('fetch') === plainFakes.fetch && p.run('Request') === plainFakes.Request, true);
+  const qFakes = fakes();
+  const q = workerAt(href, '', qFakes);
+  q.run('Object.defineProperty(WorkerLocation.prototype, \'href\', { get() { throw new Error(\'no\'); }, configurable: true });');
+  q.run(workerScript(t, 0, 'w'));
+  assert.equal(q.run('fetch') === qFakes.fetch && q.run('Request') === qFakes.Request, true);
+  const { fetch: noFetch, ...rest } = fakes();
+  const { Request: noRequest, ...rest2 } = fakes();
+  assert.deepEqual([workerAt(href, workerScript(t, 0, 'w'), rest).run('typeof fetch + typeof Request'), workerAt(href, workerScript(t, 0, 'w'), rest2).run('typeof fetch + typeof Request')],
+    [`undefined${typeof noFetch}`, `${typeof noRequest}undefined`]);
+});

@@ -8,12 +8,13 @@ import { test } from '../../dist';
 // it; one connected to twice); each sends what it drew, its location, what
 // it loaded and its stack, and each Web Worker answers the message the page
 // posts as it starts it and sends what its own code got at its script's URL.
+// Each worker sends what its fetch and Request sent.
 // The test keeps them.
 const base = process.env.DRAWS_BASE ?? '';
 const keep = (name: string, v: unknown): void => fs.writeFileSync(`${process.env.MARKER_DIR}/${name}.json`, JSON.stringify(v));
 
 test('workers', async ({ page }) => {
   await page.goto(`${base}/wk`);
-  await page.waitForFunction(() => (window as unknown as { __w: unknown[] }).__w.length >= 11, null, { timeout: 20000 });
+  await page.waitForFunction(() => (window as unknown as { __w: unknown[] }).__w.length >= 17, null, { timeout: 20000 });
   keep('workers', await page.evaluate(() => (window as unknown as { __w: unknown[] }).__w));
 });

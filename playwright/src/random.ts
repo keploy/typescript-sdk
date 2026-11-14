@@ -1287,7 +1287,8 @@ export function markWorker(url: string, kind: WorkerMark['kind'], token: string,
  * instance of the token (a Shared Worker started again after its documents
  * closed is the next). Its location (href, search, toString) does not show
  * the mark kind.token the worker's URL carries; the app's script runs at
- * its own URL (workerAnswer). An Error's or a DOMException's stack read
+ * its own URL (workerAnswer), and its fetch and Request take the mark off
+ * the URLs and referrers they would send. An Error's or a DOMException's stack read
  * through its prototype's getter (Firefox's, whose stacks go on through
  * the code that queued what runs) leaves out each frame at a URL keploy
  * marked: keploy's own code. An error the browser's own call throws in a
@@ -1330,6 +1331,36 @@ ${DRAW_JS}
     for (const c of ['?', '&']) if (b.endsWith(c + M)) return b.slice(0, b.length - M.length - 1) + (i < 0 ? '' : s.slice(i));
     return s;
   };
+  // The worker's code resolves a URL against its script's URL, keploy's
+  // mark and all, and the browser names that URL as the referrer of the
+  // worker's requests. A fetch or a Request at the script's own URL (an
+  // empty URL, a fragment alone) asks for it with no mark, and a fetch whose
+  // referrer the browser would pick (none given, by the init or by a
+  // Request made with the default policy) names the script's URL with no
+  // mark. What the browser's own fetch or Request refuses reaches the
+  // caller as thrown(e) gives it.
+  let at = '';
+  try { at = String(g.location.href); } catch (e) {}
+  const own = strip(at);
+  const F = g.fetch;
+  const Q = g.Request;
+  if (own !== at && typeof F === 'function' && typeof Q === 'function') {
+    const U = g.URL;
+    const unmarked = (u) => {
+      if (typeof u !== 'string') return u;
+      try { const h = new U(u, at).href; const s = strip(h); return s === h ? u : s; } catch (e) { return u; }
+    };
+    const named = (o) => (o === undefined || o === null ? { referrer: own }
+      : typeof o === 'object' || typeof o === 'function' ? new Proxy(o, { get: (t, k) => { const v = Reflect.get(t, k); return k === 'referrer' && v === undefined ? own : v; } }) : o);
+    const R = new Proxy(Q, { construct: (t, a, n) => { if (a.length > 0) a[0] = unmarked(a[0]); try { return Reflect.construct(t, a, n); } catch (e) { throw thrown(e); } } });
+    define(g, 'Request', R);
+    define(Q.prototype, 'constructor', R);
+    define(g, 'fetch', { fetch(input, ...more) {
+      const pick = !(input instanceof Q) || (input.referrer === 'about:client' && input.referrerPolicy === '');
+      const args = [unmarked(input), ...(pick ? [named(more[0]), ...more.slice(1)] : more)];
+      return F.apply(this, args).then(undefined, (e) => { throw thrown(e); });
+    } }.fetch);
+  }
   const L = typeof WorkerLocation === 'function' ? WorkerLocation.prototype : null;
   if (L) {
     for (const name of ['href', 'search']) {
@@ -1472,10 +1503,11 @@ export type WorkerHooks = {
  * request it fulfills is answered: Chromium reports no end for a Shared
  * Worker's script, as Playwright does not follow Shared Workers. Only the
  * browser's load of a worker's script is answered so (workerScriptLoad): a
- * request the worker's own code makes at its script's marked URL goes on
- * to the test's other routes and the app's server with the mark taken off
- * (the URL the app's code meant, as the worker's location shows it), and
- * starts no instance of the token.
+ * request the worker's own code makes at its script's marked URL (an
+ * XMLHttpRequest's: its fetch and Request ask for no mark, workerScript)
+ * goes on to the test's other routes and the app's server with the mark
+ * taken off (the URL the app's code meant, as the worker's location shows
+ * it), and starts no instance of the token.
  */
 export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks = {}): Promise<void> {
   const counts = new Map<string, number>();

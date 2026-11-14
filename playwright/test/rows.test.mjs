@@ -635,20 +635,22 @@ async function drawsServer() {
     // parse.spec.ts's removed: /rhold.js is answered at /rrelease.
     if (u.pathname === '/rhold.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); rheld.push(res); return; }
     if (u.pathname === '/rrelease') { for (const r of rheld.splice(0)) r.end(''); res.end(''); return; }
-    // workers.spec.ts's workers, and the scripts they load.
+    // workers.spec.ts's workers, and the scripts they load; /wk/ref answers
+    // the Referer it was sent.
+    if (u.pathname === '/wk/ref') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end(req.headers.referer ?? 'none'); return; }
     const wk = {
       // Each Web Worker answers the message its page posts as it starts it,
       // and sends what its own code gets at its script's URL (OWN).
-      '/wk/ded.js': `importScripts('dep.js'); onmessage = (e) => postMessage({ kind: 'ded-early', data: e.data }); postMessage({ kind: 'ded', draws: ${DRAWS}, href: location.href, dep: self.dep, stack: String(new Error('at').stack), errs: ${ERRS} }); ${OWN('ded')}`,
+      '/wk/ded.js': `importScripts('dep.js'); onmessage = (e) => postMessage({ kind: 'ded-early', data: e.data }); postMessage({ kind: 'ded', draws: ${DRAWS}, href: location.href, dep: self.dep, stack: String(new Error('at').stack), errs: ${ERRS} }); ${OWN('ded')} ${REFS}.then((v) => postMessage({ kind: 'ded-ref', ...v }));`,
       '/wk/dep.js': 'self.dep = \'dep\';',
-      '/wk/mod.js': `import { dep } from './lib.mjs'; self.onmessage = (e) => postMessage({ kind: 'mod-early', data: e.data }); postMessage({ kind: 'mod', draws: ${DRAWS}, href: location.href, dep, meta: import.meta.url, top: String(new Error('at').stack), errs: ${ERRS} }); ${OWN('mod')}`,
+      '/wk/mod.js': `import { dep } from './lib.mjs'; self.onmessage = (e) => postMessage({ kind: 'mod-early', data: e.data }); postMessage({ kind: 'mod', draws: ${DRAWS}, href: location.href, dep, meta: import.meta.url, top: String(new Error('at').stack), errs: ${ERRS} }); ${OWN('mod')} ${REFS}.then((v) => postMessage({ kind: 'mod-ref', ...v }));`,
       '/wk/lib.mjs': 'export const dep = \'lib\';',
-      '/wk/shared.js': `onconnect = (e) => e.ports[0].postMessage({ kind: 'shared', draws: ${DRAWS}, href: location.href, stack: String(new Error('at').stack), errs: ${ERRS} });`,
+      '/wk/shared.js': `const ref = ${REFS}; onconnect = (e) => { e.ports[0].postMessage({ kind: 'shared', draws: ${DRAWS}, href: location.href, stack: String(new Error('at').stack), errs: ${ERRS} }); ref.then((v) => e.ports[0].postMessage({ kind: 'shared-ref', ...v })); };`,
       // Module Shared Workers: one plain, one (started by two names, c1
       // twice) served with a policy that refuses data: scripts. Each
       // connection after a worker's first is named by its number (c1+2).
-      '/wk/mshared.js': `import { dep } from './lib.mjs'; const top = String(new Error('at').stack); self.onconnect = (e) => e.ports[0].postMessage({ kind: 'mshared', draws: ${DRAWS}, href: location.href, dep, meta: import.meta.url, top, errs: ${ERRS} });`,
-      '/wk/cshared.js': `import { dep } from './lib.mjs'; let n = 0; const draws = ${DRAWS}; const errs = ${ERRS}; const top = String(new Error('at').stack); self.onconnect = (e) => { n++; e.ports[0].postMessage({ kind: self.name + (n > 1 ? \`+\${n}\` : ''), draws, href: location.href, dep, meta: import.meta.url, top, stack: String(new Error('at').stack), errs }); };`,
+      '/wk/mshared.js': `import { dep } from './lib.mjs'; const top = String(new Error('at').stack); const ref = ${REFS}; self.onconnect = (e) => { e.ports[0].postMessage({ kind: 'mshared', draws: ${DRAWS}, href: location.href, dep, meta: import.meta.url, top, errs: ${ERRS} }); ref.then((v) => e.ports[0].postMessage({ kind: 'mshared-ref', ...v })); };`,
+      '/wk/cshared.js': `import { dep } from './lib.mjs'; let n = 0; const draws = ${DRAWS}; const errs = ${ERRS}; const top = String(new Error('at').stack); const ref = ${REFS}; self.onconnect = (e) => { n++; if (n === 1) ref.then((v) => e.ports[0].postMessage({ kind: self.name + '-ref', ...v })); e.ports[0].postMessage({ kind: self.name + (n > 1 ? \`+\${n}\` : ''), draws, href: location.href, dep, meta: import.meta.url, top, stack: String(new Error('at').stack), errs }); };`,
     }[u.pathname];
     if (wk !== undefined) {
       res.writeHead(200, { 'content-type': 'text/javascript', ...(u.pathname === '/wk/cshared.js' ? { 'content-security-policy': 'script-src \'self\'' } : {}) });
@@ -1322,6 +1324,15 @@ const OWN = (k) => 'Promise.all([fetch(\'\'), fetch(\'#h\')].map((p) => p.then((
   'const x = new XMLHttpRequest(); x.open(\'GET\', \'\'); x.onload = () => ok(x.responseText); x.onerror = () => ok(\'error\'); x.send(); })))' +
   `.then((own) => postMessage({ kind: '${k}-own', own }));`;
 
+// What a worker's fetch and Request send, which /wk/ref answers with the
+// request's Referer (or 'none'): a fetch with no init, one with an init, one
+// of a Request made with no referrer, and one of a Request made with a
+// policy of its own (no-referrer); the URL fetch('') was answered at; and the
+// URLs of a Request at '' and at a fragment alone.
+const REFS = 'Promise.all([fetch(\'ref\'), fetch(\'ref\', { cache: \'no-store\' }), fetch(new Request(\'ref\')), fetch(new Request(\'ref\', { referrerPolicy: \'no-referrer\' }))]' +
+  '.map((p) => p.then((r) => r.text(), () => \'error\')).concat(fetch(\'\').then((r) => r.url, () => \'error\')))' +
+  '.then((ref) => ({ ref, req: [new Request(\'\').url, new Request(\'#h\').url] }))';
+
 // The marks a document at /wk of page t0 gives the workers workers.spec.ts
 // starts (WK_STARTS).
 function workerMarks(seed) {
@@ -1333,7 +1344,7 @@ function workerMarks(seed) {
 }
 
 for (const engine of ENGINES) {
-  test(`seeded, in ${engine}: a page's classic and module Web Workers and its classic and module Shared Workers draw from the test's seed, the same at replay, a module Shared Worker whose policy refuses data: too (each connection that came before its script ran given to it, in order), at the app's location, URLs and stack, loading what sits beside them, a Web Worker's own requests at its script's URL getting the app's script, and the app's server never sees keploy's mark; in Firefox each Shared Worker draws its own and is named`, async () => {
+  test(`seeded, in ${engine}: a page's classic and module Web Workers and its classic and module Shared Workers draw from the test's seed, the same at replay, a module Shared Worker whose policy refuses data: too (each connection that came before its script ran given to it, in order), at the app's location, URLs and stack, loading what sits beside them, a Web Worker's own requests at its script's URL getting the app's script, each worker's fetch and Request asking for its script's own URL and naming it as the Referer with no mark, and the app's server never sees keploy's mark in a URL; in Firefox each Shared Worker draws its own and is named`, async () => {
     const j = journal();
     const rec = await fakeAgent(j);
     let kept = {};
@@ -1394,6 +1405,19 @@ for (const engine of ENGINES) {
           assert.ok(body.startsWith(first), `${k}: ${body.slice(0, 120)}`);
           assert.doesNotMatch(body, /__keploy_worker/, k);
         }
+      }
+      // What each worker's fetch and Request send (REFS): its script's URL
+      // with no mark as the Referer the browser picks (no init, an init with
+      // no referrer, a Request made with no referrer), none for a Request
+      // with a policy of its own that sends none, and fetch('') and a Request
+      // at '' or a fragment alone at its script's URL with no mark.
+      const origin = new URL(w.ded.href).origin;
+      for (const [k, file] of [['ded', 'ded.js?x=1'], ['mod', 'mod.js'], ['shared', 'shared.js'], ['mshared', 'mshared.js'], ['c1', 'cshared.js'], ['c2', 'cshared.js']]) {
+        const url = `${origin}/wk/${file}`;
+        const v = w[`${k}-ref`];
+        assert.deepEqual(v.ref, [url, url, url, 'none', url], k);
+        assert.equal(v.req[0], url, k);
+        assert.ok([url, `${url}#h`].includes(v.req[1]), `${k}: ${v.req[1]}`);
       }
       assert.deepEqual([w.ded.dep, w.mod.dep, w.mshared.dep, w.c1.dep, w.c2.dep, w['c1+2'].dep], ['dep', 'lib', 'lib', 'lib', 'lib', 'lib']);
       // c1's second connection is c1's worker's: what it drew as it loaded.
