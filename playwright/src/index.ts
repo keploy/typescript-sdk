@@ -36,6 +36,7 @@
 import { test as base, expect } from '@playwright/test';
 import type { TestInfo } from '@playwright/test';
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { ACTION_FAIL, ACTION_SKIP, AgentClient, KeployError } from './agent';
 import type { Outcome, TestRef } from './agent';
@@ -172,9 +173,12 @@ const SOURCE_MAX = 1024;
 export function sourceOf(stack: string, dir = projectDir): string {
   const own = path.dirname(__filename);
   for (const line of stack.split('\n').slice(1)) {
-    const m = /\(?((?:file:\/\/)?[^\s()]+):(\d+):\d+\)?\s*$/.exec(line.trim());
+    const m = /\(?((?:file:\/\/)?[^()]+):(\d+):\d+\)?\s*$/.exec(line.trim());
     if (!m) continue;
-    let file = m[1].startsWith('file://') ? new URL(m[1]).pathname : m[1];
+    const location = m[1].replace(/^at\s+(?:async\s+)?/, '');
+    let file: string;
+    try { file = location.startsWith('file://') ? fileURLToPath(location) : location; }
+    catch { continue; }
     if (!path.isAbsolute(file) || path.dirname(file) === own || file.startsWith('node:')) continue;
     file = toSlash(path.relative(dir || process.cwd(), file));
     const s = `${file}:${m[2]}`;
