@@ -48,10 +48,11 @@ export function seedingFromEnv(env: NodeJS.ProcessEnv): Seeding {
 
 /** The line a worker shows once, at the first test it seeds. */
 export const SEEDED_LINE = 'keploy: each test\'s random numbers are seeded from a seed keploy keeps with the test\'s recording, so a replay draws the numbers its recording drew: ' +
-  'in the test browser Math.random, crypto.getRandomValues and crypto.randomUUID, and in the test process Math.random and the instances ' +
+  'in the test browser Math.random, crypto.getRandomValues and crypto.randomUUID, in its pages and the Web Workers and Shared Workers they start, ' +
+  'and in the test process Math.random and the instances ' +
   `${FAKER} makes as it loads (faker, fakerDE, ...), from the test's begin to its end ` +
   '(its beforeEach and afterEach hooks too). ' +
-  'Web Workers and Service Workers keep the browser\'s own, and so does a page the app opens that keploy cannot place (each one is named); ' +
+  'Service Workers keep the browser\'s own, and so do a page the app opens and a worker that keploy cannot place or reach (each one is named); ' +
   'the test process keeps its own crypto, and its own Math.random and faker outside every test (beforeAll, afterAll, a file as it loads) ' +
   'and while a worker fixture registered with this package\'s test.extend or test.use is set up. ' +
   'Own Faker instances, those the suite makes itself as a file loads (new Faker(...)), draw their own: seed them with seedFaker(instance, name) ' +
@@ -97,9 +98,17 @@ export function pageAddress(at: unknown): string {
  * storage to count its documents in (other than a page's first document),
  * or a frame of its origin inside one.
  */
-export type Unplaced = 'own' | 'frame' | 'popup' | 'uncounted' | 'nostorage';
+export type Unplaced = 'own' | 'frame' | 'popup' | 'uncounted' | 'nostorage' | 'worker' | 'shared';
 
-const UNPLACED: Record<Exclude<Unplaced, 'uncounted'>, string> = {
+// A worker keploy cannot reach: its line's reason (unplacedLine).
+const UNREACHED: Record<'worker' | 'shared', string> = {
+  worker: 'it is a worker started from a script keploy cannot mark (a blob: or data: URL, or a URL the browser refused with keploy\'s mark, as a Trusted Types policy may), ' +
+    'so keploy cannot put its seeding ahead of the script; start it from the script\'s http(s) URL to seed it.',
+  shared: 'it is a Shared Worker, and Firefox does not let keploy reach a Shared Worker\'s script to put its seeding ahead of it; ' +
+    'record and replay the test in Chromium or WebKit to seed it.',
+};
+
+const UNPLACED: Record<Exclude<Unplaced, 'uncounted' | 'worker' | 'shared'>, string> = {
   own: 'it is in a page the test opened, and it drew before keploy named that page: a script the test added with context.addInitScript ' +
     'runs in each of the page\'s documents before keploy\'s, and so does a draw the test makes there before newPage returns.',
   frame: 'it is a frame keploy cannot place among its parent\'s frames (one in a closed shadow root or in an object or embed element, ' +
@@ -121,6 +130,9 @@ const UNPLACED: Record<Exclude<Unplaced, 'uncounted'>, string> = {
  * (othersNow).
  */
 export function unplacedLine(name: string, at: string, why: Unplaced = 'popup', others = 0): string {
+  if (why === 'worker' || why === 'shared') {
+    return `keploy: in ${name}, the ${why === 'shared' ? 'Shared Worker' : 'worker'} at ${at} draws the browser's own random numbers, so its draws may differ at replay: ${UNREACHED[why]}`;
+  }
   const n = Math.floor(Number(others));
   const reason = why === 'uncounted'
     ? 'it is a frame under a parent of another origin with no session storage (a sandboxed frame without allow-same-origin), or a frame inside one: ' +
@@ -578,6 +590,101 @@ export const PAGE_KEY = '__keploy_random_page';
 // windows it opens and the frames it holds.
 export const DOC_KEY = '__keploy_random_doc';
 
+// The query parameter that marks a worker's script URL with the worker's
+// name in the seeding (initScript, workerMark); the fixture's route takes it
+// off before the request leaves the browser.
+export const WORKER_PARAM = '__keploy_worker';
+
+// A browser script's streams: hash, a string's 128 bits (cyrb128), and
+// stream, sfc32 over them, 32 random bits a call. A replay draws what its
+// recording drew only while these stay the same.
+const STREAM_JS = `  const imul = Math.imul;
+  const hash = (s) => {
+    let h1 = 1779033703, h2 = 3144134277, h3 = 1013904242, h4 = 2773480762;
+    for (let i = 0; i < s.length; i++) {
+      const k = s.charCodeAt(i);
+      h1 = h2 ^ imul(h1 ^ k, 597399067);
+      h2 = h3 ^ imul(h2 ^ k, 2869860233);
+      h3 = h4 ^ imul(h3 ^ k, 951274213);
+      h4 = h1 ^ imul(h4 ^ k, 2716044179);
+    }
+    h1 = imul(h3 ^ (h1 >>> 18), 597399067);
+    h2 = imul(h4 ^ (h2 >>> 22), 2869860233);
+    h3 = imul(h1 ^ (h3 >>> 17), 951274213);
+    h4 = imul(h2 ^ (h4 >>> 19), 2716044179);
+    h1 ^= h2 ^ h3 ^ h4; h2 ^= h1; h3 ^= h1; h4 ^= h1;
+    return [h1 >>> 0, h2 >>> 0, h3 >>> 0, h4 >>> 0];
+  };
+  const stream = (s) => {
+    let [a, b, c, d] = hash(s);
+    const next = () => {
+      let t = (a + b) | 0;
+      a = b ^ (b >>> 9);
+      b = (c + (c << 3)) | 0;
+      c = (c << 21) | (c >>> 11);
+      d = (d + 1) | 0;
+      t = (t + d) | 0;
+      c = (c + t) | 0;
+      return t >>> 0;
+    };
+    for (let i = 0; i < 15; i++) next();
+    return next;
+  };
+`;
+
+// A browser script's seeded Math.random, crypto.getRandomValues and
+// crypto.randomUUID, each drawing from from(name) ('random', 'grv',
+// 'uuid'): a stream, or null for the browser's own; and define, which
+// keeps a property's flags.
+const DRAW_JS = `  const define = (o, name, value) => {
+    const d = Object.getOwnPropertyDescriptor(o, name);
+    Object.defineProperty(o, name, { value, writable: d ? d.writable : true, enumerable: d ? d.enumerable : false, configurable: true });
+  };
+  const fill = (next, u) => {
+    for (let i = 0; i < u.length; i += 4) {
+      let w = next();
+      for (let j = 0; j < 4 && i + j < u.length; j++) { u[i + j] = w & 255; w >>>= 8; }
+    }
+  };
+  const realRandom = Math.random;
+  // 53 bits, as the browser's own Math.random gives.
+  define(Math, 'random', { random() {
+    const rnd = from('random');
+    if (rnd === null) return realRandom();
+    return ((rnd() >>> 5) * 67108864 + (rnd() >>> 6)) / 9007199254740992;
+  } }.random);
+  const C = typeof Crypto === 'function' ? Crypto.prototype : null;
+  if (C && typeof C.getRandomValues === 'function') {
+    const real = C.getRandomValues;
+    define(C, 'getRandomValues', { getRandomValues(array) {
+      // The browser's own call first: it refuses what the browser refuses
+      // (a float array, more than 65536 bytes, a this that is no Crypto).
+      const out = real.call(this, array);
+      const grv = from('grv');
+      if (grv !== null) fill(grv, new Uint8Array(out.buffer, out.byteOffset, out.byteLength));
+      return out;
+    } }.getRandomValues);
+  }
+  if (C && typeof C.randomUUID === 'function') {
+    const realUUID = C.randomUUID;
+    define(C, 'randomUUID', { randomUUID() {
+      const own = realUUID.call(this);
+      const uuid = from('uuid');
+      if (uuid === null) return own;
+      const b = new Uint8Array(16);
+      fill(uuid, b);
+      b[6] = (b[6] & 15) | 64;
+      b[8] = (b[8] & 63) | 128;
+      let h = '';
+      for (let i = 0; i < 16; i++) {
+        h += (b[i] + 256).toString(16).slice(1);
+        if (i === 3 || i === 5 || i === 7 || i === 9) h += '-';
+      }
+      return h;
+    } }.randomUUID);
+  }
+`;
+
 /**
  * The init script that names the page a test opened (context.newPage(), the
  * page fixture's among them) in each of its documents and frames: its place
@@ -715,45 +822,13 @@ export function placePages(context: BrowserContext, mark: string): { restore: ()
  * mark: the value by which firstScript marks a page's first document ('' for
  * none, so no document is marked).
  */
-export function initScript(seed: string, report = '', mark = ''): string {
+export function initScript(seed: string, report = '', mark = '', shared = true): string {
   return `(() => {
   const seed = ${JSON.stringify(seed)};
   const mark = ${JSON.stringify(mark)};
+  const shared = ${shared ? 'true' : 'false'};
   const g = globalThis;
-  const imul = Math.imul;
-  // cyrb128: a string's 128-bit hash, a stream's four words.
-  const hash = (s) => {
-    let h1 = 1779033703, h2 = 3144134277, h3 = 1013904242, h4 = 2773480762;
-    for (let i = 0; i < s.length; i++) {
-      const k = s.charCodeAt(i);
-      h1 = h2 ^ imul(h1 ^ k, 597399067);
-      h2 = h3 ^ imul(h2 ^ k, 2869860233);
-      h3 = h4 ^ imul(h3 ^ k, 951274213);
-      h4 = h1 ^ imul(h4 ^ k, 2716044179);
-    }
-    h1 = imul(h3 ^ (h1 >>> 18), 597399067);
-    h2 = imul(h4 ^ (h2 >>> 22), 2869860233);
-    h3 = imul(h1 ^ (h3 >>> 17), 951274213);
-    h4 = imul(h2 ^ (h4 >>> 19), 2716044179);
-    h1 ^= h2 ^ h3 ^ h4; h2 ^= h1; h3 ^= h1; h4 ^= h1;
-    return [h1 >>> 0, h2 >>> 0, h3 >>> 0, h4 >>> 0];
-  };
-  // sfc32 over those words: 32 random bits a call.
-  const stream = (s) => {
-    let [a, b, c, d] = hash(s);
-    const next = () => {
-      let t = (a + b) | 0;
-      a = b ^ (b >>> 9);
-      b = (c + (c << 3)) | 0;
-      c = (c << 21) | (c >>> 11);
-      d = (d + 1) | 0;
-      t = (t + d) | 0;
-      c = (c + t) | 0;
-      return t >>> 0;
-    };
-    for (let i = 0; i < 15; i++) next();
-    return next;
-  };
+${STREAM_JS}
   // The fixture's function that hears of a document with no place, taken
   // off the window so the page does not see it.
   let tell = null;
@@ -947,7 +1022,7 @@ export function initScript(seed: string, report = '', mark = ''): string {
       // An opener of another origin.
       given = null;
     }
-    const s = { doc, place, loads, counted, kind, up, frame, given, page: undefined, first: false, uncounted: false, opened: [], els: new WM(), held: 0, bound: new WM(), mo: null, numbers: new Mp(), counts: new Mp(), streams: null };
+    const s = { doc, place, loads, counted, kind, up, frame, given, page: undefined, first: false, uncounted: false, opened: [], workers: new Mp(), els: new WM(), held: 0, bound: new WM(), mo: null, numbers: new Mp(), counts: new Mp(), streams: null };
     watch(s);
     return s;
   };
@@ -1079,16 +1154,7 @@ export function initScript(seed: string, report = '', mark = ''): string {
     }
     return s.streams === false ? null : s.streams[name];
   };
-  const define = (o, name, value) => {
-    const d = Object.getOwnPropertyDescriptor(o, name);
-    Object.defineProperty(o, name, { value, writable: d ? d.writable : true, enumerable: d ? d.enumerable : false, configurable: true });
-  };
-  const fill = (next, u) => {
-    for (let i = 0; i < u.length; i += 4) {
-      let w = next();
-      for (let j = 0; j < 4 && i + j < u.length; j++) { u[i + j] = w & 255; w >>>= 8; }
-    }
-  };
+${DRAW_JS}
   const realOpen = g.open;
   if (typeof realOpen === 'function') {
     define(g, 'open', { open() {
@@ -1097,43 +1163,220 @@ export function initScript(seed: string, report = '', mark = ''): string {
       return w;
     } }.open);
   }
-  const realRandom = Math.random;
-  // 53 bits, as the browser's own Math.random gives.
-  define(Math, 'random', { random() {
-    const rnd = from('random');
-    if (rnd === null) return realRandom();
-    return ((rnd() >>> 5) * 67108864 + (rnd() >>> 6)) / 9007199254740992;
-  } }.random);
-  const C = typeof Crypto === 'function' ? Crypto.prototype : null;
-  if (C && typeof C.getRandomValues === 'function') {
-    const real = C.getRandomValues;
-    define(C, 'getRandomValues', { getRandomValues(array) {
-      // The browser's own call first: it refuses what the browser refuses
-      // (a float array, more than 65536 bytes, a this that is no Crypto).
-      const out = real.call(this, array);
-      const grv = from('grv');
-      if (grv !== null) fill(grv, new Uint8Array(out.buffer, out.byteOffset, out.byteLength));
-      return out;
-    } }.getRandomValues);
-  }
-  if (C && typeof C.randomUUID === 'function') {
-    const realUUID = C.randomUUID;
-    define(C, 'randomUUID', { randomUUID() {
-      const own = realUUID.call(this);
-      const uuid = from('uuid');
-      if (uuid === null) return own;
-      const b = new Uint8Array(16);
-      fill(uuid, b);
-      b[6] = (b[6] & 15) | 64;
-      b[8] = (b[8] & 63) | 128;
-      let h = '';
-      for (let i = 0; i < 16; i++) {
-        h += (b[i] + 256).toString(16).slice(1);
-        if (i === 3 || i === 5 || i === 7 || i === 9) h += '-';
+  // Workers. A Web Worker is named by its document's key, its script's
+  // path and how many workers the document started at that path before
+  // it; a Shared Worker, which the documents of a context share, by its
+  // script's path and its name alone. The script URL the worker starts
+  // with carries that name as a mark (workerMark), which the fixture's
+  // route takes off before the request leaves the browser: it answers
+  // with the worker's seeding and then the app's own script, unchanged
+  // (workerRoutes). A worker keploy cannot mark (a blob: or data: URL, or a
+  // marked URL the browser refuses), and a Shared Worker where the route
+  // does not reach its script (shared: false, Firefox), starts as the app
+  // asked and draws the browser's own numbers, and says so through report.
+  // A worker of a document with no place starts as the app asked: the
+  // document says so (its first draw is asked for here).
+  const construct = Reflect.construct;
+  const slice = Array.prototype.slice;
+  const hex = (s) => hash(s).map((w) => (w + 4294967296).toString(16).slice(1)).join('');
+  const addressOf = (u) => (u.protocol === 'http:' || u.protocol === 'https:' ? u.origin + u.pathname : u.protocol);
+  const wrap = (name, tokenOf) => {
+    const Real = g[name];
+    if (typeof Real !== 'function') return;
+    const W = { [name]: function (url) {
+      // Called without new, it throws as the browser's own does.
+      if (!new.target) return Real.apply(this, arguments);
+      const args = slice.call(arguments);
+      if (stale()) return construct(Real, args, new.target);
+      let u = null;
+      try {
+        const d = docNow();
+        u = new U(String(url), d ? d.baseURI : location.href);
+      } catch (e) { u = null; }
+      // A URL the browser cannot read: its own error.
+      if (u === null) return construct(Real, args, new.target);
+      const o = args[1];
+      const module = o !== null && typeof o === 'object' && o.type === 'module';
+      let at = '';
+      try { at = addressOf(u); } catch (e) { at = '?'; }
+      const why = u.protocol !== 'http:' && u.protocol !== 'https:' ? 'worker' : tokenOf(u, o);
+      if (why !== null && why.length === 32) {
+        const h = u.href;
+        const i = h.indexOf('#');
+        const b = i < 0 ? h : h.slice(0, i);
+        const m = b + (b.indexOf('?') < 0 ? '?' : '&') + ${JSON.stringify(WORKER_PARAM)} + '=' + (module ? 'm' : 'w') + '.' + why + (i < 0 ? '' : h.slice(i));
+        try { return construct(Real, [m].concat(args.slice(1)), new.target); } catch (e) {
+          // Refused with the mark (a Trusted Types policy): as the app asked.
+        }
       }
-      return h;
-    } }.randomUUID);
+      const w = construct(Real, args, new.target);
+      if (why !== '' && tell !== null) {
+        try { const r = tell(at, why === 'shared' ? 'shared' : 'worker', 0); if (r && typeof r.catch === 'function') r.catch(() => {}); } catch (e) {}
+      }
+      return w;
+    } }[name];
+    try {
+      W.prototype = Real.prototype;
+      Object.defineProperty(Real.prototype, 'constructor', { value: W, writable: true, enumerable: false, configurable: true });
+      Object.setPrototypeOf(W, Object.getPrototypeOf(Real));
+      define(g, name, W);
+    } catch (e) {
+      // A window that takes no property: its workers draw their own.
+    }
+  };
+  // A Web Worker's token, or '' for a document with no place (which says
+  // so at its first draw, asked for here).
+  wrap('Worker', (u) => {
+    const k = key();
+    if (k === null) { from('random'); return ''; }
+    const s = now();
+    const n = s.workers.get(u.pathname) || 0;
+    s.workers.set(u.pathname, n + 1);
+    return hex(k + 'worker\\n' + u.pathname + '\\n' + n);
+  });
+  // A Shared Worker's token: the same in every document of the context, so
+  // that the documents still share one worker.
+  wrap('SharedWorker', (u, o) => {
+    if (!shared) return 'shared';
+    const n = typeof o === 'string' ? o : o !== null && typeof o === 'object' && o.name !== undefined ? String(o.name) : '';
+    return hex(seed + '\\nshared worker\\n' + u.pathname + '\\n' + n);
+  });
+})();
+`;
+}
+
+/**
+ * A worker's script URL, marked (initScript), read back: its kind ('w' a
+ * classic worker's script, 'm' a module worker's, 'o' the app's own script
+ * that the answer to either loads, 'p' a module worker's seeding), its
+ * token, the instance n of a token ('o' and 'p'; -1 for 'w' and 'm'), and
+ * the URL with no mark, as the app asked for it. null for a URL with no
+ * mark keploy made.
+ */
+export type WorkerMark = { kind: 'w' | 'm' | 'o' | 'p'; token: string; n: number; url: string };
+
+export function workerMark(href: string): WorkerMark | null {
+  const i = href.indexOf('#');
+  const b = i < 0 ? href : href.slice(0, i);
+  const m = /[?&]__keploy_worker=([wmop])\.([0-9a-f]{32})(?:\.(\d{1,9}))?$/.exec(b);
+  if (m === null) return null;
+  const kind = m[1] as WorkerMark['kind'];
+  const numbered = kind === 'o' || kind === 'p';
+  if (numbered !== (m[3] !== undefined)) return null;
+  return { kind, token: m[2], n: numbered ? Number(m[3]) : -1, url: b.slice(0, m.index) + (i < 0 ? '' : href.slice(i)) };
+}
+
+/** url marked as kind, for the instance n of token (workerMark). */
+export function markWorker(url: string, kind: WorkerMark['kind'], token: string, n = -1): string {
+  const i = url.indexOf('#');
+  const b = i < 0 ? url : url.slice(0, i);
+  return `${b}${b.includes('?') ? '&' : '?'}${WORKER_PARAM}=${kind}.${token}${n >= 0 ? `.${n}` : ''}${i < 0 ? '' : url.slice(i)}`;
+}
+
+/**
+ * The seeding of a worker's global scope, run before the app's script:
+ * one stream for each of Math.random, crypto.getRandomValues and
+ * crypto.randomUUID, from the worker's token (initScript) and n, the
+ * instance of the token (a Shared Worker started again after its documents
+ * closed is the next). Its location (href, search, toString) does not show
+ * the mark kind.token the worker's URL carries; a module worker's
+ * import.meta.url, and a stack trace, show it.
+ */
+export function workerScript(token: string, n: number, kind: 'w' | 'm'): string {
+  return `(() => {
+  const g = globalThis;
+  const k = ${JSON.stringify(`${token}\n${n}\n`)};
+${STREAM_JS}
+  const streams = { random: stream(k + 'Math.random'), grv: stream(k + 'crypto.getRandomValues'), uuid: stream(k + 'crypto.randomUUID') };
+  const from = (name) => streams[name];
+${DRAW_JS}
+  const M = ${JSON.stringify(`${WORKER_PARAM}=${kind}.${token}`)};
+  const strip = (h) => {
+    const s = String(h);
+    const i = s.indexOf('#');
+    const b = i < 0 ? s : s.slice(0, i);
+    for (const c of ['?', '&']) if (b.endsWith(c + M)) return b.slice(0, b.length - M.length - 1) + (i < 0 ? '' : s.slice(i));
+    return s;
+  };
+  const L = typeof WorkerLocation === 'function' ? WorkerLocation.prototype : null;
+  if (L) {
+    for (const name of ['href', 'search']) {
+      try {
+        const d = Object.getOwnPropertyDescriptor(L, name);
+        if (!d || typeof d.get !== 'function') continue;
+        const get = d.get;
+        const v = name === 'href'
+          ? { get href() { return strip(get.call(this)); } }
+          : { get search() { const s = get.call(this); const i = s.indexOf(M); if (i < 1) return s; const t = s.slice(0, i - 1); return t === '?' ? '' : t; } };
+        Object.defineProperty(L, name, { get: Object.getOwnPropertyDescriptor(v, name).get, set: d.set, enumerable: d.enumerable, configurable: true });
+      } catch (e) {}
+    }
+    try {
+      const t = L.toString;
+      if (typeof t === 'function') define(L, 'toString', { toString() { return strip(t.call(this)); } }.toString);
+    } catch (e) {}
   }
 })();
 `;
+}
+
+/**
+ * Answers each marked worker script the test's context asks for: a
+ * classic worker's with its seeding, then importScripts of the app's own
+ * script; a module worker's with an import of its seeding, then one of
+ * the app's own; the app's own script with what its server answered to
+ * the worker's request (fetched once, unchanged); a module worker's
+ * seeding with workerScript. An answer that is not ok goes to the worker
+ * as the server gave it, and a request keploy cannot fetch goes on with
+ * no mark. Each instance of a token (a Shared Worker started again) is the
+ * next n.
+ */
+export async function workerRoutes(context: BrowserContext): Promise<void> {
+  const counts = new Map<string, number>();
+  const kept = new Map<string, { status: number; headers: Record<string, string>; body: Buffer }>();
+  // The answer's headers, but its encoding and length: the body given is
+  // decoded, and of another length.
+  const headersOf = (h: Record<string, string>): Record<string, string> => {
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(h)) if (k !== 'content-encoding' && k !== 'content-length') out[k] = v;
+    return out;
+  };
+  await context.route((u) => u.searchParams.has(WORKER_PARAM), async (route) => {
+    const m = workerMark(route.request().url());
+    if (m === null) {
+      await route.fallback();
+      return;
+    }
+    if (m.kind === 'p') {
+      await route.fulfill({ status: 200, contentType: 'text/javascript', body: workerScript(m.token, m.n, 'm') });
+      return;
+    }
+    if (m.kind === 'o') {
+      const k = kept.get(`${m.token}.${m.n}`);
+      kept.delete(`${m.token}.${m.n}`);
+      if (k === undefined) await route.continue({ url: m.url });
+      else await route.fulfill(k);
+      return;
+    }
+    const n = counts.get(m.token) ?? 0;
+    counts.set(m.token, n + 1);
+    let answer;
+    try {
+      answer = await route.fetch({ url: m.url });
+    } catch {
+      await route.continue({ url: m.url });
+      return;
+    }
+    const headers = headersOf(answer.headers());
+    if (!answer.ok()) {
+      await route.fulfill({ status: answer.status(), headers, body: await answer.body() });
+      return;
+    }
+    kept.set(`${m.token}.${n}`, { status: answer.status(), headers, body: await answer.body() });
+    const own = JSON.stringify(markWorker(m.url, 'o', m.token, n));
+    const body = m.kind === 'w'
+      ? `${workerScript(m.token, n, 'w')}importScripts(${own});\n`
+      : `import ${JSON.stringify(markWorker(m.url, 'p', m.token, n))};\nimport ${own};\n`;
+    await route.fulfill({ status: answer.status(), headers, body });
+  });
 }

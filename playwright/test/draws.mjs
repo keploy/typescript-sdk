@@ -31,10 +31,11 @@ export const BLANK_DRAWS = '({ random: [Math.random(), Math.random()], bytes: Ar
  * reading it throws too. element
  * is the window's frameElement, read through a getter. doc is its document
  * (with URL beside it), for a document whose frames the row makes. opener
- * is the window's opener (none when undefined).
+ * is the window's opener (none when undefined). globals: more of the
+ * window's globals (its URL, Worker, SharedWorker).
  */
 export const OTHER = Symbol('a parent of another origin');
-export function documentAt(script, path = '/p', storage = new Map(), page = 't0', { report = '', told = [], origin = 'http://h', href = undefined, parent = undefined, doc = undefined, frames = undefined, element = undefined, opener = undefined } = {}) {
+export function documentAt(script, path = '/p', storage = new Map(), page = 't0', { report = '', told = [], origin = 'http://h', href = undefined, parent = undefined, doc = undefined, frames = undefined, element = undefined, opener = undefined, globals = {} } = {}) {
   // As the browser's: a this that is no Crypto is refused.
   class Crypto {
     getRandomValues(a) { if (!(this instanceof Crypto)) throw new TypeError('Illegal invocation'); return webcrypto.getRandomValues(a); }
@@ -50,6 +51,7 @@ export function documentAt(script, path = '/p', storage = new Map(), page = 't0'
   if (element !== undefined) Object.defineProperty(ctx, 'frameElement', { get() { return element; }, configurable: true, enumerable: true });
   if (doc !== undefined) { ctx.document = doc; ctx.URL = URL; }
   if (opener !== undefined) ctx.opener = opener;
+  Object.assign(ctx, globals);
   vm.createContext(ctx);
   // A top window: its own parent and top.
   vm.runInContext('globalThis.parent = globalThis; globalThis.top = globalThis;', ctx);
@@ -64,4 +66,22 @@ export function documentAt(script, path = '/p', storage = new Map(), page = 't0'
   if (script) vm.runInContext(script, ctx);
   if (page !== null) vm.runInContext(pageScript(page), ctx);
   return { ctx, run: (code) => vm.runInContext(code, ctx), draws: () => JSON.parse(JSON.stringify(vm.runInContext(DRAWS, ctx))) };
+}
+
+// A worker's global scope: its own Crypto and a location whose href,
+// search and toString come from WorkerLocation.prototype.
+export function workerAt(href, prelude) {
+  class Crypto {
+    getRandomValues(a) { return webcrypto.getRandomValues(a); }
+    randomUUID() { return webcrypto.randomUUID(); }
+  }
+  class WorkerLocation {
+    get href() { return href; }
+    get search() { return new URL(href).search; }
+    toString() { return href; }
+  }
+  const ctx = { Crypto, crypto: new Crypto(), WorkerLocation, location: new WorkerLocation() };
+  vm.createContext(ctx);
+  if (prelude) vm.runInContext(prelude, ctx);
+  return { run: (code) => vm.runInContext(code, ctx), draws: () => JSON.parse(JSON.stringify(vm.runInContext(DRAWS, ctx))) };
 }

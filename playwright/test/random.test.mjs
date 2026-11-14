@@ -3,13 +3,13 @@
 // a page. No browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DOC_KEY, ENV_SEED_RANDOM, FAKER, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, esmFile, exportOf, fakerLine, fakersIn, fakersOf, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatFaker, seatRandom, seedFaker, seedingFromEnv, setAside, unplacedLine, unseededLine } from '../dist/random.js';
+import { DOC_KEY, ENV_SEED_RANDOM, FAKER, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, esmFile, exportOf, fakerLine, fakersIn, fakersOf, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatFaker, seatRandom, seedFaker, seedingFromEnv, setAside, unplacedLine, unseededLine, WORKER_PARAM, markWorker, workerMark, workerScript, workerRoutes } from '../dist/random.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SEED } from '../dist/agent.js';
-import { OTHER, documentAt } from './draws.mjs';
+import { OTHER, documentAt, workerAt } from './draws.mjs';
 
 // Two seeds, as keploy answers them.
 const S1 = '0123456789abcdef0123456789abcdef';
@@ -33,10 +33,11 @@ test('seeding is on unless KEPLOY_SEED_RANDOM turns it off; another value is ref
 
 test('the lines say what is seeded, what is not, where the seed lives, and how to turn it off or on', () => {
   assert.equal(SEEDED_LINE, 'keploy: each test\'s random numbers are seeded from a seed keploy keeps with the test\'s recording, so a replay draws the numbers its recording drew: ' +
-    'in the test browser Math.random, crypto.getRandomValues and crypto.randomUUID, and in the test process Math.random and the instances ' +
+    'in the test browser Math.random, crypto.getRandomValues and crypto.randomUUID, in its pages and the Web Workers and Shared Workers they start, ' +
+    'and in the test process Math.random and the instances ' +
     '@faker-js/faker makes as it loads (faker, fakerDE, ...), from the test\'s begin to its end ' +
     '(its beforeEach and afterEach hooks too). ' +
-    'Web Workers and Service Workers keep the browser\'s own, and so does a page the app opens that keploy cannot place (each one is named); ' +
+    'Service Workers keep the browser\'s own, and so do a page the app opens and a worker that keploy cannot place or reach (each one is named); ' +
     'the test process keeps its own crypto, and its own Math.random and faker outside every test (beforeAll, afterAll, a file as it loads) ' +
     'and while a worker fixture registered with this package\'s test.extend or test.use is set up. ' +
     'Own Faker instances, those the suite makes itself as a file loads (new Faker(...)), draw their own: seed them with seedFaker(instance, name) ' +
@@ -1327,4 +1328,168 @@ test('a document that a second run of the script takes over (WebKit runs it in a
   d.run('open()');
   assert.equal(store.get(LOADS_KEY), '{"blank":1,"/p":1}');
   assert.deepEqual(drew, documentAt(initScript(S1), '/p', new Map(), 't0').draws());
+});
+
+// Workers: the page's Worker and SharedWorker mark the script URL with the
+// worker's token; the route answers the marked script with the worker's
+// seeding, then the app's own script.
+const TOKEN = /^[0-9a-f]{32}$/;
+const workerGlobals = () => {
+  const made = [];
+  class Worker { constructor(url, opts) { made.push([String(url), opts]); } }
+  class SharedWorker { constructor(url, opts) { made.push([String(url), opts]); } }
+  return { made, globals: { URL, Worker, SharedWorker } };
+};
+
+test('a worker\'s mark: what markWorker makes, workerMark reads back, the URL as the app asked for it, query and fragment kept; any other URL has none', () => {
+  const t = 'ab'.repeat(16);
+  for (const url of ['http://h/w.js', 'http://h/w.js?a=1', 'http://h/w.js?', 'http://h/w.js#f', 'http://h/w.js?a=1#f?x']) {
+    for (const [kind, n] of [['w', -1], ['m', -1], ['o', 0], ['p', 7]]) {
+      const m = markWorker(url, kind, t, n);
+      assert.ok(new URL(m).searchParams.has(WORKER_PARAM), m);
+      assert.deepEqual(workerMark(m), { kind, token: t, n, url }, m);
+    }
+  }
+  assert.equal(markWorker('http://h/w.js?a=1#f', 'w', t), `http://h/w.js?a=1&__keploy_worker=w.${t}#f`);
+  for (const u of ['http://h/w.js', `http://h/w.js?__keploy_worker=w.${t}&a=1`, `http://h/w.js?__keploy_worker=x.${t}`, `http://h/w.js?__keploy_worker=w.${t.toUpperCase()}`,
+    `http://h/w.js?__keploy_worker=w.${t}.0`, `http://h/w.js?__keploy_worker=o.${t}`, `http://h/w.js?__keploy_worker=w.${t.slice(1)}`]) {
+    assert.equal(workerMark(u), null, u);
+  }
+});
+
+test('a document\'s Web Worker starts at its script URL marked with its own token: the same each run, another for the next worker at that path, another seed or page; a module worker\'s is marked so; it keeps new, instanceof and its constructor', () => {
+  const at = (seed, page, script = '', path = '/p') => {
+    const w = workerGlobals();
+    const d = documentAt(initScript(seed), path, new Map(), page, { globals: w.globals });
+    d.run(script || 'globalThis.a = new Worker("/w.js?q=1#f"); globalThis.b = new Worker("w.js"); globalThis.c = new Worker("/x/m.js", { type: "module" });');
+    return { d, made: w.made.map(([u, o]) => [workerMark(u), o === undefined ? undefined : JSON.parse(JSON.stringify(o))]) };
+  };
+  const { d, made } = at(S1, 't0');
+  assert.deepEqual(made.map(([m]) => [m.kind, m.url, m.n]), [['w', 'http://h/w.js?q=1#f', -1], ['w', 'http://h/w.js', -1], ['m', 'http://h/x/m.js', -1]]);
+  assert.deepEqual(made[2][1], { type: 'module' });
+  for (const [m] of made) assert.match(m.token, TOKEN);
+  assert.equal(new Set(made.map(([m]) => m.token)).size, 3);
+  assert.deepEqual(at(S1, 't0').made, made);
+  assert.notEqual(at(S2, 't0').made[0][0].token, made[0][0].token);
+  assert.notEqual(at(S1, 't1').made[0][0].token, made[0][0].token);
+  assert.equal(d.run('a instanceof Worker && Worker.prototype.constructor === Worker && Worker.name === "Worker" && Worker.length === 1'), true);
+  assert.throws(() => d.run('Worker("/w.js")'), TypeError);
+});
+
+test('a worker keploy cannot mark starts as the app asked and is named once with why; one of a document with no place starts as asked, the document named', () => {
+  const told = [];
+  const w = workerGlobals();
+  const d = documentAt(initScript(S1, 'tell'), '/p', new Map(), 't0', { report: 'tell', told, globals: w.globals });
+  d.run('new Worker("blob:http://h/0f0e"); new Worker("data:text/javascript,1"); new Worker("blob:http://h/0f0e");');
+  assert.deepEqual(w.made.map(([u]) => u), ['blob:http://h/0f0e', 'data:text/javascript,1', 'blob:http://h/0f0e']);
+  assert.deepEqual(told, [['blob:', 'worker'], ['data:', 'worker'], ['blob:', 'worker']]);
+  // The browser refuses the marked URL (a Trusted Types policy): as asked.
+  const told2 = [];
+  const made = [];
+  class Picky { constructor(url) { if (workerMark(String(url)) !== null) throw new TypeError('refused'); made.push(String(url)); } }
+  documentAt(initScript(S1, 'tell'), '/p', new Map(), 't0', { report: 'tell', told: told2, globals: { URL, Worker: Picky } }).run('new Worker("/w.js")');
+  assert.deepEqual([made, told2], [["/w.js"], [['http://h/w.js', 'worker']]]);
+  // No page names the document: its worker is not marked, the document is named.
+  const told3 = [];
+  const w3 = workerGlobals();
+  documentAt(initScript(S1, 'tell'), '/p', new Map(), null, { report: 'tell', told: told3, globals: w3.globals }).run('new Worker("/w.js")');
+  assert.deepEqual([w3.made.map(([u]) => u), told3], [['/w.js'], ['http://h/p']]);
+});
+
+test('a Shared Worker\'s token is the same in every document of the test, by script path and name, so its documents still share it; where the route cannot reach it (shared: false) it starts as asked and is named', () => {
+  const tokens = (seed, page, path, script, shared = true, told = []) => {
+    const w = workerGlobals();
+    documentAt(initScript(seed, 'tell', '', shared), path, new Map(), page, { report: 'tell', told, globals: w.globals }).run(script);
+    return w.made.map(([u, o]) => [workerMark(u), o === undefined ? undefined : JSON.parse(JSON.stringify(o))]);
+  };
+  const s = 'new SharedWorker("/s.js"); new SharedWorker("/s.js", "n"); new SharedWorker("/s.js", { name: "n", type: "module" }); new SharedWorker("/t.js");';
+  const a = tokens(S1, 't0', '/p', s);
+  assert.deepEqual(a.map(([m]) => m.kind), ['w', 'w', 'm', 'w']);
+  assert.deepEqual(tokens(S1, 't1', '/q', s), a);
+  assert.equal(a[1][0].token, a[2][0].token);
+  assert.equal(new Set([a[0], a[1], a[3]].map(([m]) => m.token)).size, 3);
+  assert.notEqual(tokens(S2, 't0', '/p', s)[0][0].token, a[0][0].token);
+  const told = [];
+  const off = tokens(S1, 't0', '/p', 'new SharedWorker("/s.js")', false, told);
+  assert.deepEqual([off, told], [[[null, undefined]], [['http://h/s.js', 'shared']]]);
+});
+
+test('the lines for a worker keploy cannot reach say what it is, why, and the next step', () => {
+  assert.equal(unplacedLine('t', 'blob:', 'worker'), 'keploy: in t, the worker at blob: draws the browser\'s own random numbers, so its draws may differ at replay: ' +
+    'it is a worker started from a script keploy cannot mark (a blob: or data: URL, or a URL the browser refused with keploy\'s mark, as a Trusted Types policy may), ' +
+    'so keploy cannot put its seeding ahead of the script; start it from the script\'s http(s) URL to seed it.');
+  assert.equal(unplacedLine('t', 'http://h/s.js', 'shared'), 'keploy: in t, the Shared Worker at http://h/s.js draws the browser\'s own random numbers, so its draws may differ at replay: ' +
+    'it is a Shared Worker, and Firefox does not let keploy reach a Shared Worker\'s script to put its seeding ahead of it; ' +
+    'record and replay the test in Chromium or WebKit to seed it.');
+});
+
+test('a worker\'s seeding draws the same numbers for a token and instance every run, others for another; its location shows no mark, its own query and fragment kept', () => {
+  const t = 'cd'.repeat(16);
+  const a = workerAt(markWorker('http://h/w.js', 'w', t), workerScript(t, 0, 'w')).draws();
+  assert.deepEqual(workerAt('http://h/w.js', workerScript(t, 0, 'w')).draws(), a);
+  assert.match(a.uuid, UUID_V4);
+  assert.notDeepEqual(workerAt('http://h/w.js', workerScript(t, 1, 'w')).draws().random, a.random);
+  assert.notDeepEqual(workerAt('http://h/w.js', workerScript('ef'.repeat(16), 0, 'w')).draws().random, a.random);
+  assert.notDeepEqual(workerAt('http://h/w.js', '').draws().random, a.random);
+  for (const [url, search] of [['http://h/w.js', ''], ['http://h/w.js?a=1', '?a=1'], ['http://h/w.js?', ''], ['http://h/w.js?a=1#f', '?a=1']]) {
+    for (const kind of ['w', 'm']) {
+      const w = workerAt(markWorker(url, kind, t), workerScript(t, 0, kind));
+      assert.deepEqual([w.run('location.href'), w.run('location.search'), w.run('String(location)')], [url, search, url], `${kind} ${url}`);
+    }
+  }
+  // Another worker's mark is not this one's: shown as it is.
+  const other = markWorker('http://h/w.js', 'w', 'ef'.repeat(16));
+  assert.equal(workerAt(other, workerScript(t, 0, 'w')).run('location.href'), other);
+});
+
+// A context whose route keeps its matcher and handler, and a route of it
+// that records what the handler did.
+function routed() {
+  const r = {};
+  const context = { route: async (match, handler) => { r.match = match; r.handler = handler; } };
+  r.ask = async (url, answer) => {
+    const did = [];
+    const route = {
+      request: () => ({ url: () => url }),
+      fetch: async (o) => { did.push(['fetch', o.url]); if (answer instanceof Error) throw answer; return answer; },
+      fulfill: async (o) => { did.push(['fulfill', { ...o, body: String(o.body) }]); },
+      continue: async (o) => { did.push(['continue', o.url]); },
+      fallback: async () => { did.push(['fallback']); },
+    };
+    await r.handler(route);
+    return did;
+  };
+  return { r, context };
+}
+const answerOf = (status, body, headers = { 'content-type': 'text/javascript', 'content-encoding': 'gzip', 'content-length': '3', 'x-a': '1' }) =>
+  ({ ok: () => status >= 200 && status < 300, status: () => status, headers: () => headers, body: async () => Buffer.from(body) });
+
+test('workerRoutes answers a marked classic worker script with its seeding then importScripts of the app\'s own, fetched once and given unchanged; each start of a token is the next instance', async () => {
+  const { r, context } = routed();
+  await workerRoutes(context);
+  const t = '01'.repeat(16);
+  assert.equal(r.match(new URL(markWorker('http://h/w.js', 'w', t))), true);
+  assert.equal(r.match(new URL('http://h/w.js?a=1')), false);
+  const headers = { 'content-type': 'text/javascript', 'x-a': '1' };
+  const own0 = markWorker('http://h/w.js?a=1', 'o', t, 0);
+  assert.deepEqual(await r.ask(markWorker('http://h/w.js?a=1', 'w', t), answerOf(200, 'app()')), [['fetch', 'http://h/w.js?a=1'],
+    ['fulfill', { status: 200, headers, body: `${workerScript(t, 0, 'w')}importScripts(${JSON.stringify(own0)});\n` }]]);
+  assert.deepEqual(await r.ask(own0), [['fulfill', { status: 200, headers, body: 'app()' }]]);
+  // Asked again (the browser's own retry): not kept, so as the app asked.
+  assert.deepEqual(await r.ask(own0), [['continue', 'http://h/w.js?a=1']]);
+  const second = await r.ask(markWorker('http://h/w.js?a=1', 'w', t), answerOf(200, 'app()'));
+  assert.equal(second[1][1].body, `${workerScript(t, 1, 'w')}importScripts(${JSON.stringify(markWorker('http://h/w.js?a=1', 'o', t, 1))});\n`);
+});
+
+test('workerRoutes answers a module worker script with an import of its seeding then one of the app\'s own; its seeding is workerScript; an answer not ok goes as given, one it cannot fetch goes on unmarked, a malformed mark falls back', async () => {
+  const { r, context } = routed();
+  await workerRoutes(context);
+  const t = '23'.repeat(16);
+  const did = await r.ask(markWorker('http://h/m.js', 'm', t), answerOf(200, 'export {}'));
+  assert.equal(did[1][1].body, `import ${JSON.stringify(markWorker('http://h/m.js', 'p', t, 0))};\nimport ${JSON.stringify(markWorker('http://h/m.js', 'o', t, 0))};\n`);
+  assert.deepEqual(await r.ask(markWorker('http://h/m.js', 'p', t, 0)), [['fulfill', { status: 200, contentType: 'text/javascript', body: workerScript(t, 0, 'm') }]]);
+  assert.deepEqual(await r.ask(markWorker('http://h/m.js', 'w', t), answerOf(404, 'no')), [['fetch', 'http://h/m.js'],
+    ['fulfill', { status: 404, headers: { 'content-type': 'text/javascript', 'x-a': '1' }, body: 'no' }]]);
+  assert.deepEqual(await r.ask(markWorker('http://h/m.js', 'w', t), new Error('net')), [['fetch', 'http://h/m.js'], ['continue', 'http://h/m.js']]);
+  assert.deepEqual(await r.ask(`http://h/m.js?__keploy_worker=w.${t}.3`), [['fallback']]);
 });

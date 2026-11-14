@@ -59,7 +59,7 @@ import { ACTION_FAIL, ACTION_SKIP, AgentClient, KeployError, RANDOM_OWN, RANDOM_
 import type { Outcome, Random, TestRef } from './agent';
 import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
-import { OFF_LINE, SEEDED_LINE, besideOf, fakerLine, fakersOf, freshSeed, initScript, othersNow, pageAddress, placePages, processRandom, seatFaker, seatRandom, seedingFromEnv, setAside, unplacedLine, unseededLine, type Fakers, type Unplaced } from './random';
+import { OFF_LINE, SEEDED_LINE, besideOf, fakerLine, fakersOf, freshSeed, initScript, othersNow, pageAddress, placePages, processRandom, seatFaker, seatRandom, seedingFromEnv, setAside, unplacedLine, unseededLine, workerRoutes, type Fakers, type Unplaced } from './random';
 import { Inflight } from './settle';
 
 export { expect, KeployError };
@@ -158,7 +158,7 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
   keploySeedRandom: [true, { option: true }],
 
   // After keployTest: its begin's answer holds the seed.
-  context: async ({ context, keployTest }, use) => {
+  context: async ({ context, keployTest, browserName }, use) => {
     void keployTest;
     const s = seeding;
     if (client === null || s === null || open === null) {
@@ -178,7 +178,7 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
       let opened: (page: Page | null | undefined) => Promise<boolean> = async () => false;
       await context.exposeBinding(report, async (source, at: unknown, why: unknown, above: unknown) => {
         const a = pageAddress(at);
-        const w: Unplaced = why === 'frame' || why === 'uncounted' || why === 'nostorage' ? why : (await opened(source.page)) ? 'own' : 'popup';
+        const w: Unplaced = why === 'frame' || why === 'uncounted' || why === 'nostorage' || why === 'worker' || why === 'shared' ? why : (await opened(source.page)) ? 'own' : 'popup';
         // Once for each address and reason: two documents at one address
         // (about:blank) may have no place for two reasons.
         const k = `${w}\n${a}`;
@@ -213,7 +213,10 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
       // The value by which the page fixture's script marks a page's first
       // document; the page's own scripts do not know it.
       const mark = freshSeed();
-      await context.addInitScript({ content: initScript(s.seed, report, mark) });
+      // The workers' scripts: Firefox's route does not reach a Shared
+      // Worker's, so there it is not marked, and says so.
+      await workerRoutes(context);
+      await context.addInitScript({ content: initScript(s.seed, report, mark, browserName !== 'firefox') });
       const placing = placePages(context, mark);
       restore = placing.restore;
       opened = placing.opened;

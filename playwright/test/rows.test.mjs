@@ -10,8 +10,8 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { LOADS_KEY, OFF_LINE, SEEDED_LINE, initScript, processRandom, unplacedLine, unseededLine } from '../dist/random.js';
-import { BLANK_DRAWS, DRAWS, documentAt } from './draws.mjs';
+import { LOADS_KEY, OFF_LINE, SEEDED_LINE, initScript, processRandom, unplacedLine, unseededLine, workerMark, workerScript } from '../dist/random.js';
+import { BLANK_DRAWS, DRAWS, documentAt, workerAt } from './draws.mjs';
 
 const PKG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(PKG, 'node_modules', '@playwright', 'test', 'cli.js');
@@ -609,7 +609,22 @@ async function drawsServer() {
     // parse.spec.ts's removed: /rhold.js is answered at /rrelease.
     if (u.pathname === '/rhold.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); rheld.push(res); return; }
     if (u.pathname === '/rrelease') { for (const r of rheld.splice(0)) r.end(''); res.end(''); return; }
+    // workers.spec.ts's workers, and the scripts they load.
+    const wk = {
+      '/wk/ded.js': `importScripts('dep.js'); postMessage({ kind: 'ded', draws: ${DRAWS}, href: location.href, dep: self.dep });`,
+      '/wk/dep.js': 'self.dep = \'dep\';',
+      '/wk/mod.js': `import { dep } from './lib.mjs'; postMessage({ kind: 'mod', draws: ${DRAWS}, href: location.href, dep });`,
+      '/wk/lib.mjs': 'export const dep = \'lib\';',
+      '/wk/shared.js': `onconnect = (e) => e.ports[0].postMessage({ kind: 'shared', draws: ${DRAWS}, href: location.href });`,
+    }[u.pathname];
+    if (wk !== undefined) { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end(wk); return; }
     res.writeHead(200, { 'content-type': 'text/html' });
+    if (u.pathname === '/wk') {
+      res.end(page('<script>window.__w = []; const take = (e) => window.__w.push(e.data);' +
+        'new Worker(\'/wk/ded.js?x=1\').onmessage = take; new Worker(\'/wk/mod.js\', { type: \'module\' }).onmessage = take;' +
+        'const s = new SharedWorker(\'/wk/shared.js\', \'sn\'); s.port.onmessage = take; s.port.start();</script>'));
+      return;
+    }
     if (u.pathname === '/draws') { res.end(page(`<iframe src="http://localhost:${srv.address().port}/frame"></iframe>`)); return; }
     if (u.pathname === '/frame') { res.end(page('frame')); return; }
     // /nest holds /frame of its own origin.
@@ -1241,6 +1256,54 @@ for (const engine of ENGINES) {
       const next = t.order.findIndex((o) => o.step === 'p removed');
       assert.ok(line >= 0 && line < next, `removed: ${JSON.stringify(t.order)}`);
     } finally { await d.close(); await a.close(); }
+  });
+}
+
+// The marks a document at /wk of page t0 gives the workers workers.spec.ts
+// starts: its Web Workers', then its Shared Worker's.
+function workerMarks(seed) {
+  const made = [];
+  class Worker { constructor(url) { made.push(workerMark(String(url))); } }
+  documentAt(initScript(seed), '/wk', new Map(), 't0', { globals: { URL, Worker, SharedWorker: Worker } })
+    .run('new Worker(\'/wk/ded.js?x=1\'); new Worker(\'/wk/mod.js\', { type: \'module\' }); new SharedWorker(\'/wk/shared.js\', \'sn\');');
+  return made;
+}
+
+for (const engine of ENGINES) {
+  test(`seeded, in ${engine}: a page's classic and module Web Workers and its Shared Worker draw from the test's seed, the same at replay, at the app's location and loading what sits beside them; in Firefox the Shared Worker draws its own and is named`, async () => {
+    const j = journal();
+    const rec = await fakeAgent(j);
+    let kept = {};
+    const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+      ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+    const env = (url) => ({ ...keployEnv(url), PW_BROWSER: engine });
+    const byKind = (r) => Object.fromEntries(r.drew.workers.map((w) => [w.kind, w]));
+    try {
+      const r = await drawRun(j, env(rec.url), ['workers.spec.ts'], ['workers']);
+      const w = byKind(r);
+      const [ded, mod, shared] = workerMarks(r.seeds.workers);
+      assert.deepEqual([ded.kind, mod.kind, shared.kind], ['w', 'm', 'w']);
+      assert.match(w.ded.href, /^http:\/\/127\.0\.0\.1:\d+\/wk\/ded\.js\?x=1$/);
+      assert.match(w.mod.href, /^http:\/\/127\.0\.0\.1:\d+\/wk\/mod\.js$/);
+      assert.match(w.shared.href, /^http:\/\/127\.0\.0\.1:\d+\/wk\/shared\.js$/);
+      assert.deepEqual([w.ded.dep, w.mod.dep], ['dep', 'lib']);
+      assert.deepEqual(w.ded.draws, workerAt('http://h/wk/ded.js?x=1', workerScript(ded.token, 0, 'w')).draws());
+      assert.deepEqual(w.mod.draws, workerAt('http://h/wk/mod.js', workerScript(mod.token, 0, 'm')).draws());
+      const model = workerAt('http://h/wk/shared.js', workerScript(shared.token, 0, 'w')).draws();
+      const said = r.tests.workers.stdout.split('\n').filter((l) => l.startsWith('keploy: in workers, ')).map((l) => l.replace(/:\d+\//, ':<port>/'));
+      if (engine === 'firefox') {
+        assert.notDeepEqual(w.shared.draws, model);
+        assert.deepEqual(said, [unplacedLine('workers', 'http://127.0.0.1:<port>/wk/shared.js', 'shared')]);
+      } else {
+        assert.deepEqual(w.shared.draws, model);
+        assert.deepEqual(said, []);
+      }
+      kept = r.seeds;
+      const p = byKind(await drawRun(j, env(rep.url), ['workers.spec.ts'], ['workers']));
+      assert.deepEqual([p.ded.draws, p.mod.draws], [w.ded.draws, w.mod.draws]);
+      if (engine === 'firefox') assert.notDeepEqual(p.shared.draws, w.shared.draws);
+      else assert.deepEqual(p.shared.draws, w.shared.draws);
+    } finally { await rep.close(); await rec.close(); }
   });
 }
 
