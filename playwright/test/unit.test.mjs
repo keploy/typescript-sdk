@@ -9,6 +9,7 @@ import path from 'node:path';
 import { AgentClient, KeployError } from '../dist/agent.js';
 import { decide } from '../dist/join.js';
 import { Inflight } from '../dist/settle.js';
+import { WorkerFiles } from '../dist/files.js';
 import { EventEmitter } from 'node:events';
 import { testRef, outcomeOf, sourceOf, keployText } from '../dist/index.js';
 
@@ -193,6 +194,36 @@ function fakeRequest(page) {
 async function ticks() {
   for (let i = 0; i < 5; i++) await Promise.resolve();
 }
+
+test('endGiven: sends {end: true} alone to the given route, and an answer other than ok is an error', async () => {
+  const a = await agent(() => ({ body: { v: 1, status: 'ok' } }));
+  try {
+    await new AgentClient(a.url, 'tok').endGiven();
+    assert.deepEqual(a.calls.map((c) => [c.path, c.body]), [['/agent/scope/given', { end: true }]]);
+  } finally { await a.close(); }
+  const b = await agent(() => ({ body: { v: 1, status: 'busy' } }));
+  try {
+    await rejects(new AgentClient(b.url, '').endGiven(), /end of the values given outside tests with status "busy"/);
+  } finally { await b.close(); }
+});
+
+test('WorkerFiles: the values keploy holds end only as the worker moves on to another file', () => {
+  const f = new WorkerFiles();
+  assert.equal(f.mustEnd('/p/a.spec.ts'), false, 'nothing held, no file yet');
+  f.gave();
+  assert.equal(f.mustEnd('/p/a.spec.ts'), false, 'a value given before the first file is that file\'s');
+  f.entered('/p/a.spec.ts');
+  assert.equal(f.mustEnd('/p/a.spec.ts'), false, 'the same file');
+  assert.equal(f.mustEnd(null), false, 'a place no file is known for');
+  assert.equal(f.mustEnd('/p/b.spec.ts'), true, 'another file');
+  f.ended();
+  f.entered('/p/b.spec.ts');
+  assert.equal(f.mustEnd('/p/c.spec.ts'), false, 'ended: nothing held');
+  f.gave();
+  f.entered(null);
+  assert.equal(f.mustEnd('/p/b.spec.ts'), false, 'entered(null) leaves the file as it was');
+  assert.equal(f.mustEnd('/p/c.spec.ts'), true);
+});
 
 test('settle: a cancel that comes while settle already waits wakes it (its page closes; then, for a service worker\'s call, the test closes its context)', async () => {
   for (const worker of [false, true]) {

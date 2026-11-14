@@ -32,7 +32,7 @@
 //     session token it signs, a name it stamps with the time), which keploy
 //     follows where the test's calls carry it; given in a test.beforeAll, it
 //     is the worker's, and keploy gives it to each test the worker begins
-//     after it.
+//     after it, until the worker moves on to another test file.
 // Any answer of the agent this package cannot trust fails the test.
 
 import { test as base, expect } from '@playwright/test';
@@ -43,6 +43,7 @@ import { ACTION_FAIL, ACTION_SKIP, AgentClient, KeployError } from './agent';
 import type { Outcome, TestRef } from './agent';
 import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
+import { WorkerFiles } from './files';
 import { Inflight } from './settle';
 
 export { expect, KeployError };
@@ -59,8 +60,33 @@ let client: AgentClient | null = null;
 // The project directory test files are named relative to.
 let projectDir = '';
 // The test this worker has open, if any: a value given while none is, is
-// the worker's.
+// the worker's, for the tests of its test file.
 let open: TestRef | null = null;
+// The test file this worker is in, and whether keploy holds values it gave
+// outside its tests.
+const files = new WorkerFiles();
+
+// enterFile ends the values keploy holds for this worker's earlier test file
+// before the worker works in file (files.ts), so no test of file carries
+// them. An end keploy refuses throws, and the worker stays in its earlier
+// file: the next test tries again.
+async function enterFile(c: AgentClient, file: string | null): Promise<void> {
+  if (files.mustEnd(file)) {
+    await c.endGiven();
+    files.ended();
+  }
+  files.entered(file);
+}
+
+// The test file of the hook that runs now (a test.beforeAll runs with its
+// file's first test's info), or null where Playwright gives none.
+function hookFile(): string | null {
+  try {
+    return base.info().file;
+  } catch {
+    return null;
+  }
+}
 
 type WorkerFixtures = { keployWorker: void };
 type TestFixtures = { keployTest: void };
@@ -107,6 +133,7 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
       return;
     }
     const ref = testRef(testInfo);
+    await enterFile(c, testInfo.file);
     const b = await c.begin(ref);
     if (b.action === ACTION_SKIP) {
       // The framework's own skip, with keploy's reason; no end follows.
@@ -133,7 +160,8 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
  * of this package's test, which runs once the worker claimed keploy's run),
  * it is the worker's: keploy gives it to each test the worker begins after
  * it, so a name a test file's setup mints once is followed in each of its
- * tests. A process no worker of this package's test runs in (a test file's
+ * tests. Once the worker moves on to another test file, this package ends
+ * that file's values, so no test of a later file carries them. A process no worker of this package's test runs in (a test file's
  * top level, globalSetup) has no test or worker to give it to, and given
  * fails there, naming where to give it instead.
  * Without keploy it returns value and does nothing else.
@@ -149,8 +177,12 @@ export async function given(name: string, value: string): Promise<string> {
       'or in its test.beforeAll (never at a test file\'s top level, in globalSetup, or in a hook of @playwright/test\'s own test)');
   }
   const outside = open === null;
+  const source = sourceOf(new Error().stack ?? '');
+  // A value given outside the tests is its test file's: the values an
+  // earlier file gave end first.
+  if (outside) await enterFile(c, hookFile());
   try {
-    await c.given(name, value, sourceOf(new Error().stack ?? ''));
+    await c.given(name, value, source);
   } catch (err) {
     if (outside && err instanceof KeployError && err.code === 'not_open') {
       // This worker claimed the run, so the refusal most likely comes from
@@ -161,6 +193,7 @@ export async function given(name: string, value: string): Promise<string> {
     }
     throw err;
   }
+  if (outside) files.gave();
   return value;
 }
 

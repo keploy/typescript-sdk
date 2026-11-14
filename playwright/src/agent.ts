@@ -181,6 +181,18 @@ export class AgentClient {
     }
     return a.variable;
   }
+
+  /**
+   * Ends the values this worker gave outside its tests: the agent drops
+   * them, and no test the worker begins after it carries them. Sent between
+   * tests, once the worker moved on to another test file.
+   */
+  async endGiven(): Promise<void> {
+    const a = await this.post(PATH_GIVEN, { end: true });
+    if (a.status !== 'ok') {
+      throw new KeployError(`keploy: the keploy agent answered the end of the values given outside tests with status ${JSON.stringify(a.status ?? '')}`);
+    }
+  }
 }
 
 /** A test's name on the wire: keploy builds its ID as [project::]file::name. */

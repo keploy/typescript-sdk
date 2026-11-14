@@ -280,6 +280,53 @@ test('a value given where no worker of this package\'s test claimed the run fail
   } finally { await a.close(); }
 });
 
+test('a worker ends a test file\'s values given outside its tests as it moves on to another file, and only when keploy holds some', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  try {
+    const { tests } = await playwright(['given-files-'], keployEnv(a.url));
+    assert.deepEqual(Object.fromEntries(Object.entries(tests).map(([k, t]) => [k, t.status])),
+      { a1: 'passed', a2: 'passed', b1: 'passed', c1: 'passed' });
+    const r = (f, n) => ref(`given-files-${f}.spec.ts`, n);
+    const ran = (f, n) => [['/agent/scope/begin', { ...r(f, n), canSkip: true }], ['/agent/scope/end', { ...r(f, n), outcome: 'passed' }]];
+    const g = (f, name, value) => ['/agent/scope/given', { name, value, source: `test/fixtures/given-files-${f}.spec.ts:5` }];
+    const end = ['/agent/scope/given', { end: true }];
+    const [b1Begin, b1End] = ran('b', 'b1');
+    assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
+      ['/agent/instance', { key: 'p1', dir: fs.realpathSync(PKG) }],
+      g('a', 'run', 'run-a'), ...ran('a', 'a1'), ...ran('a', 'a2'),
+      // b's first test: a's value ends before it begins.
+      end, b1Begin, g('b', 'own', 'own-b'), b1End,
+      // c's setup gives the same name: b's value was its test's, so nothing is held and no end comes.
+      g('c', 'run', 'run-c'), ...ran('c', 'c1'),
+    ]);
+  } finally { await a.close(); }
+});
+
+test('an end keploy refuses fails the next file\'s first test with keploy\'s reason, before it begins', async () => {
+  const j = journal();
+  const a = await fakeAgent(j, (c) => (c.path === '/agent/scope/given' && c.body.end
+    ? { status: 400, body: { error: 'bad_request', message: 'the values given outside tests were ended while x was open', remedy: 'end them in its afterAll' } }
+    : undefined));
+  try {
+    const { tests } = await playwright(['given-files-'], keployEnv(a.url));
+    assert.equal(tests.a1.status, 'passed');
+    assert.equal(tests.a2.status, 'passed');
+    assert.equal(tests.b1.status, 'failed');
+    assert.match(tests.b1.error, /keploy: the values given outside tests were ended while x was open \(end them in its afterAll\)/);
+    // b1 failed, so Playwright runs c in a new worker, which claims again and holds nothing.
+    assert.equal(tests.c1.status, 'passed');
+    const r = (f, n) => ref(`given-files-${f}.spec.ts`, n);
+    const ran = (f, n) => [['/agent/scope/begin', { ...r(f, n), canSkip: true }], ['/agent/scope/end', { ...r(f, n), outcome: 'passed' }]];
+    const claim = ['/agent/instance', { key: 'p1', dir: fs.realpathSync(PKG) }];
+    assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
+      claim, ['/agent/scope/given', { name: 'run', value: 'run-a', source: 'test/fixtures/given-files-a.spec.ts:5' }], ...ran('a', 'a1'), ...ran('a', 'a2'),
+      ['/agent/scope/given', { end: true }],
+      claim, ['/agent/scope/given', { name: 'run', value: 'run-c', source: 'test/fixtures/given-files-c.spec.ts:5' }], ...ran('c', 'c1'),
+    ]);
+  } finally { await a.close(); }
+});
+
 test('settle: a call in flight when the body ends is answered before the test ends', async () => {
   const j = journal();
   const a = await fakeAgent(j);
