@@ -1281,7 +1281,10 @@ export function markWorker(url: string, kind: WorkerMark['kind'], token: string,
  * instance of the token (a Shared Worker started again after its documents
  * closed is the next). Its location (href, search, toString) does not show
  * the mark kind.token the worker's URL carries; the app's script runs at
- * its own URL (workerAnswer).
+ * its own URL (workerAnswer). An Error's or a DOMException's stack read
+ * through its prototype's getter (Firefox's, whose stacks go on through
+ * the code that queued what runs) leaves out each frame at a URL keploy
+ * marked: keploy's own code.
  */
 export function workerScript(token: string, n: number, kind: 'w' | 'm' | 's' | 'x'): string {
   return `(() => {
@@ -1315,6 +1318,19 @@ ${DRAW_JS}
     try {
       const t = L.toString;
       if (typeof t === 'function') define(L, 'toString', { toString() { return strip(t.call(this)); } }.toString);
+    } catch (e) {}
+  }
+  // Firefox reads a stack through its prototype's getter, and the stack
+  // goes on through the code that queued what runs: keploy's answer, at a
+  // URL keploy marked. A stack read here shows no frame at such a URL.
+  const marked = new RegExp(${JSON.stringify(`[?&]${WORKER_PARAM}=`)});
+  for (const C of [g.Error, g.DOMException]) {
+    try {
+      const d = Object.getOwnPropertyDescriptor(C.prototype, 'stack');
+      const get = d.get;
+      if (typeof get !== 'function') continue;
+      const v = { get stack() { const s = get.call(this); return typeof s === 'string' ? s.split('\\n').filter((l) => !marked.test(l)).join('\\n') : s; } };
+      Object.defineProperty(C.prototype, 'stack', { get: Object.getOwnPropertyDescriptor(v, 'stack').get, set: d.set, enumerable: d.enumerable, configurable: true });
     } catch (e) {}
   }
 })();
@@ -1357,7 +1373,9 @@ export function cspAllowsData(headers: Record<string, string>): boolean {
  * seeding, in a microtask the answer queues, which runs as the answer ends,
  * before the worker takes any message or connection, and reports what the
  * app's script throws as the worker's own error, as an uncaught one at its
- * top level is. A module Web Worker imports its seeding (the route answers
+ * top level is (a Firefox stack, which goes on through the code that queued
+ * it, leaves the answer's frames out: workerScript). A module Web Worker
+ * imports its seeding (the route answers
  * that import, marked 'p') and then the app's script. Chromium and WebKit
  * let the route reach none of what a Shared Worker loads after its script,
  * so a module Shared Worker imports its seeding as a data: module, which

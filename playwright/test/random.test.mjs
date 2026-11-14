@@ -1442,6 +1442,33 @@ test('a worker\'s seeding draws the same numbers for a token and instance every 
   assert.equal(workerAt(other, workerScript(t, 0, 'w')).run('location.href'), other);
 });
 
+test('a worker\'s seeding: an Error\'s or a DOMException\'s stack read through its prototype\'s getter (Firefox) leaves out each frame at a URL whose query has keploy\'s mark, any kind; its setter, flags and a value that is no string are kept; a stack that is no getter stays as it was', () => {
+  const t = 'ab'.repeat(16);
+  const href = markWorker('http://h/w.js', 'w', t);
+  const kept = ['@http://h/w.js:1:2', `h@http://h/w.js?a__keploy_worker=w.${t}:7:8`];
+  const frames = [kept[0], `VoidFunction*@${href}:114:15`, `g@http://h/w.js?b=1&__keploy_worker=o.${t}:5:6`, `f@${markWorker('http://h/m.js', 'p', t, 0)}:3:4`, kept[1],
+    `promise callback*@${markWorker('http://h/s.js?q=1', 's', 'ef'.repeat(16))}:9:1`, ''];
+  class DOMException {}
+  const w = workerAt(href, '', { DOMException });
+  w.run('for (const C of [Error, DOMException]) Object.defineProperty(C.prototype, \'stack\', { get() { return this.s; }, set(v) { this.set = v; }, enumerable: false, configurable: true });');
+  w.run(workerScript(t, 0, 'w'));
+  // V8 gives each error its own stack; an object made from the prototype
+  // reads it through the prototype's getter, as Firefox's errors do.
+  for (const C of ['Error', 'DOMException']) {
+    assert.equal(w.run(`(() => { const e = Object.create(${C}.prototype); e.s = ${JSON.stringify(frames.join('\n'))}; return e.stack; })()`), [...kept, ''].join('\n'), C);
+    assert.equal(w.run(`(() => { const e = Object.create(${C}.prototype); e.stack = 'x'; return e.set; })()`), 'x', C);
+    assert.equal(w.run(`(() => { const e = Object.create(${C}.prototype); e.s = 7; return e.stack; })()`), 7, C);
+    const d = w.run(`Object.getOwnPropertyDescriptor(${C}.prototype, 'stack')`);
+    assert.deepEqual([typeof d.get, typeof d.set, d.enumerable, d.configurable], ['function', 'function', false, true], C);
+  }
+  // A stack that is a value on the prototype, or none (V8, WebKit): as it was.
+  const v = workerAt(href, '');
+  v.run('Object.defineProperty(Error.prototype, \'stack\', { value: \'v\', writable: true, enumerable: false, configurable: true });');
+  v.run(workerScript(t, 0, 'w'));
+  assert.deepEqual(JSON.parse(v.run('JSON.stringify(Object.getOwnPropertyDescriptor(Error.prototype, \'stack\'))')), { value: 'v', writable: true, enumerable: false, configurable: true });
+  assert.equal(workerAt(href, workerScript(t, 0, 'w')).run('Object.getOwnPropertyDescriptor(Error.prototype, \'stack\')'), undefined);
+});
+
 // A context whose route keeps its matcher and handler, and a route of it
 // that records what the handler did.
 function routed() {
