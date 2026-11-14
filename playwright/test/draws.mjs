@@ -47,7 +47,7 @@ export function documentAt(script, path = '/p', storage = new Map(), page = 't0'
   } else {
     ctx.sessionStorage = { getItem: (k) => (storage.has(k) ? storage.get(k) : null), setItem: (k, v) => { storage.set(k, String(v)); } };
   }
-  if (report) ctx[report] = (at, why, above) => { told.push(why === 'uncounted' ? [at, why, above] : why ? [at, why] : at); return Promise.resolve(); };
+  if (report) ctx[report] = (at, why, above) => { told.push(why === 'uncounted' || why === 'controlled' ? [at, why, above] : why ? [at, why] : at); return Promise.resolve(); };
   if (element !== undefined) Object.defineProperty(ctx, 'frameElement', { get() { return element; }, configurable: true, enumerable: true });
   if (doc !== undefined) { ctx.document = doc; ctx.URL = URL; }
   if (opener !== undefined) ctx.opener = opener;

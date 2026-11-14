@@ -37,7 +37,7 @@ test('the lines say what is seeded, what is not, where the seed lives, and how t
     'and in the test process Math.random and the instances ' +
     '@faker-js/faker makes as it loads (faker, fakerDE, ...), from the test\'s begin to its end ' +
     '(its beforeEach and afterEach hooks too). ' +
-    'Service Workers keep the browser\'s own, and so do a page the app opens and a worker that keploy cannot place or reach (each one is named); ' +
+    'A Service Worker, a page the app opens and a worker that keploy cannot place or reach keep the browser\'s own (each one is named); ' +
     'the test process keeps its own crypto, and its own Math.random and faker outside every test (beforeAll, afterAll, a file as it loads) ' +
     'and while a worker fixture registered with this package\'s test.extend or test.use is set up. ' +
     'Own Faker instances, those the suite makes itself as a file loads (new Faker(...)), draw their own: seed them with seedFaker(instance, name) ' +
@@ -1441,6 +1441,16 @@ test('a Shared Worker\'s token is the same in every document of the test, by scr
   assert.deepEqual([off, told], [[[null, undefined]], [['http://h/s.js', 'shared']]]);
 });
 
+test('the lines for a Service Worker and a worker one may answer say what it is, why, and the next step', () => {
+  const block = 'if the tests do not need it, set serviceWorkers: \'block\' in the project\'s use (Playwright then registers none, and keploy seeds the workers it would have answered).';
+  assert.equal(unplacedLine('t', 'http://h/sw.js', 'service'), 'keploy: in t, the Service Worker at http://h/sw.js draws the browser\'s own random numbers, so its draws may differ at replay: ' +
+    'keploy cannot put its seeding ahead of a Service Worker\'s script, and a worker whose script the Service Worker may answer starts unseeded (each one is named); ' + block);
+  assert.equal(unplacedLine('t', 'http://h/w.js', 'controlled', 0, 'http://h/sw.js'), 'keploy: in t, the worker at http://h/w.js draws the browser\'s own random numbers, so its draws may differ at replay: ' +
+    'a Service Worker (at http://h/sw.js) may answer the worker\'s script, and it would see keploy\'s __keploy_worker mark in the script\'s URL, so keploy starts the worker as the app asked; ' + block);
+  assert.equal(unplacedLine('t', 'http://h/w.js', 'controlled'), 'keploy: in t, the worker at http://h/w.js draws the browser\'s own random numbers, so its draws may differ at replay: ' +
+    'a Service Worker may answer the worker\'s script, and it would see keploy\'s __keploy_worker mark in the script\'s URL, so keploy starts the worker as the app asked; ' + block);
+});
+
 test('the lines for a worker keploy cannot reach say what it is, why, and the next step', () => {
   assert.equal(unplacedLine('t', 'blob:', 'worker'), 'keploy: in t, the worker at blob: draws the browser\'s own random numbers, so its draws may differ at replay: ' +
     'it is a worker started from a script keploy cannot mark (a blob: or data: URL, or a URL the browser refused with keploy\'s mark, as a Trusted Types policy may), ' +
@@ -1448,6 +1458,117 @@ test('the lines for a worker keploy cannot reach say what it is, why, and the ne
   assert.equal(unplacedLine('t', 'http://h/s.js', 'shared'), 'keploy: in t, the Shared Worker at http://h/s.js draws the browser\'s own random numbers, so its draws may differ at replay: ' +
     'it is a Shared Worker, and Firefox does not let keploy reach a Shared Worker\'s script to put its seeding ahead of it; ' +
     'record and replay the test in Chromium or WebKit to seed it.');
+});
+
+// A document's ServiceWorkerContainer: register answers what answer gives
+// (a registration of its script, by default), getRegistrations the
+// registrations regs, and the controller is state.controller.
+const swGlobals = ({ answer = (u) => Promise.resolve({ active: { scriptURL: `http://h${u}` } }), regs = [], late = false, state = { controller: null } } = {}) => {
+  class ServiceWorkerContainer {
+    register(u) { return answer(u); }
+    // late: the registrations come 20 ms after.
+    getRegistrations() { return late ? new Promise((r) => setTimeout(() => r(regs), 20)) : Promise.resolve(regs); }
+    get controller() { return state.controller; }
+  }
+  return { state, globals: { ServiceWorkerContainer, navigator: { serviceWorker: new ServiceWorkerContainer() } } };
+};
+const turn = () => new Promise((r) => setImmediate(r));
+
+test('a Service Worker a document registers is named once the browser registers it, at its script\'s address; one Playwright blocks (serviceWorkers: \'block\'), or a refused one, is not; register answers as the browser\'s does', async () => {
+  const run = async (sw, script) => {
+    const told = [];
+    const d = documentAt(initScript(S1, 'tell'), '/p', new Map(), 't0', { report: 'tell', told, globals: { URL, ...sw.globals } });
+    const v = await d.run(script);
+    await turn();
+    return { told, v };
+  };
+  const a = await run(swGlobals(), 'navigator.serviceWorker.register("/sw.js?v=2", { scope: "/" })');
+  assert.deepEqual(a.told, [['http://h/sw.js', 'service']]);
+  assert.deepEqual(a.v, { active: { scriptURL: 'http://h/sw.js?v=2' } });
+  // Playwright's block: register answers no registration.
+  const blocked = swGlobals();
+  blocked.globals.ServiceWorkerContainer.prototype.register = async () => undefined;
+  assert.deepEqual((await run(blocked, 'navigator.serviceWorker.register("/sw.js")')).told, []);
+  // A refused registration rejects as the browser's does, and is not named.
+  const refused = swGlobals({ answer: () => Promise.reject(new TypeError('the browser\'s own')) });
+  await assert.rejects(run(refused, 'navigator.serviceWorker.register("/sw.js")'), (e) => e.message === 'the browser\'s own');
+  // A container with no register keeps none.
+  const none = swGlobals();
+  delete none.globals.ServiceWorkerContainer.prototype.register;
+  assert.equal((await run(none, 'typeof navigator.serviceWorker.register')).v, 'undefined');
+  // Without the fixture's function: registered, nothing said.
+  const quiet = swGlobals();
+  const d = documentAt(initScript(S1), '/p', new Map(), 't0', { globals: { URL, ...quiet.globals } });
+  assert.deepEqual(await d.run('navigator.serviceWorker.register("/sw.js")'), { active: { scriptURL: 'http://h/sw.js' } });
+});
+
+test('a worker whose script a Service Worker may answer starts as the app asked, unmarked, and is named with that Service Worker: a Web Worker of a controlled document, a Shared Worker of a document that is controlled, registered one or found one registered as it began; the next worker at its path keeps its place', async () => {
+  const run = async (sw, script, before = '') => {
+    const told = [];
+    const w = workerGlobals();
+    const d = documentAt(initScript(S1, 'tell'), '/p', new Map(), 't0', { report: 'tell', told, globals: { ...w.globals, ...sw.globals } });
+    await turn();
+    if (before) { await d.run(before); await turn(); }
+    d.run(script);
+    return { told, made: w.made.map(([u]) => [u, workerMark(u)]) };
+  };
+  // Controlled: neither kind is marked, each is named with the controller.
+  const c = swGlobals({ state: { controller: { scriptURL: 'http://h/sw.js?v=1' } } });
+  const a = await run(c, 'new Worker("/w.js"); new SharedWorker("/s.js"); new Worker("/w.js");');
+  assert.deepEqual(a.made.map(([u, m]) => [u, m]), [['/w.js', null], ['/s.js', null], ['/w.js', null]]);
+  assert.deepEqual(a.told, [['http://h/w.js', 'controlled', 'http://h/sw.js'], ['http://h/s.js', 'controlled', 'http://h/sw.js'], ['http://h/w.js', 'controlled', 'http://h/sw.js']]);
+  // Registered by this document but not its controller: its Web Worker is
+  // marked (its script goes to the network), its Shared Worker is not.
+  const r = await run(swGlobals(), 'new Worker("/w.js"); new SharedWorker("/s.js");', 'navigator.serviceWorker.register("/sw.js")');
+  assert.equal(r.made[0][1].kind, 'w');
+  assert.deepEqual(r.made[1], ['/s.js', null]);
+  assert.deepEqual(r.told, [['http://h/sw.js', 'service'], ['http://h/s.js', 'controlled', 'http://h/sw.js']]);
+  // A registration of its origin found as the document began.
+  const f = await run(swGlobals({ regs: [{ active: null, waiting: null, installing: { scriptURL: 'http://h/old.js?x' } }] }), 'new Worker("/w.js"); new SharedWorker("/s.js");');
+  assert.equal(f.made[0][1].kind, 'w');
+  assert.deepEqual([f.made[1], f.told], [['/s.js', null], [['http://h/s.js', 'controlled', 'http://h/old.js']]]);
+  // A registration found is named by its active Service Worker, else its
+  // waiting one, else its installing one.
+  const sws = { a: { scriptURL: 'http://h/a.js' }, b: { scriptURL: 'http://h/b.js' }, c: { scriptURL: 'http://h/c.js' } };
+  for (const [reg, named] of [[{ active: sws.a, waiting: sws.b, installing: sws.c }, 'http://h/a.js'], [{ active: null, waiting: sws.b, installing: sws.c }, 'http://h/b.js']]) {
+    assert.deepEqual((await run(swGlobals({ regs: [reg] }), 'new SharedWorker("/s.js");')).told, [['http://h/s.js', 'controlled', named]]);
+  }
+  // The one this document registered is named, even when one found as
+  // the document began comes in after it.
+  {
+    const told = [];
+    const w = workerGlobals();
+    const d = documentAt(initScript(S1, 'tell'), '/p', new Map(), 't0', { report: 'tell', told, globals: { ...w.globals, ...swGlobals({ regs: [{ active: sws.a }], late: true }).globals } });
+    await d.run('navigator.serviceWorker.register("/sw.js")');
+    await new Promise((r) => setTimeout(r, 60));
+    d.run('new SharedWorker("/s.js");');
+    assert.deepEqual(told, [['http://h/sw.js', 'service'], ['http://h/s.js', 'controlled', 'http://h/sw.js']]);
+  }
+  // A controller whose script keploy cannot read: named with no address.
+  const u = await run(swGlobals({ state: { controller: { scriptURL: 'http://[' } } }), 'new Worker("/w.js");');
+  assert.deepEqual([u.made, u.told], [[['/w.js', null]], [['http://h/w.js', 'controlled', '']]]);
+  // A worker keploy cannot mark is named for that, controlled or not.
+  const b = await run(c, 'new Worker("blob:http://h/0f0e");');
+  assert.deepEqual([b.made, b.told], [[['blob:http://h/0f0e', null]], [['blob:', 'worker']]]);
+  // None: both are marked, nothing said.
+  const n = await run(swGlobals(), 'new Worker("/w.js"); new SharedWorker("/s.js");');
+  assert.deepEqual([n.made.map(([, m]) => m.kind), n.told], [['w', 's'], []]);
+  // No Service Worker can be read here (an opaque origin's throws).
+  const opaque = { globals: { navigator: Object.defineProperty({}, 'serviceWorker', { get() { throw new Error('SecurityError: sandboxed'); } }) } };
+  const o = await run(opaque, 'new Worker("/w.js");');
+  assert.deepEqual([o.made.map(([, m]) => m.kind), o.told], [['w'], []]);
+  // A worker a Service Worker may answer still takes its place at its path:
+  // the next one there, once no Service Worker controls the document, is
+  // marked as the second at that path, as in a document with none.
+  const state = { controller: { scriptURL: 'http://h/sw.js' } };
+  const told = [];
+  const w = workerGlobals();
+  const d = documentAt(initScript(S1, 'tell'), '/p', new Map(), 't0', { report: 'tell', told, globals: { ...w.globals, ...swGlobals({ state }).globals } });
+  d.run('new Worker("/w.js");');
+  state.controller = null;
+  d.run('new Worker("/w.js");');
+  const plain = await run(swGlobals(), 'new Worker("/w.js"); new Worker("/w.js");');
+  assert.deepEqual([workerMark(w.made[0][0]), workerMark(w.made[1][0])], [null, plain.made[1][1]]);
 });
 
 test('a worker\'s seeding draws the same numbers for a token and instance every run, others for another; its location shows no mark, its own query and fragment kept', () => {

@@ -657,10 +657,30 @@ async function drawsServer() {
       res.end(wk);
       return;
     }
+    // service-helper.ts's: the Service Worker /sw.js claims its pages, keeps
+    // the URL of each request it is asked (and leaves it to the network), and
+    // answers a message with them; the workers /swk/w.js and /swk/s.js send
+    // what they drew and their location.
+    const sw = {
+      '/sw.js': 'const seen = []; self.addEventListener(\'install\', () => self.skipWaiting()); self.addEventListener(\'activate\', (e) => e.waitUntil(self.clients.claim())); ' +
+        'self.addEventListener(\'fetch\', (e) => { seen.push(e.request.url); }); self.addEventListener(\'message\', (e) => e.source.postMessage({ kind: \'sw-seen\', seen }));',
+      '/swk/w.js': `postMessage({ kind: 'sw-ded', href: location.href, draws: ${DRAWS} });`,
+      '/swk/s.js': `onconnect = (e) => e.ports[0].postMessage({ kind: 'sw-shared', href: location.href, draws: ${DRAWS} });`,
+    }[u.pathname];
+    if (sw !== undefined) { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end(sw); return; }
     res.writeHead(200, { 'content-type': 'text/html' });
     if (u.pathname === '/wk') {
       const start = (s) => (s.startsWith('new Worker(') ? `{ const w = ${s}; w.onmessage = take; w.postMessage('early'); }` : `{ const s = ${s}; s.port.onmessage = take; s.port.start(); }`);
       res.end(page(`<script>window.__w = []; const take = (e) => window.__w.push(e.data);${WK_STARTS.map(start).join('')}</script>`));
+      return;
+    }
+    // /sw registers /sw.js and, once the browser registered it, waits until
+    // it controls the page; then it starts /swk/w.js and /swk/s.js.
+    if (u.pathname === '/sw') {
+      res.end(page('<script>window.__w = []; const take = (e) => window.__w.push(e.data); (async () => { const c = navigator.serviceWorker; let r = null; ' +
+        'if (c) { r = await c.register(\'/sw.js\'); if (r && !c.controller) await new Promise((ok) => c.addEventListener(\'controllerchange\', ok, { once: true })); } ' +
+        'window.__w.push({ kind: \'reg\', sw: !!c, ok: !!r, controlled: !!(c && c.controller) }); ' +
+        'const w = new Worker(\'/swk/w.js\'); w.onmessage = take; const s = new SharedWorker(\'/swk/s.js\'); s.port.onmessage = take; s.port.start(); })();</script>'));
       return;
     }
     if (u.pathname === '/draws') { res.end(page(`<iframe src="http://localhost:${srv.address().port}/frame"></iframe>`)); return; }
@@ -1474,6 +1494,69 @@ for (const engine of ENGINES) {
         else assert.deepEqual(p[k].draws, w[k].draws, k);
       }
       }
+      assert.deepEqual(q.seen.filter((u) => u.includes('__keploy_worker')), []);
+    } finally { await rep.close(); await rec.close(); }
+  });
+}
+
+// service-helper.ts's tests: one with its Service Worker, one with
+// serviceWorkers: 'block'.
+const SW_TITLES = ['service worker', 'service worker blocked'];
+
+for (const engine of ENGINES) {
+  test(`seeded, in ${engine}: a Service Worker a page registers draws the browser's own and is named once; a Web Worker and a Shared Worker that it may answer start as the app asked, so neither the Service Worker nor the app's server sees keploy's mark, and each is named with it; with serviceWorkers: 'block' neither is named and the Web Worker draws from the test's seed, the same at replay`, async () => {
+    const j = journal();
+    const rec = await fakeAgent(j);
+    let kept = {};
+    const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+      ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+    const env = (url) => ({ ...keployEnv(url), PW_BROWSER: engine });
+    const byKind = (r, title) => Object.fromEntries(r.drew[title].w.map((m) => [m.kind, m]));
+    const specs = ['service.spec.ts', 'service-blocked.spec.ts'];
+    try {
+      const r = await drawRun(j, env(rec.url), specs, SW_TITLES);
+      const facts = JSON.stringify(r.drew);
+      const said = (title) => r.tests[title].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${title}, `)).map((l) => l.replace(/127\.0\.0\.1:\d+\//g, '127.0.0.1:<port>/')).sort();
+      const at = (p) => `http://127.0.0.1:<port>/${p}`;
+      const on = byKind(r, 'service worker');
+      const off = byKind(r, 'service worker blocked');
+      const origin = new URL(on['sw-ded'].href).origin;
+      // With its Service Worker: registered, controlling the page, and named;
+      // each worker named with it (in Firefox, whose route does not reach a
+      // Shared Worker's script, the Shared Worker is named for that).
+      assert.deepEqual(on.reg, { kind: 'reg', sw: true, ok: true, controlled: true }, facts);
+      assert.deepEqual(said('service worker'), [
+        unplacedLine('service worker', at('sw.js'), 'service'),
+        unplacedLine('service worker', at('swk/w.js'), 'controlled', 0, at('sw.js')),
+        engine === 'firefox' ? unplacedLine('service worker', at('swk/s.js'), 'shared') : unplacedLine('service worker', at('swk/s.js'), 'controlled', 0, at('sw.js')),
+        sharedWorkerLine('service worker', at('swk/s.js')),
+      ].sort(), facts);
+      // Each worker runs at the URL the app asked for, and the Service Worker
+      // was asked for the Web Worker's script with no mark.
+      assert.deepEqual([on['sw-ded'].href, on['sw-shared'].href], [`${origin}/swk/w.js`, `${origin}/swk/s.js`], facts);
+      assert.equal(r.drew['service worker'].seen.kind, 'sw-seen', facts);
+      assert.ok(r.drew['service worker'].seen.seen.includes(`${origin}/swk/w.js`), facts);
+      assert.deepEqual(r.drew['service worker'].seen.seen.filter((u) => u.includes('__keploy_worker')), [], facts);
+      // Blocked: Playwright registers none, nothing but the Shared Worker's
+      // settle line is said, and the Web Worker draws from the test's seed.
+      assert.deepEqual(off.reg, { kind: 'reg', sw: true, ok: false, controlled: false }, facts);
+      assert.equal(r.drew['service worker blocked'].seen, null, facts);
+      assert.deepEqual(said('service worker blocked'), [
+        ...(engine === 'firefox' ? [unplacedLine('service worker blocked', at('swk/s.js'), 'shared')] : []),
+        sharedWorkerLine('service worker blocked', at('swk/s.js')),
+      ].sort(), facts);
+      assert.deepEqual([off['sw-ded'].href, off['sw-shared'].href], [`${origin}/swk/w.js`, `${origin}/swk/s.js`], facts);
+      const made = [];
+      class Worker { constructor(url) { made.push(workerMark(String(url))); } }
+      documentAt(initScript(r.seeds['service worker blocked']), '/sw', new Map(), 't0', { globals: { URL, Worker } }).run('new Worker("/swk/w.js");');
+      assert.deepEqual(off['sw-ded'].draws, workerAt('http://h/swk/w.js', workerScript(made[0].token, 0, 'w')).draws(), facts);
+      // The app's server never sees keploy's mark.
+      assert.deepEqual(r.seen.filter((u) => u.includes('__keploy_worker')), []);
+      kept = r.seeds;
+      const q = await drawRun(j, env(rep.url), specs, SW_TITLES);
+      assert.deepEqual(byKind(q, 'service worker blocked')['sw-ded'].draws, off['sw-ded'].draws);
+      if (engine !== 'firefox') assert.deepEqual(byKind(q, 'service worker blocked')['sw-shared'].draws, off['sw-shared'].draws);
+      assert.notDeepEqual(byKind(q, 'service worker')['sw-ded'].draws, on['sw-ded'].draws);
       assert.deepEqual(q.seen.filter((u) => u.includes('__keploy_worker')), []);
     } finally { await rep.close(); await rec.close(); }
   });

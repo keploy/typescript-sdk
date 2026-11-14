@@ -182,14 +182,16 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
       let opened: (page: Page | null | undefined) => Promise<boolean> = async () => false;
       await context.exposeBinding(report, async (source, at: unknown, why: unknown, above: unknown) => {
         const a = pageAddress(at);
-        const w: Unplaced = why === 'frame' || why === 'uncounted' || why === 'nostorage' || why === 'worker' || why === 'shared' ? why : (await opened(source.page)) ? 'own' : 'popup';
+        const w: Unplaced = why === 'frame' || why === 'uncounted' || why === 'nostorage' || why === 'worker' || why === 'shared' || why === 'service' || why === 'controlled'
+          ? why : (await opened(source.page)) ? 'own' : 'popup';
         // Once for each address and reason: two documents at one address
         // (about:blank) may have no place for two reasons.
         const k = `${w}\n${a}`;
         if (told.has(k)) return;
         told.add(k);
         if (w !== 'uncounted') {
-          process.stdout.write(`${unplacedLine(name, a, w)}\n`);
+          // A worker a Service Worker may answer: that Service Worker's address.
+          process.stdout.write(`${unplacedLine(name, a, w, 0, pageAddress(above))}\n`);
           return;
         }
         // Its line says how many frames are beside its frame once their
