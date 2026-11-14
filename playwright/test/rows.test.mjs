@@ -396,7 +396,11 @@ test('settle: a call cancelled by its page loading another document is not waite
 
 // Firefox can report the new document's first call before the frame's
 // commit; the commit cancels only the old document's calls, so this one is
-// still waited for, in every engine.
+// still waited for, in every engine. The call is answered only once settle's
+// step has begun (the rows' reporter asks /release then), so the test ends
+// by settle's wait alone: no deadline bounds its body, which on a loaded box
+// can take seconds in Firefox (a 4 s test timeout once fired while the
+// document's own request was in flight, and settle named that one).
 for (const engine of ['chromium', 'firefox', 'webkit']) {
   test(`settle, in ${engine}: a call the new document makes as it loads is waited for, whichever the browser reports first, the call or its frame's commit`, async () => {
     const j = journal();
@@ -404,18 +408,23 @@ for (const engine of ['chromium', 'firefox', 'webkit']) {
     const p = await pageServer(j);
     try {
       const title = 'a call its new document makes as it loads';
-      const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, NO_RELEASE: '1', PW_TIMEOUT: '4000', PW_BROWSER: engine });
+      const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, NO_RELEASE: '1', RELEASE_AT_STEP: `${p.url}/release`, PW_BROWSER: engine });
       const t = tests[title];
-      assert.equal(t.status, 'timedOut', out);
+      assert.equal(t.status, 'passed', out);
       const named = /^keploy: wait for the test's 1 call\(s\) in flight before its browser context closes: GET http:\/\/127\.0\.0\.1:\d+\/slow$/;
       assert.ok(t.steps.some((s) => named.test(s)), t.steps.join('\n'));
+      // The test ended after the call's answer: waited for, not cut.
+      const order = j.events.map((e) => (e.page ? e.page : e.agent.path));
+      assert.deepEqual(order.filter((e) => e.startsWith('slow') || e === '/agent/scope/end'), ['slow sent', 'slow answered', '/agent/scope/end']);
     } finally { await p.close(); await a.close(); }
   });
 }
 
 // A Shared Worker's script: Chromium reports no end for it (Playwright does
 // not follow Shared Workers), so settle never waits on it, in any engine,
-// and the test says so, seeded or not.
+// and the test says so, seeded or not. A wait on it shows as settle's step
+// (and a timeout at the config's 30 s): the row sets no short timeout, which
+// would bound the test's body too, slow in Firefox on a loaded box.
 for (const engine of ['chromium', 'firefox', 'webkit']) {
   test(`settle, in ${engine}: a test whose page starts a Shared Worker ends at once, its browser unseeded, and says once that the worker's script and calls are not waited for`, async () => {
     const j = journal();
@@ -423,7 +432,7 @@ for (const engine of ['chromium', 'firefox', 'webkit']) {
     const p = await pageServer(j);
     try {
       const title = 'a page that starts a Shared Worker';
-      const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), KEPLOY_SEED_RANDOM: 'off', SLOW_BASE: p.url, PW_TIMEOUT: '4000', PW_BROWSER: engine });
+      const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), KEPLOY_SEED_RANDOM: 'off', SLOW_BASE: p.url, PW_BROWSER: engine });
       const t = tests[title];
       assert.equal(t.status, 'passed', out);
       assert.ok(!t.steps.some((s) => s.startsWith('keploy: wait for')), t.steps.join('\n'));
