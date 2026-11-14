@@ -28,7 +28,9 @@ export class Inflight {
       let f: Frame | null = null;
       try { f = r.frame(); } catch { f = null; }
       // A 204 or 205 answer, or a download, leaves the document in place.
-      const keeps = res.status() === 204 || res.status() === 205 || /attachment/i.test(res.headers()['content-disposition'] ?? '');
+      const disposition = (res.headers()['content-disposition'] ?? '').split(';', 1)[0].trim().toLowerCase();
+      const download = /^[!#$%&'*+.^_`|~0-9a-z-]+$/.test(disposition) && disposition !== 'inline';
+      const keeps = res.status() === 204 || res.status() === 205 || download;
       if (f && !keeps) loading.add(f);
     });
     const watch = (p: Page): void => {

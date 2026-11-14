@@ -61,8 +61,15 @@ async function pageServer(j) {
     if (req.url === '/sw.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end("self.addEventListener('install', () => { void fetch('/slow'); });"); return; }
     if (req.url === '/nocontent') { res.writeHead(204); res.end(); return; }
     if (req.url === '/resetcontent') { res.writeHead(205); res.end(); return; }
+    if (req.url === '/inline-attachment-name') {
+      res.writeHead(200, { 'content-type': 'text/html', 'content-disposition': 'inline; filename="attachment-page.html"' });
+      res.end('<html><body>inline page</body></html>');
+      return;
+    }
     // A disposition's type is case-insensitive (RFC 6266): the browser downloads "Attachment" too.
     if (req.url === '/download') { res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': 'Attachment; filename="d.bin"' }); res.end('bytes'); return; }
+    // An unknown disposition type is handled as attachment (RFC 6266, section 4.2), even for HTML.
+    if (req.url === '/download-x') { res.writeHead(200, { 'content-type': 'text/html', 'content-disposition': 'x-attachment; filename="a.html"' }); res.end('<html></html>'); return; }
     if (req.url === '/download-lower') { res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename="e.bin"' }); res.end('bytes'); return; }
     if (req.url === '/slowdoc') {
       // A document whose last byte comes only once /release is called.
@@ -271,6 +278,19 @@ test('settle: a call cancelled by its page loading another document is not waite
   } finally { await p.close(); await a.close(); }
 });
 
+test('settle: an inline document with attachment in its filename still replaces the page', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  const p = await pageServer(j);
+  try {
+    const { tests, out } = await playwright(['settle.spec.ts', '-g', 'inline document with attachment in its filename'], { ...keployEnv(a.url), SLOW_BASE: p.url, NO_RELEASE: '1', PW_TIMEOUT: '4000' });
+    const title = 'a call its page cancelled by loading an inline document with attachment in its filename';
+    assert.equal(tests[title].status, 'passed', JSON.stringify({ result: tests[title], events: j.events }));
+    const order = j.events.map((e) => (e.page ? e.page : e.agent.path));
+    assert.deepEqual(order.filter((e) => e.startsWith('slow') || e === '/agent/scope/end'), ['slow sent', 'slow cut', '/agent/scope/end']);
+  } finally { await p.close(); await a.close(); }
+});
+
 test('settle: a route change inside the page cancels nothing, so its call in flight is waited for', async () => {
   const j = journal();
   const a = await fakeAgent(j);
@@ -420,6 +440,7 @@ for (const [title, why, call] of [
   ['a call in flight across a navigation answered 205', 'a navigation answered 205 replaces no document', '/slow'],
   ['a call in flight across a download', 'a navigation answered with an attachment (a download, "Attachment") replaces no document', '/slow'],
   ['a call in flight across a lowercase attachment download', 'a navigation answered with an attachment (a download, "attachment") replaces no document', '/slow'],
+  ['a call in flight across an unknown disposition type download', 'a navigation answered with an unknown disposition type (a download, "x-attachment") replaces no document', '/slow'],
   ['a document still loading after its frame commits', 'a navigation\'s own request stays in flight after its document commits', '/slowdoc'],
   ['a call in flight while another page of the test closes', 'another page closing cancels nothing of this page', '/slow'],
   ['a call in flight across a route change after an answered call', 'a route change after an answered call cancels nothing', '/slow'],
