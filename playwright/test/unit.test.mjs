@@ -323,6 +323,11 @@ test('settle: a request of the frame that started a Shared Worker at its script\
   ctx.emit('request', call(f, 'http://h/s.js?q=1#c'));
   ctx.emit('request', call(f, 'http://h/t.js'));
   assert.equal(inflight.size, 3);
+  // A navigation of that frame to that URL, reported after: waited for.
+  const nav = call(f, 'http://h/s.js?q=1', true);
+  ctx.emit('request', nav);
+  assert.equal(inflight.size, 4);
+  waited.push(nav);
   for (const r of waited) {
     assert.equal(settled, false);
     ctx.emit('requestfinished', r);
