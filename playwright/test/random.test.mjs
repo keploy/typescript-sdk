@@ -1330,6 +1330,27 @@ test('a document that a second run of the script takes over (WebKit runs it in a
   assert.deepEqual(drew, documentAt(initScript(S1), '/p', new Map(), 't0').draws());
 });
 
+test('a Web Worker started in a document that a second run of the script took over is marked once, by that run, as at a document with no takeover; the first run passes it on as asked and names nothing', () => {
+  const made = [];
+  class Worker { constructor(url) { made.push(String(url)); } }
+  const told = [];
+  const blank = { baseURI: 'about:blank', querySelectorAll: () => [] };
+  const d = documentAt(initScript(S1, 'tell'), 'blank', new Map(), 't0', { doc: blank, report: 'tell', told, globals: { URL, Worker } });
+  d.ctx.document = { baseURI: 'http://h/p', querySelectorAll: () => [] };
+  d.ctx.location.pathname = '/p';
+  d.run(initScript(S1, 'tell'));
+  d.run(pageScript('t0'));
+  d.run('new Worker("/w.js")');
+  assert.equal(made.length, 1);
+  assert.equal(made[0].split(`${WORKER_PARAM}=`).length, 2, made[0]);
+  assert.equal(workerMark(made[0]).url, 'http://h/w.js');
+  const plain = [];
+  class Plain { constructor(url) { plain.push(String(url)); } }
+  documentAt(initScript(S1), '/p', new Map(), 't0', { globals: { URL, Worker: Plain } }).run('new Worker("/w.js")');
+  assert.deepEqual(made, plain);
+  assert.deepEqual(told, []);
+});
+
 // Workers: the page's Worker and SharedWorker mark the script URL with the
 // worker's token; the route answers the marked script with the worker's
 // seeding, then the app's own script.
@@ -1383,6 +1404,12 @@ test('a worker keploy cannot mark starts as the app asked and is named once with
   d.run('new Worker("blob:http://h/0f0e"); new Worker("data:text/javascript,1"); new Worker("blob:http://h/0f0e");');
   assert.deepEqual(w.made.map(([u]) => u), ['blob:http://h/0f0e', 'data:text/javascript,1', 'blob:http://h/0f0e']);
   assert.deepEqual(told, [['blob:', 'worker'], ['data:', 'worker'], ['blob:', 'worker']]);
+  // A URL the browser cannot read: the browser's own error, nothing named.
+  const told1 = [];
+  class Strict { constructor(url) { if (String(url) === 'http://[') throw new SyntaxError('the browser\'s own'); } }
+  const d1 = documentAt(initScript(S1, 'tell'), '/p', new Map(), 't0', { report: 'tell', told: told1, globals: { URL, Worker: Strict } });
+  assert.throws(() => d1.run('new Worker("http://[")'), (e) => e.message === 'the browser\'s own');
+  assert.deepEqual(told1, []);
   // The browser refuses the marked URL (a Trusted Types policy): as asked.
   const told2 = [];
   const made = [];
