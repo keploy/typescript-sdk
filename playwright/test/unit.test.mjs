@@ -8,8 +8,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { AgentClient, KeployError } from '../dist/agent.js';
 import { decide } from '../dist/join.js';
-import { Inflight } from '../dist/settle.js';
+import { Inflight, sharedWorkerScript } from '../dist/settle.js';
 import { EventEmitter } from 'node:events';
+import vm from 'node:vm';
 import { testRef, outcomeOf, sourceOf, keployText, runAgain } from '../dist/index.js';
 
 // One fake agent answering every call with answer(path, body).
@@ -297,6 +298,85 @@ test('settle: a call keploy\'s route answered has ended, though the browser repo
   inflight.answered(late);
   ctx.emit('request', late);
   assert.equal(inflight.size, 0);
+});
+
+test('settle: a request of the frame that started a Shared Worker at its script\'s URL (fragment aside), reported before or after, is not waited for; one of another frame, another URL, or a navigation is', async () => {
+  const call = (frame, url, nav = false) => ({ frame: () => frame, isNavigationRequest: () => nav, method: () => 'GET', url: () => url });
+  const ctx = fakeContext();
+  const inflight = new Inflight(ctx);
+  const page = new EventEmitter();
+  ctx.emit('page', page);
+  const f = { page: () => page };
+  const g = { page: () => page };
+  const before = call(f, 'http://h/s.js?q=1#a');
+  const waited = [call(g, 'http://h/s.js?q=1'), call(f, 'http://h/s.js'), call(f, 'http://h/s.js?q=1', true)];
+  ctx.emit('request', before);
+  for (const r of waited) ctx.emit('request', r);
+  let settled = false;
+  inflight.settled().then(() => { settled = true; });
+  inflight.sharedWorker(f, 'http://h/s.js?q=1#b');
+  await ticks();
+  assert.equal(inflight.size, 3);
+  // A second Shared Worker of that frame, at another URL: both are kept.
+  inflight.sharedWorker(f, 'http://h/t.js');
+  ctx.emit('request', call(f, 'http://h/s.js?q=1'));
+  ctx.emit('request', call(f, 'http://h/s.js?q=1#c'));
+  ctx.emit('request', call(f, 'http://h/t.js'));
+  assert.equal(inflight.size, 3);
+  for (const r of waited) {
+    assert.equal(settled, false);
+    ctx.emit('requestfinished', r);
+    await ticks();
+  }
+  assert.equal(settled, true);
+  // With nothing else in flight, the frame's report wakes settle.
+  const ctx2 = fakeContext();
+  const one = new Inflight(ctx2);
+  ctx2.emit('request', call(f, 'http://h/s.js'));
+  let woke = false;
+  one.settled().then(() => { woke = true; });
+  one.sharedWorker(f, 'http://h/s.js');
+  await ticks();
+  assert.deepEqual([woke, one.size], [true, 0]);
+});
+
+test('sharedWorkerScript: the page\'s SharedWorker starts each worker as asked, then reports its script URL against the document\'s base with no fragment; the binding leaves the window; a worker the browser refuses throws its own error and reports nothing; new, instanceof, constructor, name and length kept; with no binding the browser\'s own stays', () => {
+  const made = [];
+  const told = [];
+  class Base {}
+  class SharedWorker extends Base { constructor(url, o) { super(); if (String(url) === 'http://[' || String(url).endsWith('/refused.js')) throw new SyntaxError('the browser\'s own'); made.push([url, o]); } }
+  const ctx = { URL, document: { baseURI: 'http://h/a/p' }, location: { href: 'http://h/b/p' }, __r: (u) => { told.push(u); return Promise.reject(new Error('gone')); } };
+  // As a window's: not enumerable; the wrapper keeps the property's flags.
+  Object.defineProperty(ctx, 'SharedWorker', { value: SharedWorker, writable: true, enumerable: false, configurable: true });
+  vm.createContext(ctx);
+  vm.runInContext(sharedWorkerScript('__r'), ctx);
+  assert.equal(vm.runInContext('typeof __r', ctx), 'undefined');
+  const o = { name: 'n', type: 'module' };
+  ctx.o = o;
+  vm.runInContext('globalThis.w = new SharedWorker("s.js?q=1#f", o)', ctx);
+  assert.deepEqual(made, [['s.js?q=1#f', o]]);
+  assert.equal(made[0][1], o);
+  assert.deepEqual(told, ['http://h/a/s.js?q=1']);
+  assert.equal(vm.runInContext('w instanceof SharedWorker && SharedWorker.prototype.constructor === SharedWorker && SharedWorker.name === "SharedWorker" && SharedWorker.length === 1', ctx), true);
+  assert.equal(vm.runInContext('const d = Object.getOwnPropertyDescriptor(globalThis, "SharedWorker"); JSON.stringify([d.enumerable, d.writable, d.configurable])', ctx), '[false,true,true]');
+  assert.equal(Object.getPrototypeOf(ctx.SharedWorker), Base);
+  for (const u of ['http://[', '/refused.js']) assert.throws(() => vm.runInContext(`new SharedWorker(${JSON.stringify(u)})`, ctx), (e) => e.message === 'the browser\'s own', u);
+  assert.throws(() => vm.runInContext('SharedWorker("/s.js")', ctx), TypeError);
+  assert.equal(told.length, 1);
+  // A window with no document yet: its location.
+  delete ctx.document;
+  vm.runInContext('new SharedWorker("s.js")', ctx);
+  assert.deepEqual(told, ['http://h/a/s.js?q=1', 'http://h/b/s.js']);
+  // A report that throws: the worker is still the app's.
+  const c2 = { URL, SharedWorker, location: { href: 'http://h/p' }, __r: () => { throw new Error('gone'); } };
+  vm.createContext(c2);
+  vm.runInContext(sharedWorkerScript('__r'), c2);
+  assert.equal(vm.runInContext('new SharedWorker("/s.js") instanceof SharedWorker', c2), true);
+  // No binding: the browser's own stays.
+  const c3 = { URL, SharedWorker, location: { href: 'http://h/p' } };
+  vm.createContext(c3);
+  vm.runInContext(sharedWorkerScript('__r'), c3);
+  assert.equal(c3.SharedWorker, SharedWorker);
 });
 
 test('settle: a cancel that comes while settle already waits wakes it (its page closes; then, for a service worker\'s call, the test closes its context)', async () => {

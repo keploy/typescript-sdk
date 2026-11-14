@@ -13,6 +13,9 @@ export class Inflight {
   private waiters: (() => void)[] = [];
   // The calls keploy's own route answered whole (answered).
   private readonly ended = new WeakSet<Request>();
+  // The script URLs, with no fragment, that each frame started a Shared
+  // Worker at, for the test's life (sharedWorker).
+  private readonly shared = new Map<Frame | null, Set<string>>();
 
   constructor(context: BrowserContext) {
     context.on('request', (r) => {
@@ -20,7 +23,9 @@ export class Inflight {
       let frame: Frame | null = null;
       // A service worker's call has no frame.
       try { frame = r.frame(); } catch { frame = null; }
-      this.open.set(r, { frame, nav: r.isNavigationRequest(), n: ++this.reported });
+      const nav = r.isNavigationRequest();
+      if (!nav && this.shared.get(frame)?.has(noFragment(r.url()))) return;
+      this.open.set(r, { frame, nav, n: ++this.reported });
     });
     context.on('requestfinished', (r) => this.done(r));
     context.on('requestfailed', (r) => this.done(r));
@@ -106,14 +111,33 @@ export class Inflight {
     this.done(r);
   }
 
+  /**
+   * A document of frame started a Shared Worker whose script is at url
+   * (sharedWorkerScript). Settle never waits on a request of that frame at
+   * that URL (fragment aside) that is no navigation, reported before this or
+   * after, for the rest of the test: the worker's script is one, and Chromium
+   * reports no end for it, as Playwright does not follow Shared Workers. The
+   * test's line (sharedWorkerLine) names the URL.
+   */
+  sharedWorker(frame: Frame | null, url: string): void {
+    const u = noFragment(url);
+    let s = this.shared.get(frame);
+    if (s === undefined) {
+      s = new Set();
+      this.shared.set(frame, s);
+    }
+    s.add(u);
+    this.drop((o, r) => !o.nav && o.frame === frame && noFragment(r.url()) === u);
+  }
+
   private done(r: Request): void {
     if (this.open.delete(r)) this.wake();
   }
 
-  private drop(gone: (o: { frame: Frame | null; nav: boolean; n: number }) => boolean): void {
+  private drop(gone: (o: { frame: Frame | null; nav: boolean; n: number }, r: Request) => boolean): void {
     let n = 0;
     for (const [r, o] of this.open) {
-      if (gone(o)) { this.open.delete(r); n++; }
+      if (gone(o, r)) { this.open.delete(r); n++; }
     }
     if (n > 0) this.wake();
   }
@@ -128,4 +152,67 @@ export class Inflight {
 
 function pageOf(f: Frame): Page | null {
   try { return f.page(); } catch { return null; }
+}
+
+function noFragment(url: string): string {
+  const i = url.indexOf('#');
+  return i < 0 ? url : url.slice(0, i);
+}
+
+/**
+ * The init script every keploy test's context runs, seeded or not, after
+ * the seeding's (initScript): the page's SharedWorker, which starts each
+ * worker as the app asked, with the same arguments, then calls the binding
+ * report (exposed on the context, which this script takes off the window)
+ * with the script's URL, resolved against the document's base, with no
+ * fragment, so settle never waits on that script (Inflight.sharedWorker).
+ * A worker the browser refuses to start (a URL it cannot read) throws the
+ * browser's own error and reports nothing. It keeps new, instanceof, the
+ * constructor, name and length of the browser's own.
+ */
+export function sharedWorkerScript(report: string): string {
+  const r = JSON.stringify(report);
+  return `(() => {
+  const g = globalThis;
+  let tell = null;
+  try { const f = g[${r}]; if (typeof f === 'function') tell = f; delete g[${r}]; } catch (e) { tell = null; }
+  const Real = g.SharedWorker;
+  if (typeof Real !== 'function' || tell === null) return;
+  const U = g.URL;
+  const construct = Reflect.construct;
+  const slice = Array.prototype.slice;
+  const W = { SharedWorker: function (url) {
+    // Called without new, it throws as the browser's own does.
+    if (!new.target) return Real.apply(this, arguments);
+    const w = construct(Real, slice.call(arguments), new.target);
+    try {
+      const d = g.document;
+      const u = new U(String(url), d ? d.baseURI : g.location.href);
+      u.hash = '';
+      const p = tell(u.href);
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } catch (e) {}
+    return w;
+  } }.SharedWorker;
+  try {
+    W.prototype = Real.prototype;
+    Object.defineProperty(Real.prototype, 'constructor', { value: W, writable: true, enumerable: false, configurable: true });
+    Object.setPrototypeOf(W, Object.getPrototypeOf(Real));
+    const d = Object.getOwnPropertyDescriptor(g, 'SharedWorker');
+    Object.defineProperty(g, 'SharedWorker', { value: W, writable: d ? d.writable : true, enumerable: d ? d.enumerable : false, configurable: true });
+  } catch (e) {
+    // A window that takes no property: its Shared Workers are as the browser's.
+  }
+})();
+`;
+}
+
+/**
+ * The line a test shows, once for each Shared Worker script address (at,
+ * origin and path), when one of its pages started a Shared Worker.
+ */
+export function sharedWorkerLine(name: string, at: string): string {
+  return `keploy: in ${name}, a page started the Shared Worker at ${at}: keploy does not wait for its script or its calls before the test's browser context closes ` +
+    '(Playwright reports none of a Shared Worker\'s calls), so a call it still has in flight when the test ends is cut there; ' +
+    'have the test wait for what the worker does (a message it posts, or what the page shows from it) before it ends.';
 }

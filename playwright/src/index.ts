@@ -60,7 +60,7 @@ import type { Outcome, Random, TestRef } from './agent';
 import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
 import { OFF_LINE, SEEDED_LINE, besideOf, fakerLine, fakersOf, freshSeed, initScript, othersNow, pageAddress, placePages, processRandom, seatFaker, seatRandom, seedingFromEnv, setAside, unplacedLine, unseededLine, workerRoutes, type Fakers, type Unplaced } from './random';
-import { Inflight } from './settle';
+import { Inflight, sharedWorkerLine, sharedWorkerScript } from './settle';
 
 export { expect, KeployError };
 export { seedFaker } from './random';
@@ -89,6 +89,9 @@ const saidFaker = new Set<string>();
 // How many contexts this worker seeded: each one's report function has its
 // own name.
 let reports = 0;
+// How many contexts of a keploy test this worker opened: each one's Shared
+// Worker report function has its own name.
+let sharedReports = 0;
 
 // How a test's browser draws its random numbers.
 type PageSeeding = {
@@ -222,6 +225,20 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
       restore = placing.restore;
       opened = placing.opened;
     }
+    // Seeded or not: each Shared Worker a page starts is one settle does not
+    // wait on, and the test says so once for each script address (origin
+    // and path).
+    const sharedReport = `__keploy_shared_worker_${++sharedReports}`;
+    const sharedTold = new Set<string>();
+    await context.exposeBinding(sharedReport, (source, url: unknown) => {
+      const u = String(url);
+      inflight.sharedWorker(source.frame, u);
+      const at = pageAddress(u.split('?')[0]);
+      if (sharedTold.has(at)) return;
+      sharedTold.add(at);
+      process.stdout.write(`${sharedWorkerLine(name, at)}\n`);
+    });
+    await context.addInitScript({ content: sharedWorkerScript(sharedReport) });
     const seeded = s.seed !== '';
     const opened = (): void => { if (seeded) s.seededPage = true; else s.ownPage = true; };
     if (context.pages().length > 0) opened();

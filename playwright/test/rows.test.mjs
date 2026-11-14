@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LOADS_KEY, OFF_LINE, SEEDED_LINE, initScript, processRandom, unplacedLine, unseededLine, workerMark, workerScript } from '../dist/random.js';
+import { sharedWorkerLine } from '../dist/settle.js';
 import { BLANK_DRAWS, DRAWS, documentAt, workerAt } from './draws.mjs';
 
 const PKG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -65,6 +66,8 @@ async function pageServer(j) {
     if (req.url === '/seen') { void seen.then(() => res.end('ok')); return; }
     // A service worker that calls /slow as it installs.
     if (req.url === '/sw.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end("self.addEventListener('install', () => { void fetch('/slow'); });"); return; }
+    // A Shared Worker that answers each page that connects.
+    if (req.url === '/shared.js?v=1') { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end("onconnect = (e) => { e.ports[0].postMessage('up'); };"); return; }
     if (req.url === '/nocontent') { res.writeHead(204); res.end(); return; }
     if (req.url === '/resetcontent') { res.writeHead(205); res.end(); return; }
     // A disposition's type is case-insensitive (RFC 6266): the browser downloads "Attachment" too.
@@ -406,6 +409,26 @@ for (const engine of ['chromium', 'firefox', 'webkit']) {
       assert.equal(t.status, 'timedOut', out);
       const named = /^keploy: wait for the test's 1 call\(s\) in flight before its browser context closes: GET http:\/\/127\.0\.0\.1:\d+\/slow$/;
       assert.ok(t.steps.some((s) => named.test(s)), t.steps.join('\n'));
+    } finally { await p.close(); await a.close(); }
+  });
+}
+
+// A Shared Worker's script: Chromium reports no end for it (Playwright does
+// not follow Shared Workers), so settle never waits on it, in any engine,
+// and the test says so, seeded or not.
+for (const engine of ['chromium', 'firefox', 'webkit']) {
+  test(`settle, in ${engine}: a test whose page starts a Shared Worker ends at once, its browser unseeded, and says once that the worker's script and calls are not waited for`, async () => {
+    const j = journal();
+    const a = await fakeAgent(j);
+    const p = await pageServer(j);
+    try {
+      const title = 'a page that starts a Shared Worker';
+      const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), KEPLOY_SEED_RANDOM: 'off', SLOW_BASE: p.url, PW_TIMEOUT: '4000', PW_BROWSER: engine });
+      const t = tests[title];
+      assert.equal(t.status, 'passed', out);
+      assert.ok(!t.steps.some((s) => s.startsWith('keploy: wait for')), t.steps.join('\n'));
+      const said = t.stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${title}, `)).map((l) => l.replace(/:\d+\//, ':<port>/'));
+      assert.deepEqual(said, [sharedWorkerLine(title, 'http://127.0.0.1:<port>/shared.js')]);
     } finally { await p.close(); await a.close(); }
   });
 }
@@ -1340,16 +1363,18 @@ for (const engine of ENGINES) {
       const cmodel = [c1, c2].map((m) => workerAt('http://h/wk/cshared.js', workerScript(m.token, 0, 'x')).draws());
       const said = r.tests.workers.stdout.split('\n').filter((l) => l.startsWith('keploy: in workers, ')).map((l) => l.replace(/:\d+\//, ':<port>/'));
       const at = (p) => `http://127.0.0.1:<port>/wk/${p}`;
+      // Every engine: each Shared Worker script's address, once, is not waited for.
+      const unwaited = ['shared.js', 'mshared.js', 'cshared.js'].map((p) => sharedWorkerLine('workers', at(p)));
       if (engine === 'firefox') {
         assert.notDeepEqual(w.shared.draws, model);
         assert.notDeepEqual(w.mshared.draws, mmodel);
         assert.notDeepEqual([w.c1.draws, w.c2.draws], cmodel);
-        assert.deepEqual(said.sort(), ['shared.js', 'mshared.js', 'cshared.js'].map((p) => unplacedLine('workers', at(p), 'shared')).sort());
+        assert.deepEqual(said.sort(), [...['shared.js', 'mshared.js', 'cshared.js'].map((p) => unplacedLine('workers', at(p), 'shared')), ...unwaited].sort());
       } else {
         assert.deepEqual(w.shared.draws, model);
         assert.deepEqual(w.mshared.draws, mmodel);
         assert.deepEqual([w.c1.draws, w.c2.draws], cmodel);
-        assert.deepEqual(said, []);
+        assert.deepEqual(said.sort(), [...unwaited].sort());
       }
       // What the app's server was asked for: never keploy's mark, and each
       // worker's script and what it loads.

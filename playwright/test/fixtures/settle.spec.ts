@@ -252,3 +252,13 @@ test('a call in flight across a lowercase attachment download', async ({ page })
   await page.evaluate(() => { history.pushState({}, '', '/page?route'); });
   await routed;
 });
+test('a page that starts a Shared Worker', async ({ page }) => {
+  await page.goto(`${base}/page`);
+  // The worker answers once its script has run; its URL's fragment is no
+  // part of the request, and its query no part of the address said.
+  const said = await page.evaluate(() => new Promise<string>((resolve) => {
+    const w = new SharedWorker('/shared.js?v=1#f');
+    w.port.onmessage = (e) => resolve(String(e.data));
+  }));
+  if (said !== 'up') throw new Error(`the Shared Worker said ${said}`);
+});
