@@ -1903,13 +1903,65 @@ function sameHeaders(a: Record<string, string>, b: Record<string, string>): bool
   return x.size === y.size && [...x].every(([k, v]) => y.get(k) === v);
 }
 
+/** Whether URLs a and b are the same, fragment aside (false for one that is no URL). */
+function sameUrl(a: string, b: string): boolean {
+  try {
+    return noFragment(new URL(a).href) === noFragment(new URL(b).href);
+  } catch {
+    return false;
+  }
+}
+
+function noFragment(url: string): string {
+  const i = url.indexOf('#');
+  return i < 0 ? url : url.slice(0, i);
+}
+
+const POLICIES = new Set(['no-referrer', 'no-referrer-when-downgrade', 'same-origin', 'origin', 'strict-origin', 'origin-when-cross-origin', 'strict-origin-when-cross-origin', 'unsafe-url']);
+
+/**
+ * The Referer a worker whose script is at at sends with a request to its
+ * own origin, under policy, the Referrer-Policy its script was answered
+ * with (the last token it names that is a policy, in any case): none ('')
+ * under no-referrer, its origin under origin and strict-origin, else its
+ * URL with no fragment or user info.
+ */
+export function ownReferer(at: string, policy = ''): string {
+  let p = '';
+  for (const t of policy.split(',')) {
+    const v = t.trim().toLowerCase();
+    if (POLICIES.has(v)) p = v;
+  }
+  const u = new URL(noFragment(at));
+  if (p === 'no-referrer') return '';
+  if (p === 'origin' || p === 'strict-origin') return `${u.origin}/`;
+  u.username = '';
+  u.password = '';
+  return u.href;
+}
+
+/**
+ * Whether r is a load of the kind a Web Worker's seeding makes of the app's
+ * script (workerAnswer): importScripts for a classic one (sec-fetch-dest
+ * script where the route sees it; Chromium types it other), a static import
+ * for a module one (sec-fetch-dest worker; Chromium types it script).
+ */
+function seedingLoad(r: Request, kind: 'w' | 'm'): boolean {
+  const dest = r.headers()['sec-fetch-dest'];
+  if (dest !== undefined) return dest === (kind === 'w' ? 'script' : 'worker');
+  return r.resourceType() === (kind === 'w' ? 'other' : 'script');
+}
+
 /**
  * Answers each marked worker script the test's context asks for with
  * workerAnswer, under the status and headers the app's server answered for
  * the script with no mark (a worker's policy comes from its script's
  * answer), and a module Web Worker's seeding (marked 'p') with
- * workerScript. So the app's server is asked for a worker's script twice:
- * here, for that answer, and by the worker, for the app's script. An answer
+ * workerScript. A Web Worker's seeding's load of the app's script is
+ * answered with what keploy's fetch for that answer got (kept), so the app's
+ * server is asked for a Web Worker's script once, here; Chromium and WebKit
+ * route nothing a Shared Worker loads after its script, so it is asked for a
+ * Shared Worker's twice: here, and by the worker, for the app's script. An answer
  * that is not ok goes to the worker as the server gave it; when keploy
  * cannot fetch the script, the worker gets its seeding with no header of the
  * app's and loads the app's script itself, as the browser would. Each
@@ -1937,9 +1989,12 @@ function sameHeaders(a: Record<string, string>, b: Record<string, string>): bool
  * context's first, which answers it as above, at the URL a fallback gave it
  * too. What the test's continue and fallbacks ask (a URL, method, headers or
  * post data of their own) is what keploy's fetch of the script sends, and a
- * Web Worker's seeding loads the app's script through the test's routes
- * again, so they ask the same of it. A Shared Worker's seeding cannot
- * (Chromium and WebKit route none of its loads): one whose script the
+ * Web Worker's seeding's load of the app's script gets what that fetch got,
+ * ahead of the test's routes, which so see the script once: a route that
+ * answers once (times), counts its loads or picks the worker's script by its
+ * destination sees what it sees with seeding off. A Shared Worker's seeding
+ * loads the app's script past every route (Chromium and WebKit route none
+ * of its loads): one whose script the
  * test's routes asked for otherwise than the browser sent it gets the answer
  * to what they asked for, whole, unseeded, and the test hears of it
  * (routed, 'continued').
@@ -1958,17 +2013,59 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
   // the test's routes asked of it (their continue's and fallbacks' options);
   // and the URLs it may reach the last route at (the app's, or one a
   // fallback of the test's gave it).
-  type Handed = { m: WorkerMark; fulfill: Route['fulfill']; sent: Record<string, string>; asked: Asked };
+  type Handed = { m: WorkerMark; at: string; fulfill: Route['fulfill']; sent: Record<string, string>; method: string; asked: Asked };
   const handed = new WeakMap<Request, Handed>();
   const urls = new Set<string>();
   const ask = (h: Handed, o: Asked | undefined): void => {
     for (const [k, v] of Object.entries(o ?? {})) if (v !== undefined) (h.asked as Record<string, unknown>)[k] = v;
   };
   // Whether the test's routes asked for a worker's script otherwise than the
-  // browser sent it: a URL, method or post data of their own, or headers
-  // other than the browser's.
-  const otherwise = (h: Handed): boolean => Object.entries(h.asked)
-    .some(([k, v]) => k !== 'headers' || !sameHeaders(v as Record<string, string>, h.sent));
+  // browser sent it: headers other than the browser's, a URL other than the
+  // app's, a method other than the browser's, or post data.
+  const otherwise = (h: Handed): boolean => Object.entries(h.asked).some(([k, v]) => {
+    if (k === 'headers') return !sameHeaders(v as Record<string, string>, h.sent);
+    if (k === 'url') return !sameUrl(String(v), h.m.url);
+    if (k === 'method') return v !== h.method;
+    return true;
+  });
+  // The app's script a seeded Web Worker's seeding loads next (workerAnswer),
+  // kept from keploy's fetch for the worker's own load until the browser
+  // asks for it, and answered so ahead of the test's routes: the test's
+  // routes and the app's server see a Web Worker's script loaded once, as
+  // with seeding off. A seeding's load is told by its URL, the app's, and
+  // its Referer: the worker's marked URL, or, under a Referrer-Policy that
+  // sends less to the worker's own origin, what that policy sends (Chromium
+  // sends that for both kinds, Firefox and WebKit for a module worker), and
+  // by its kind (seedingLoad). Each is kept at each such Referer, with how
+  // many are kept at each URL. Chromium and WebKit route nothing a Shared
+  // Worker loads after its script, so none is kept for one.
+  type Kept = { kind: 'w' | 'm'; keys: string[]; answer: { status: number; headers: Record<string, string>; body: Buffer } };
+  const kept = new Map<string, Kept[]>();
+  const keptAt = new Map<string, number>();
+  const keyOf = (referer: string, url: string): string => `${referer}\n${noFragment(url)}`;
+  const keep = (h: Handed, kind: 'w' | 'm', answer: Kept['answer']): void => {
+    const policy = answer.headers['referrer-policy'];
+    const keys = [...new Set([keyOf(ownReferer(h.at), h.m.url), keyOf(ownReferer(h.at, policy), h.m.url)])];
+    const k: Kept = { kind, keys, answer };
+    for (const key of keys) kept.set(key, [...(kept.get(key) ?? []), k]);
+    const u = noFragment(h.m.url);
+    keptAt.set(u, (keptAt.get(u) ?? 0) + 1);
+  };
+  // The kept script r is the seeding's load of, taken, or null.
+  const take = (r: Request): Kept['answer'] | null => {
+    const k = kept.get(keyOf(r.headers().referer ?? '', r.url()))?.find((x) => seedingLoad(r, x.kind));
+    if (k === undefined) return null;
+    for (const key of k.keys) {
+      const rest = (kept.get(key) ?? []).filter((x) => x !== k);
+      if (rest.length > 0) kept.set(key, rest);
+      else kept.delete(key);
+    }
+    const u = noFragment(r.url());
+    const n = (keptAt.get(u) ?? 1) - 1;
+    if (n > 0) keptAt.set(u, n);
+    else keptAt.delete(u);
+    return k.answer;
+  };
   // A route's fetch with o is the request the test's routes asked for: o's
   // URL, method, headers and post data, or the request's (the URL the app
   // asked for, or one a fallback gave, and what fallbacks gave it).
@@ -2002,6 +2099,7 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
       }
       status = got.status();
       headers = headersOf(got.headers());
+      if (h !== undefined && (m.kind === 'w' || m.kind === 'm')) keep(h, m.kind, { status, headers, body: await got.body() });
     } catch {
       // The worker loads the app's script itself, and fails as it would.
     }
@@ -2011,7 +2109,15 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
     const r = route.request();
     const m = workerMark(r.url());
     if (m === null) {
-      await route.fallback();
+      // A seeded Web Worker's seeding's load of the app's script: answered
+      // with what keploy fetched for the worker's own load. A worker's
+      // script load keploy handed on is none.
+      const k = handed.has(r) ? null : take(r);
+      if (k === null) await route.fallback();
+      else {
+        await route.fulfill(k);
+        hooks.answered?.(r);
+      }
       return;
     }
     // A seeded Web Worker's word of a worker keploy cannot mark: heard, then
@@ -2033,7 +2139,7 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
       await answer(route, m, own);
       return;
     }
-    const h: Handed = { m, fulfill: own, sent: r.headers(), asked: {} };
+    const h: Handed = { m, at: r.url(), fulfill: own, sent: r.headers(), method: r.method(), asked: {} };
     handed.set(r, h);
     urls.add(new URL(m.url).href);
     const fallback = route.fallback.bind(route);
@@ -2067,7 +2173,7 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
     }
     await answer(route, h.m, h.fulfill, h);
   };
-  const marked = (u: URL): boolean => u.searchParams.has(WORKER_PARAM);
+  const marked = (u: URL): boolean => u.searchParams.has(WORKER_PARAM) || keptAt.has(noFragment(u.href));
   const lastUrl = (u: URL): boolean => urls.has(u.href);
   const route = context.route;
   const addLast = async (): Promise<void> => {

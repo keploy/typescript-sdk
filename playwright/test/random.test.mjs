@@ -3,7 +3,7 @@
 // a page. No browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DOC_KEY, ENV_SEED_RANDOM, FAKER, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, esmFile, exportOf, fakerLine, fakersIn, fakersOf, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatFaker, seatRandom, seedFaker, seedingFromEnv, setAside, unplacedLine, unseededLine, WORKER_PARAM, SW_CHANNEL, SW_LOCK, markWorker, workerMark, workerScript, workerRoutes, workerAnswer, cspAllowsData } from '../dist/random.js';
+import { DOC_KEY, ENV_SEED_RANDOM, FAKER, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, esmFile, exportOf, fakerLine, fakersIn, fakersOf, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatFaker, seatRandom, seedFaker, seedingFromEnv, setAside, unplacedLine, unseededLine, WORKER_PARAM, SW_CHANNEL, SW_LOCK, markWorker, ownReferer, workerMark, workerScript, workerRoutes, workerAnswer, cspAllowsData } from '../dist/random.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -2068,7 +2068,7 @@ function routed() {
     let at = url;
     let over;
     let ended = false;
-    const request = { url: () => at, resourceType: () => as.type, headers: () => over?.headers ?? as.headers, postData: () => as.body ?? null };
+    const request = { url: () => at, resourceType: () => as.type, headers: () => over?.headers ?? as.headers, method: () => as.method ?? 'GET', postData: () => as.body ?? null };
     const route = {
       request: () => request,
       fetch: async (o = {}) => {
@@ -2341,8 +2341,8 @@ test('workerRoutes sends a worker\'s script on with what the test\'s continue an
   const auth = (dest) => ({ ...sent(dest), 'x-auth': 'k' });
   const seeded = (url, h, n, kind, own, tok = t) => [h === undefined ? ['fetch', url] : ['fetch', url, h], ['fulfill', { status: 200, headers, body: workerAnswer(tok, n, kind, own) }]];
   const whole = (url, h, body) => [h === undefined ? ['fetch', url] : ['fetch', url, h], ['fulfill', { status: 200, headers, body }]];
-  // A Web Worker's: keploy's fetch sends what the test's route asked, and
-  // its seeding then loads the app's script through the test's routes again.
+  // A Web Worker's: keploy's fetch sends what the test's route asked (its
+  // seeding's load of the app's script gets what that fetch got: a row below).
   const w = markWorker('http://h/w.js', 'w', t);
   mine = (route) => route.continue({ headers: auth('worker') });
   assert.deepEqual(await ask(w, 'app()', 'worker'), seeded('http://h/w.js', auth('worker'), 0, 'w', 'http://h/w.js'));
@@ -2393,6 +2393,128 @@ test('workerRoutes sends a worker\'s script on with what the test\'s continue an
   assert.deepEqual(await ask(x, 'app()', 'sharedworker'), seeded('http://h/x.js', undefined, 1, 'x', 'http://h/x.js', tx));
   assert.deepEqual(heard, [...Array(5).fill(['http://h/s.js', 'continued']), ['http://h/x.js', 'continued']]);
   assert.match(unplacedLine('t', 'http://h/s.js', 'continued'), /^keploy: in t, the Shared Worker at http:\/\/h\/s\.js draws the browser's own random numbers, and so does each worker it starts, so their draws may differ at replay: a route of the test's own sent the Shared Worker's script on with a URL, method, headers or post data of its own .* have that route continue or fall back with no options for the Shared Worker's script to seed it\.$/);
+  // Its own URL (fragment aside) or method given back, as the request has
+  // them, seeds it; another method, or post data, does not.
+  heard.length = 0;
+  mine = (route) => route.continue({ url: route.request().url(), method: route.request().method() });
+  assert.deepEqual(await ask(s, 'app()', 'sharedworker'), seeded('http://h/s.js', undefined, 8, 's', 'http://h/s.js', ts));
+  mine = (route) => route.continue({ url: 'http://h/s.js#a' });
+  assert.deepEqual(await ask(s, 'app()', 'sharedworker'), seeded('http://h/s.js#a', undefined, 9, 's', 'http://h/s.js', ts));
+  mine = (route) => route.continue({ method: 'POST' });
+  assert.deepEqual(await ask(s, 'app()', 'sharedworker'), whole('http://h/s.js', undefined, 'app()'));
+  mine = (route) => route.continue({ postData: 'x' });
+  assert.deepEqual(await ask(s, 'app()', 'sharedworker'), whole('http://h/s.js', undefined, 'app()'));
+  mine = (route) => route.continue({ url: 'not a url' });
+  assert.deepEqual(await ask(s, 'app()', 'sharedworker'), whole('not a url', undefined, 'app()'));
+  assert.deepEqual(heard, Array(3).fill(['http://h/s.js', 'continued']));
+  // Two routes: the last one's options win. A page route's fallback with
+  // the browser's own headers, then a context route's continue that adds one.
+  heard.length = 0;
+  mine = (route) => route.fallback({ headers: sent('sharedworker') });
+  await context.route(() => true, (route) => route.continue({ headers: auth('sharedworker') }));
+  assert.deepEqual(await ask(s, 'app()', 'sharedworker'), whole('http://h/s.js', auth('sharedworker'), 'app()'));
+  assert.deepEqual(heard, [['http://h/s.js', 'continued']]);
+});
+
+test('workerRoutes answers a seeded Web Worker\'s seeding\'s load of the app\'s script with what its fetch for the worker\'s own load got, ahead of the test\'s routes, once: told by its URL, its Referer (the worker\'s marked URL, or what the script\'s Referrer-Policy sends to its own origin) and its kind (importScripts for a classic worker, a static import for a module one); none for a script load keploy handed on, a Shared Worker\'s, or an answer not ok', async () => {
+  const { r, context } = routed();
+  const answered = [];
+  await workerRoutes(context, { answered: (q) => answered.push(q.url()) });
+  const page = r.page();
+  const hits = [];
+  let pass = false;
+  await page.route(() => true, (route) => { hits.push(route.request().url()); return pass ? route.fallback() : route.continue(); });
+  const app = (policy, status = 200) => answerOf(status, 'app()', { 'content-type': 'text/javascript', ...(policy === undefined ? {} : { 'referrer-policy': policy }) });
+  const start = (m, policy, status) => r.ask(m, app(policy, status), { type: 'script', headers: { referer: 'http://h/pg', 'sec-fetch-dest': workerMark(m).kind === 's' ? 'sharedworker' : 'worker' } }, page);
+  // The seeding's load: Chromium shows no destination and types it.
+  const load = (url, referer, type, dest) => r.ask(url, null, { type, headers: { ...(referer === null ? {} : { referer }), ...(dest === undefined ? {} : { 'sec-fetch-dest': dest }) } }, page);
+  const kept = (policy) => [['fulfill', { status: 200, headers: { 'content-type': 'text/javascript', ...(policy === undefined ? {} : { 'referrer-policy': policy }) }, body: 'app()' }]];
+  const on = (url) => [['continue', url]];
+  // A classic worker under its default policy: its importScripts, in each
+  // engine's terms, once; then a load there goes on.
+  const w = markWorker('http://h/w.js', 'w', 'd1'.repeat(16));
+  assert.equal((await start(w))[0][0], 'fetch');
+  assert.equal(r.match(new URL('http://h/w.js#f')), true);
+  assert.deepEqual(await load('http://h/w.js', w, 'other'), kept());
+  assert.equal(r.match(new URL('http://h/w.js')), false);
+  assert.deepEqual(await load('http://h/w.js', w, 'other'), on('http://h/w.js'));
+  await start(w);
+  assert.deepEqual(await load('http://h/w.js', w, 'script', 'script'), kept());
+  assert.deepEqual(hits, ['http://h/w.js', 'http://h/w.js', 'http://h/w.js']);
+  assert.deepEqual(answered, Array(4).fill('http://h/w.js'));
+  // Not a load of the seeding's kind, nor one with another Referer or at
+  // another URL: each goes on, and the seeding's load still gets it.
+  await start(w);
+  assert.deepEqual(await load('http://h/w.js', w, 'script'), on('http://h/w.js'));
+  assert.deepEqual(await load('http://h/w.js', w, 'script', 'worker'), on('http://h/w.js'));
+  assert.deepEqual(await load('http://h/w.js', 'http://h/pg', 'other'), on('http://h/w.js'));
+  assert.deepEqual(await load('http://h/w.js', null, 'other'), on('http://h/w.js'));
+  assert.deepEqual(await load('http://h/w.js?b=1', w, 'other'), on('http://h/w.js?b=1'));
+  assert.deepEqual(await load('http://h/w.js', w, 'other'), kept());
+  // A module worker's static import of the app's script.
+  const m = markWorker('http://h/m.js', 'm', 'd2'.repeat(16));
+  await start(m);
+  assert.deepEqual(await load('http://h/m.js', m, 'other'), on('http://h/m.js'));
+  assert.deepEqual(await load('http://h/m.js', m, 'script', 'script'), on('http://h/m.js'));
+  assert.deepEqual(await load('http://h/m.js', m, 'script'), kept());
+  await start(m);
+  assert.deepEqual(await load('http://h/m.js', m, 'script', 'worker'), kept());
+  // Under a policy that sends less to the worker's own origin: what it
+  // sends (Chromium), or the marked URL (Firefox and WebKit, for a classic
+  // worker); taken at one, it is gone from the other.
+  await start(w, 'no-referrer');
+  assert.deepEqual(await load('http://h/w.js', null, 'other'), kept('no-referrer'));
+  assert.deepEqual(await load('http://h/w.js', w, 'script', 'script'), on('http://h/w.js'));
+  await start(w, 'no-referrer');
+  assert.deepEqual(await load('http://h/w.js', w, 'script', 'script'), kept('no-referrer'));
+  assert.deepEqual(await load('http://h/w.js', null, 'other'), on('http://h/w.js'));
+  await start(m, 'origin');
+  assert.deepEqual(await load('http://h/m.js', 'http://h/', 'script', 'script'), on('http://h/m.js'));
+  assert.deepEqual(await load('http://h/m.js', 'http://h/', 'script', 'worker'), kept('origin'));
+  // Two workers at one URL, each kept: each seeding's load gets one.
+  const w2 = markWorker('http://h/w.js', 'w', 'd3'.repeat(16));
+  await start(w);
+  await start(w2);
+  assert.deepEqual(await load('http://h/w.js', w2, 'other'), kept());
+  assert.deepEqual(await load('http://h/w.js', w, 'other'), kept());
+  // Under no-referrer, with what each fetch got: one taken at its marked
+  // URL is gone from what no-referrer sends too, where the other's is.
+  const each = (m, body) => r.ask(m, answerOf(200, body, { 'content-type': 'text/javascript', 'referrer-policy': 'no-referrer' }), { type: 'script', headers: { referer: 'http://h/pg', 'sec-fetch-dest': 'worker' } }, page);
+  const got = async (...a) => (await load(...a))[0][1]?.body;
+  await each(w, 'one()');
+  await each(w2, 'two()');
+  assert.equal(await got('http://h/w.js', w, 'script', 'script'), 'one()');
+  assert.equal(await got('http://h/w.js', null, 'other'), 'two()');
+  assert.deepEqual(await load('http://h/w.js', null, 'other'), on('http://h/w.js'));
+  // A worker's script load keploy handed on is none, though it looks like
+  // a module worker's seeding's load: one at the URL of a worker kept under
+  // no-referrer, from a page under it too, is seeded.
+  await start(m, 'no-referrer');
+  const m2 = markWorker('http://h/m.js', 'm', 'd4'.repeat(16));
+  pass = true;
+  const second = await r.ask(m2, app('no-referrer'), { type: 'script', headers: {} }, page);
+  pass = false;
+  assert.equal(second[1][1].body, workerAnswer('d4'.repeat(16), 0, 'm', 'http://h/m.js'));
+  assert.deepEqual(await load('http://h/m.js', null, 'script'), kept('no-referrer'));
+  assert.deepEqual(await load('http://h/m.js', null, 'script'), kept('no-referrer'));
+  assert.deepEqual(await load('http://h/m.js', null, 'script'), on('http://h/m.js'));
+  // None for a Shared Worker's, or for an answer not ok.
+  const s = markWorker('http://h/s.js', 's', 'd5'.repeat(16));
+  await start(s);
+  assert.equal(r.match(new URL('http://h/s.js')), false);
+  assert.deepEqual(await load('http://h/s.js', s, 'other'), on('http://h/s.js'));
+  const x = markWorker('http://h/x.js', 'w', 'd6'.repeat(16));
+  assert.deepEqual(await start(x, undefined, 404), [['fetch', 'http://h/x.js'], ['fulfill', { status: 404, headers: { 'content-type': 'text/javascript' }, body: 'app()' }]]);
+  assert.equal(r.match(new URL('http://h/x.js')), false);
+  assert.deepEqual(await load('http://h/x.js', x, 'other'), on('http://h/x.js'));
+});
+
+test('ownReferer: the Referer a worker sends to its own origin under its script\'s Referrer-Policy, the last token that is a policy, in any case', () => {
+  const at = 'http://u:p@h:8/w.js?a=1&__keploy_worker=w.x#f';
+  assert.equal(ownReferer(at), 'http://h:8/w.js?a=1&__keploy_worker=w.x');
+  for (const p of ['', 'unsafe-url', 'same-origin', 'no-referrer-when-downgrade', 'origin-when-cross-origin', 'strict-origin-when-cross-origin', 'bogus', 'no-referrer, unsafe-url']) assert.equal(ownReferer(at, p), 'http://h:8/w.js?a=1&__keploy_worker=w.x', p);
+  for (const p of ['no-referrer', 'No-Referrer', 'origin, no-referrer', ' no-referrer , bogus', 'no-referrer,']) assert.equal(ownReferer(at, p), '', p);
+  for (const p of ['origin', 'strict-origin', 'no-referrer, STRICT-ORIGIN']) assert.equal(ownReferer(at, p), 'http://h:8/', p);
 });
 
 test('workerRoutes answers a Shared Worker\'s script with workerAnswer, a module one whose policy refuses data: with its seeding in the answer; each request it fulfills is answered', async () => {

@@ -7,7 +7,7 @@ import { test } from '../../dist';
 // what the app's server needs for a worker's script: a header it answers
 // 401 without (/ov/a*.js), or a stand-in at another URL for a script it does
 // not have (/ov/o*.js, answered by /ov/m*.js). The last continues with the
-// browser's own headers (/ov/p*.js). Then the test's page starts a Web
+// browser's own headers, and its own URL and method (/ov/p*.js). Then the test's page starts a Web
 // Worker and a Shared Worker at those scripts and keeps what each sent (its
 // kind, location and draws), or 'error', under the test's title.
 const base = process.env.DRAWS_BASE ?? '';
@@ -74,5 +74,10 @@ test('fallback url on page', async ({ page }) => {
 
 test('browser headers on page', async ({ page }) => {
   await page.route('**/*', (r) => r.continue({ headers: r.request().headers() }));
+  await start(page, 'p');
+});
+
+test('own url and method on page', async ({ page }) => {
+  await page.route('**/ov/p*.js', (r) => r.continue({ url: r.request().url(), method: r.request().method() }));
   await start(page, 'p');
 });

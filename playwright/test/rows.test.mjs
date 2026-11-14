@@ -654,15 +654,17 @@ async function drawsServer() {
     // overrides.spec.ts's: /ov/aw.js and /ov/as.js answer 401 to a request
     // with no x-auth: k; /ov/ow.js and /ov/os.js are not there (404), and
     // their stand-ins /ov/mw.js and /ov/ms.js are; /ov/pw.js and /ov/ps.js
-    // ask nothing. Each Web Worker (w) and Shared Worker (s) sends its kind,
+    // ask nothing; once.spec.ts's /ov/nw.js and /ov/gw.js need x-auth: k too,
+    // under Referrer-Policy no-referrer and origin. Each Web Worker (w) and
+    // Shared Worker (s) sends its kind,
     // its location and what it drew.
     if (u.pathname === '/ov') { res.writeHead(200, { 'content-type': 'text/html' }); res.end(page('ov')); return; }
     if (u.pathname === '/ov/ow.js' || u.pathname === '/ov/os.js') { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('none'); return; }
-    const ov = /^\/ov\/([amp])([ws])\.js$/.exec(u.pathname);
+    const ov = /^\/ov\/([ampng])([ws])\.js$/.exec(u.pathname);
     if (ov !== null) {
-      if (ov[1] === 'a' && req.headers['x-auth'] !== 'k') { res.writeHead(401, { 'content-type': 'text/plain' }); res.end('no auth'); return; }
+      if (ov[1] !== 'm' && ov[1] !== 'p' && req.headers['x-auth'] !== 'k') { res.writeHead(401, { 'content-type': 'text/plain' }); res.end('no auth'); return; }
       const sent = `{ kind: '${ov[1]}${ov[2]}', href: location.href, draws: ${DRAWS} }`;
-      res.writeHead(200, { 'content-type': 'text/javascript' });
+      res.writeHead(200, { 'content-type': 'text/javascript', ...(ov[1] === 'n' ? { 'referrer-policy': 'no-referrer' } : ov[1] === 'g' ? { 'referrer-policy': 'origin' } : {}) });
       res.end(ov[2] === 's' ? `onconnect = (e) => e.ports[0].postMessage(${sent});` : `postMessage(${sent});`);
       return;
     }
@@ -1648,7 +1650,7 @@ for (const engine of ENGINES) {
 // overrides.spec.ts's tests, and the scripts each one's page starts its
 // workers at (/ov/<k>w.js and /ov/<k>s.js).
 const OV = [['continue headers on page', 'a'], ['continue headers on context', 'a'], ['continue url on page', 'o'], ['continue url on context', 'o'],
-  ['fallback headers on page', 'a'], ['fallback headers on context', 'a'], ['fallback url on page', 'o'], ['browser headers on page', 'p']];
+  ['fallback headers on page', 'a'], ['fallback headers on context', 'a'], ['fallback url on page', 'o'], ['browser headers on page', 'p'], ['own url and method on page', 'p']];
 
 // The marks a document at /ov of page t0 gives the workers overrides.spec.ts
 // starts there.
@@ -1661,7 +1663,7 @@ function ovMarks(seed, k) {
 }
 
 for (const engine of ENGINES) {
-  test(`seeded, in ${engine}: a worker whose script the test's own route, on its page or its context, continues or falls back with a header the app's server needs or with a stand-in's URL runs what that route asked for; a Web Worker's is seeded (its seeding loads the app's script through the test's routes again) at the app's URL; a Shared Worker's runs unseeded and is named in Chromium and WebKit (nothing a Shared Worker loads after its script is routed there), and is seeded when the route continues with the browser's own headers; Firefox's route reaches no Shared Worker's script, the test's neither, so there it fails as with no keploy`, async () => {
+  test(`seeded, in ${engine}: a worker whose script the test's own route, on its page or its context, continues or falls back with a header the app's server needs or with a stand-in's URL runs what that route asked for; a Web Worker's is seeded (keploy answers its seeding's load of the app's script with what it fetched so) at the app's URL; a Shared Worker's runs unseeded and is named in Chromium and WebKit (nothing a Shared Worker loads after its script is routed there), and is seeded when the route continues with the browser's own headers, or with its own URL and method; Firefox's route reaches no Shared Worker's script, the test's neither, so there it fails as with no keploy`, async () => {
     const j = journal();
     const rec = await fakeAgent(j);
     try {
@@ -1694,6 +1696,77 @@ for (const engine of ENGINES) {
         }
         assert.deepEqual(said.sort(), lines.sort(), title);
       }
+      assert.deepEqual(r.seen.filter((u) => u.includes('__keploy_worker')), []);
+    } finally { await rec.close(); }
+  });
+}
+
+// once.spec.ts's tests, and the workers each one's page starts, in order
+// (each script's URL, and w a classic Web Worker, m a module one, s a
+// Shared Worker).
+const ONCE = [['once on page', [['/ov/aw.js', 'w']]], ['once on context, module', [['/ov/aw.js', 'm']]], ['by destination', [['/ov/aw.js', 'w']]],
+  ['once under no-referrer', [['/ov/nw.js', 'w']]], ['once under no-referrer, module', [['/ov/nw.js', 'm']]], ['once under origin, module', [['/ov/gw.js', 'm']]],
+  ['counted', [['/ov/pw.js', 'w'], ['/ov/pw.js', 'm']]], ['answered then continued at one address', [['/ov/as.js', 'w'], ['/ov/as.js', 's']]],
+  ['two routes', [['/ov/aw.js', 'w'], ['/ov/as.js', 's']]]];
+
+// The marks a document at /ov of page t0 gives the workers list starts.
+function onceMarks(seed, list) {
+  const made = [];
+  class Worker { constructor(url) { made.push(workerMark(String(url))); } }
+  const code = list.map(([u, k]) => (k === 's' ? `new SharedWorker('${u}');` : `new Worker('${u}'${k === 'm' ? ', { type: \'module\' }' : ''});`)).join(' ');
+  documentAt(initScript(seed), '/ov', new Map(), 't0', { globals: { URL, Worker, SharedWorker: Worker } }).run(code);
+  return made;
+}
+
+for (const engine of ENGINES) {
+  test(`seeded, in ${engine}: a test's own route that treats a Web Worker's script loads apart (one that answers once, on its page or its context, one that picks the worker's script by its destination, one that counts its loads) sees what it sees with seeding off and the worker runs, seeded, at the app's URL: keploy answers the seeding's load of the app's script with what it fetched for the worker's own, under a Referrer-Policy that sends less too, so the app's server is asked for a Web Worker's script once; a Web Worker at one address whose script the test's route answers itself and a Shared Worker there whose script it sends on with a header are each named; of two routes, the last one's options count`, async () => {
+    const j = journal();
+    const rec = await fakeAgent(j);
+    try {
+      const names = [...ONCE.map(([t]) => t), 'counted-n'];
+      const r = await drawRun(j, { ...keployEnv(rec.url), PW_BROWSER: engine }, ['once.spec.ts'], names);
+      const off = await drawRun(j, { ...keployEnv(rec.url), PW_BROWSER: engine, KEPLOY_SEED_RANDOM: 'off' }, ['once.spec.ts'], names);
+      for (const [title, list] of ONCE) {
+        const marks = onceMarks(r.seeds[title], list);
+        const at = (u) => `http://127.0.0.1:<port>${u}`;
+        const lines = [];
+        list.forEach(([u, k], i) => {
+          const [got, was] = [r.drew[title][i], off.drew[title][i]];
+          const what = `${title} ${u} ${k}: ${JSON.stringify(got)} (off: ${JSON.stringify(was)})`;
+          if (k === 's') {
+            lines.push(sharedWorkerLine(title, at(u)));
+            // Firefox's route reaches no Shared Worker's script: it fails
+            // as with no keploy, and is named.
+            if (engine === 'firefox') {
+              assert.ok(['error', 'none'].includes(got), what);
+              lines.push(unplacedLine(title, at(u), 'shared'));
+              return;
+            }
+            assert.equal(got.kind, 'as', what);
+            assert.match(got.href, new RegExp(`^http://127\\.0\\.0\\.1:\\d+/ov/as\\.js\\?__keploy_worker=s\\.[0-9a-f]{32}$`), what);
+            lines.push(unplacedLine(title, at(u), 'continued'));
+            return;
+          }
+          if (title === 'answered then continued at one address') {
+            assert.deepEqual([got, was], [{ kind: 'own' }, { kind: 'own' }], what);
+            lines.push(unplacedLine(title, at(u), 'routed'));
+            return;
+          }
+          const kind = u.slice('/ov/'.length, -'.js'.length);
+          assert.equal(got.kind, kind, what);
+          assert.equal(was.kind, kind, what);
+          assert.match(got.href, new RegExp(`^http://127\\.0\\.0\\.1:\\d+${u.replace('.', '\\.')}$`), what);
+          assert.equal(marks[i].kind, k, what);
+          assert.deepEqual(got.draws, workerAt(`http://h${u}`, workerScript(marks[i].token, 0, k)).draws(), what);
+        });
+        const said = r.tests[title].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${title}, `)).map((l) => l.replace(/:\d+\//g, ':<port>/'));
+        assert.deepEqual(said.sort(), lines.sort(), title);
+      }
+      // The counting route saw each worker's script once, as with seeding
+      // off; the app's server was asked for the same scripts.
+      assert.deepEqual([r.drew['counted-n'], off.drew['counted-n']], [2, 2]);
+      const scripts = (seen) => seen.filter((u) => u.startsWith('/ov/')).sort();
+      assert.deepEqual(scripts(r.seen), scripts(off.seen));
       assert.deepEqual(r.seen.filter((u) => u.includes('__keploy_worker')), []);
     } finally { await rec.close(); }
   });
