@@ -228,9 +228,9 @@ test('settle: a cancel that comes while settle already waits wakes it (its page 
   }
 });
 
-test('settle: a frame that is gone drops only its own calls, and wakes settle once none is left', async () => {
+test('settle: a frame that is gone drops only its own calls, its own document request too, and wakes settle once none is left', async () => {
   // Two frames of one page, each with a call Playwright reports no end for
-  // once the frame is gone.
+  // once the frame is gone. The first frame's own document is still loading.
   const ctx = fakeContext();
   const inflight = new Inflight(ctx);
   const page = new EventEmitter();
@@ -238,6 +238,8 @@ test('settle: a frame that is gone drops only its own calls, and wakes settle on
   const a = { page: () => page };
   const b = { page: () => page };
   const beacon = (frame, url) => ({ frame: () => frame, isNavigationRequest: () => false, method: () => 'POST', url: () => url });
+  const doc = (frame, url) => ({ frame: () => frame, isNavigationRequest: () => true, method: () => 'GET', url: () => url });
+  ctx.emit('request', doc(a, 'http://localhost/slowdoc'));
   ctx.emit('request', beacon(a, 'http://localhost/a'));
   ctx.emit('request', beacon(b, 'http://localhost/b'));
   let settled = false;
@@ -245,7 +247,7 @@ test('settle: a frame that is gone drops only its own calls, and wakes settle on
   await ticks();
   page.emit('framedetached', a);
   await ticks();
-  assert.deepEqual(inflight.describe(), ['POST http://localhost/b'], 'the removed frame\'s call is dropped, the other frame\'s is not');
+  assert.deepEqual(inflight.describe(), ['POST http://localhost/b'], 'the gone frame\'s calls are dropped, its document request too; the other frame\'s is not');
   assert.equal(settled, false, 'settle still waits for the other frame\'s call');
   page.emit('framedetached', b);
   await ticks();

@@ -376,13 +376,15 @@ for (const [title, why] of [
 // frames has a call in flight: the frame goes with the old document, and
 // Playwright reports no end for its call, ordinary or keepalive
 // (navigator.sendBeacon, fetch with keepalive, which the browser still
-// sends: the page server sees it). The call is not waited for, so the test
-// does not hang until its timeout.
+// sends: the page server sees it), nor for the frame's own document request
+// when that document was still loading. The call is not waited for, so the
+// test does not hang until its timeout.
 for (const [title, why, call] of [
   ['a beacon its frame sends as the page loads another document', 'its frame sends it as the page loads another document', 'beacon'],
   ['a beacon its frame had in flight when the page loads another document', 'the page loads another document, though a beacon outlives its frame', 'beacon'],
   ['a keepalive fetch its frame had in flight when the page loads another document', 'the page loads another document, though a keepalive fetch outlives its frame', 'beacon'],
   ['a call its frame had in flight when the page loads another document', 'the page loads another document, with an ordinary call of its frame in flight', 'slow'],
+  ['a document its frame was still loading when the page loads another document', 'the page loads another document while the frame\'s own document is still loading', 'slowdoc'],
 ]) {
   test(`settle: a frame's call is not waited for once ${why}`, async () => {
     const j = journal();

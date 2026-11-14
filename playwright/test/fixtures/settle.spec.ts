@@ -141,6 +141,15 @@ test('a call its frame had in flight when the page loads another document', asyn
   await reached();
   await nextDocument(page);
 });
+test('a document its frame was still loading when the page loads another document', async ({ page }) => {
+  // A frame whose own document has not finished loading (a payment form's
+  // frame, loaded lazily) goes with the page's old document: Playwright
+  // reports no end for the frame's own navigation request either. The
+  // frame commits /slowdoc, whose last byte the page server holds.
+  const child = await crossSiteChild(page);
+  await child.goto(`${base.replace('//127.0.0.1:', '//localhost:')}/slowdoc`, { waitUntil: 'commit' });
+  await nextDocument(page);
+});
 test('a beacon in flight from the page', async ({ page }) => {
   await page.goto(`${base}/page`);
   const sent = page.waitForRequest(/\/beacon$/);
