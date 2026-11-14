@@ -1464,7 +1464,7 @@ function routed() {
 const answerOf = (status, body, headers = { 'content-type': 'text/javascript', 'content-encoding': 'gzip', 'content-length': '3', 'x-a': '1' }) =>
   ({ ok: () => status >= 200 && status < 300, status: () => status, headers: () => headers, body: async () => Buffer.from(body) });
 
-test('workerRoutes answers a marked classic worker script with its seeding then importScripts of the app\'s own at its URL with no mark, under the status and headers the app\'s server gave it; each start of a token is the next instance', async () => {
+test('workerRoutes answers a marked classic worker script with its seeding then, in a microtask, importScripts of the app\'s own at its URL with no mark, under the status and headers the app\'s server gave it; each start of a token is the next instance', async () => {
   const { r, context } = routed();
   await workerRoutes(context);
   const t = '01'.repeat(16);
@@ -1472,10 +1472,10 @@ test('workerRoutes answers a marked classic worker script with its seeding then 
   assert.equal(r.match(new URL('http://h/w.js?a=1')), false);
   const headers = { 'content-type': 'text/javascript', 'x-a': '1' };
   assert.deepEqual(await r.ask(markWorker('http://h/w.js?a=1#f', 'w', t), answerOf(201, 'app()')), [['fetch', 'http://h/w.js?a=1#f'],
-    ['fulfill', { status: 201, headers, body: `${workerScript(t, 0, 'w')}importScripts("http://h/w.js?a=1#f");\n` }]]);
+    ['fulfill', { status: 201, headers, body: `${workerScript(t, 0, 'w')}queueMicrotask(importScripts.bind(globalThis, "http://h/w.js?a=1#f"));\n` }]]);
   const second = await r.ask(markWorker('http://h/w.js?a=1', 'w', t), answerOf(200, 'app()'));
   assert.equal(second[1][1].body, workerAnswer(t, 1, 'w', 'http://h/w.js?a=1'));
-  assert.equal(workerAnswer(t, 1, 'w', 'http://h/w.js?a=1'), `${workerScript(t, 1, 'w')}importScripts("http://h/w.js?a=1");\n`);
+  assert.equal(workerAnswer(t, 1, 'w', 'http://h/w.js?a=1'), `${workerScript(t, 1, 'w')}queueMicrotask(importScripts.bind(globalThis, "http://h/w.js?a=1"));\n`);
 });
 
 test('workerRoutes answers a module worker script with an import of its seeding then one of the app\'s own; its seeding is workerScript; an answer not ok goes as given; one it cannot fetch gets its seeding with no header of the app\'s; a malformed mark falls back', async () => {
@@ -1507,14 +1507,24 @@ test('cspAllowsData: no policy, or each policy whose script or worker source lis
     "script-src data:; Worker-Src 'self'"]) assert.equal(cspAllowsData(csp(v)), false, v);
 });
 
-test('workerAnswer: a classic Shared Worker runs its seeding, then imports the app\'s script at its URL; its location shows no mark; a module one imports its seeding as a data: module, then the app\'s script', () => {
+test('workerAnswer: a classic Web or Shared Worker runs its seeding, then imports the app\'s script at its URL in a microtask it queues, with none of its own code on the stack; its location shows no mark; a module one imports its seeding as a data: module, then the app\'s script', () => {
   const t = '45'.repeat(16);
-  const href = markWorker('http://h/s.js?q=1', 's', t);
-  const imported = [];
-  const w = workerAt(href, workerAnswer(t, 2, 's', 'http://h/s.js?q=1'), { importScripts: (...u) => { imported.push(u); } });
-  assert.deepEqual(imported, [['http://h/s.js?q=1']]);
-  assert.deepEqual(w.draws(), workerAt(href, workerScript(t, 2, 's')).draws());
-  assert.equal(w.run('location.href'), 'http://h/s.js?q=1');
+  for (const kind of ['s', 'w']) {
+    const href = markWorker('http://h/s.js?q=1', kind, t);
+    const imported = [];
+    const queued = [];
+    const w = workerAt(href, workerAnswer(t, 2, kind, 'http://h/s.js?q=1'), {
+      importScripts: function (...u) { imported.push([this, ...u]); },
+      queueMicrotask: (f) => { queued.push(f); },
+    });
+    // Nothing of the app's runs while the answer's code is on the stack.
+    assert.deepEqual(imported, [], kind);
+    assert.equal(queued.length, 1, kind);
+    queued[0]();
+    assert.deepEqual(imported, [[w.run('globalThis'), 'http://h/s.js?q=1']], kind);
+    assert.deepEqual(w.draws(), workerAt(href, workerScript(t, 2, kind)).draws(), kind);
+    assert.equal(w.run('location.href'), 'http://h/s.js?q=1', kind);
+  }
   const m = workerAnswer(t, 2, 'x', 'http://h/m.js?q=1');
   const data = /^import "data:text\/javascript;base64,([A-Za-z0-9+/=]+)";\nimport "http:\/\/h\/m\.js\?q=1";\n$/.exec(m);
   assert.ok(data, m.slice(0, 120));
@@ -1529,21 +1539,23 @@ function heldWorker(t, load) {
   const events = new EventTarget();
   const href = markWorker('http://h/c.js', 'x', t);
   const listeners = { added: [], removed: [] };
+  const queued = [];
   const w = workerAt(href, '', {
     addEventListener: (type, f) => { listeners.added.push([type, f]); events.addEventListener(type, f); },
     removeEventListener: (type, f) => { listeners.removed.push([type, f]); events.removeEventListener(type, f); },
     dispatchEvent: events.dispatchEvent.bind(events),
     MessageEvent, load,
+    queueMicrotask: (f) => { queued.push(f); queueMicrotask(f); },
   });
   const done = w.run(`(async () => { ${body.replace('await import(', 'await load(')} })()`);
-  return { w, events, done, listeners };
+  return { w, events, done, listeners, queued };
 }
 
 test('workerAnswer: a module Shared Worker whose policy refuses data: runs its seeding in its answer, then imports the app\'s script; each connect event before that script has run is held and given after, in order, with its ports; then it holds none, and one after goes to the app\'s handler as it comes', async () => {
   const t = '89'.repeat(16);
   let loaded;
   const got = [];
-  const { w, events, done, listeners } = heldWorker(t, () => new Promise((resolve) => { loaded = resolve; }));
+  const { w, events, done, listeners, queued } = heldWorker(t, () => new Promise((resolve) => { loaded = resolve; }));
   assert.deepEqual(w.draws(), workerAt(markWorker('http://h/c.js', 'x', t), workerScript(t, 0, 'x')).draws());
   assert.equal(w.run('location.href'), 'http://h/c.js');
   const a = new MessageChannel();
@@ -1560,6 +1572,9 @@ test('workerAnswer: a module Shared Worker whose policy refuses data: runs its s
   assert.deepEqual(listeners.removed, listeners.added);
   assert.equal(got.length, 2);
   assert.ok(got[0] === a.port1 && got[1] === b.port1);
+  // Each in a microtask of its own: none of the answer's code is on the
+  // stack of the app's handler.
+  assert.equal(queued.length, 2);
   const c = new MessageChannel();
   events.dispatchEvent(new MessageEvent('connect', { data: '', ports: [c.port1] }));
   assert.equal(got.length, 3);

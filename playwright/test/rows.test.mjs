@@ -614,16 +614,17 @@ async function drawsServer() {
     if (u.pathname === '/rrelease') { for (const r of rheld.splice(0)) r.end(''); res.end(''); return; }
     // workers.spec.ts's workers, and the scripts they load.
     const wk = {
-      '/wk/ded.js': `importScripts('dep.js'); postMessage({ kind: 'ded', draws: ${DRAWS}, href: location.href, dep: self.dep, stack: String(new Error('at').stack) });`,
+      // Each Web Worker answers the message its page posts as it starts it.
+      '/wk/ded.js': `importScripts('dep.js'); onmessage = (e) => postMessage({ kind: 'ded-early', data: e.data }); postMessage({ kind: 'ded', draws: ${DRAWS}, href: location.href, dep: self.dep, stack: String(new Error('at').stack) });`,
       '/wk/dep.js': 'self.dep = \'dep\';',
-      '/wk/mod.js': `import { dep } from './lib.mjs'; postMessage({ kind: 'mod', draws: ${DRAWS}, href: location.href, dep, meta: import.meta.url });`,
+      '/wk/mod.js': `import { dep } from './lib.mjs'; self.onmessage = (e) => postMessage({ kind: 'mod-early', data: e.data }); postMessage({ kind: 'mod', draws: ${DRAWS}, href: location.href, dep, meta: import.meta.url, top: String(new Error('at').stack) });`,
       '/wk/lib.mjs': 'export const dep = \'lib\';',
       '/wk/shared.js': `onconnect = (e) => e.ports[0].postMessage({ kind: 'shared', draws: ${DRAWS}, href: location.href, stack: String(new Error('at').stack) });`,
       // Module Shared Workers: one plain, one (started by two names, c1
       // twice) served with a policy that refuses data: scripts. Each
       // connection after a worker's first is named by its number (c1+2).
-      '/wk/mshared.js': `import { dep } from './lib.mjs'; self.onconnect = (e) => e.ports[0].postMessage({ kind: 'mshared', draws: ${DRAWS}, href: location.href, dep, meta: import.meta.url });`,
-      '/wk/cshared.js': `import { dep } from './lib.mjs'; let n = 0; const draws = ${DRAWS}; self.onconnect = (e) => { n++; e.ports[0].postMessage({ kind: self.name + (n > 1 ? \`+\${n}\` : ''), draws, href: location.href, dep, meta: import.meta.url }); };`,
+      '/wk/mshared.js': `import { dep } from './lib.mjs'; const top = String(new Error('at').stack); self.onconnect = (e) => e.ports[0].postMessage({ kind: 'mshared', draws: ${DRAWS}, href: location.href, dep, meta: import.meta.url, top });`,
+      '/wk/cshared.js': `import { dep } from './lib.mjs'; let n = 0; const draws = ${DRAWS}; const top = String(new Error('at').stack); self.onconnect = (e) => { n++; e.ports[0].postMessage({ kind: self.name + (n > 1 ? \`+\${n}\` : ''), draws, href: location.href, dep, meta: import.meta.url, top, stack: String(new Error('at').stack) }); };`,
     }[u.pathname];
     if (wk !== undefined) {
       res.writeHead(200, { 'content-type': 'text/javascript', ...(u.pathname === '/wk/cshared.js' ? { 'content-security-policy': 'script-src \'self\'' } : {}) });
@@ -632,7 +633,7 @@ async function drawsServer() {
     }
     res.writeHead(200, { 'content-type': 'text/html' });
     if (u.pathname === '/wk') {
-      const start = (s) => (s.startsWith('new Worker(') ? `${s}.onmessage = take;` : `{ const s = ${s}; s.port.onmessage = take; s.port.start(); }`);
+      const start = (s) => (s.startsWith('new Worker(') ? `{ const w = ${s}; w.onmessage = take; w.postMessage('early'); }` : `{ const s = ${s}; s.port.onmessage = take; s.port.start(); }`);
       res.end(page(`<script>window.__w = []; const take = (e) => window.__w.push(e.data);${WK_STARTS.map(start).join('')}</script>`));
       return;
     }
@@ -1318,10 +1319,17 @@ for (const engine of ENGINES) {
       assert.match(w.mod.meta, /^http:\/\/127\.0\.0\.1:\d+\/wk\/mod\.js$/);
       assert.match(w.mshared.meta, /^http:\/\/127\.0\.0\.1:\d+\/wk\/mshared\.js$/);
       for (const c of [w.c1, w.c2, w['c1+2']]) assert.match(c.meta, /^http:\/\/127\.0\.0\.1:\d+\/wk\/cshared\.js$/);
-      for (const k of ['ded', 'shared']) {
-        assert.match(w[k].stack, new RegExp(`/wk/${k === 'ded' ? 'ded' : 'shared'}\\.js`), w[k].stack);
-        assert.doesNotMatch(w[k].stack, /__keploy_worker/, w[k].stack);
+      // No code of keploy's is on a stack through the app's script, at its
+      // top level or in its handlers, held connections' too.
+      const stacks = [['ded', 'stack', 'ded'], ['shared', 'stack', 'shared'], ['mod', 'top', 'mod'], ['mshared', 'top', 'mshared'],
+        ...['c1', 'c2', 'c1+2'].flatMap((c) => [[c, 'top', 'cshared'], [c, 'stack', 'cshared']])];
+      for (const [k, f, file] of stacks) {
+        assert.match(w[k][f], new RegExp(`/wk/${file}\\.js[?:]`), `${k}.${f}: ${w[k][f]}`);
+        assert.doesNotMatch(w[k][f], /__keploy_worker/, `${k}.${f}: ${w[k][f]}`);
       }
+      // A message the page posts as it starts a Web Worker reaches the app's
+      // handler: the app's script has run before the worker takes it.
+      assert.deepEqual([w['ded-early'], w['mod-early']], [{ kind: 'ded-early', data: 'early' }, { kind: 'mod-early', data: 'early' }]);
       assert.deepEqual([w.ded.dep, w.mod.dep, w.mshared.dep, w.c1.dep, w.c2.dep, w['c1+2'].dep], ['dep', 'lib', 'lib', 'lib', 'lib', 'lib']);
       // c1's second connection is c1's worker's: what it drew as it loaded.
       assert.deepEqual(w['c1+2'].draws, w.c1.draws);

@@ -1352,20 +1352,25 @@ export function cspAllowsData(headers: Record<string, string>): boolean {
  * script so runs at its own URL: its import.meta.url, the URLs its imports
  * resolve against and a stack trace through it show no mark, and the
  * worker's location hides the one its script URL carries (workerScript).
- * A classic worker imports the app's script (importScripts) after its
- * seeding. A module Web Worker imports its seeding (the route answers that
- * import, marked 'p') and then the app's script. Chromium and WebKit let the
- * route reach none of what a Shared Worker loads after its script, so a
- * module Shared Worker imports its seeding as a data: module, which runs
- * before every module the app's script imports; where its policy refuses
- * data: scripts (dataOk false), its seeding runs in the answer itself, which
- * then imports the app's script (import()), and holds each connect event
- * that comes before the app's script has run, to give it, in order, to the
- * handlers the app's script sets.
+ * No code of the answer's is on the stack when the app's code runs: a
+ * classic worker imports the app's script (importScripts) after its
+ * seeding, in a microtask the answer queues, which runs as the answer ends,
+ * before the worker takes any message or connection, and reports what the
+ * app's script throws as the worker's own error, as an uncaught one at its
+ * top level is. A module Web Worker imports its seeding (the route answers
+ * that import, marked 'p') and then the app's script. Chromium and WebKit
+ * let the route reach none of what a Shared Worker loads after its script,
+ * so a module Shared Worker imports its seeding as a data: module, which
+ * runs before every module the app's script imports; where its policy
+ * refuses data: scripts (dataOk false), its seeding runs in the answer
+ * itself, which then imports the app's script (import()), and holds each
+ * connect event that comes before the app's script has run, to give it, in
+ * order, each in a microtask of its own, to the handlers the app's script
+ * sets.
  */
 export function workerAnswer(token: string, n: number, kind: 'w' | 'm' | 's' | 'x', own: string, dataOk = true): string {
   const url = JSON.stringify(own);
-  if (kind === 'w' || kind === 's') return `${workerScript(token, n, kind)}importScripts(${url});\n`;
+  if (kind === 'w' || kind === 's') return `${workerScript(token, n, kind)}queueMicrotask(importScripts.bind(globalThis, ${url}));\n`;
   if (kind === 'm') return `import ${JSON.stringify(markWorker(own, 'p', token, n))};\nimport ${url};\n`;
   const seeding = workerScript(token, n, 'x');
   if (dataOk) return `import ${JSON.stringify(`data:text/javascript;base64,${Buffer.from(seeding).toString('base64')}`)};\nimport ${url};\n`;
@@ -1376,7 +1381,7 @@ try {
   await import(${url});
 } finally {
   removeEventListener('connect', hold);
-  for (const e of held) dispatchEvent(new MessageEvent('connect', { data: e.data, origin: e.origin, lastEventId: e.lastEventId, source: e.source, ports: e.ports }));
+  for (const e of held) queueMicrotask(dispatchEvent.bind(globalThis, new MessageEvent('connect', { data: e.data, origin: e.origin, lastEventId: e.lastEventId, source: e.source, ports: e.ports })));
 }
 `;
 }
