@@ -126,7 +126,8 @@ const UNREACHED: Record<'worker' | 'shared' | 'routed' | 'service' | 'early' | '
   service: 'keploy cannot put its seeding ahead of a Service Worker\'s script, and a worker whose script the Service Worker may answer starts unseeded (each one is named); ' +
     `${BLOCK}.`,
   early: 'it is a Shared Worker started before the browser told keploy which Service Workers the page\'s origin has (keploy asks as each document begins, ' +
-    'and a document that cannot read its Service Workers, as a sandboxed one, is never told), and a Service Worker whose scope holds the worker\'s URL ' +
+    'and a document that begins while a document of the origin is registering a Service Worker, or that cannot read its Service Workers ' +
+    'or its Web Locks, as a sandboxed one, is never told), and a Service Worker whose scope holds the worker\'s URL ' +
     `would see keploy's __keploy_worker mark in the script's URL, so keploy starts the worker as the app asked; ${BLOCK}.`,
   nested: 'it is a worker that a worker started, and Chromium and Firefox do not let keploy reach its script to put its seeding ahead of it; ' +
     'record and replay the test in WebKit to seed it.',
@@ -630,6 +631,11 @@ export const WORKER_PARAM = '__keploy_worker';
 // context say the scopes of the Service Worker registrations they make and
 // find (initScript).
 export const SW_CHANNEL = '__keploy_service_workers_';
+
+// The Web Lock each register of a document holds, shared, from before the
+// browser registers it until it settles, so that a document of the origin
+// that begins meanwhile knows a registration may be coming (initScript).
+export const SW_LOCK = 'keploy-sw-register';
 
 // A browser script's streams: hash, a string's 128 bits (cyrb128), and
 // stream, sfc32 over them, 32 random bits a call. A replay draws what its
@@ -1233,11 +1239,20 @@ ${DRAW_JS}
   // URL; one started before keploy knows, or one a known registration's
   // scope holds, starts as the app asked and says so (servedBy), as does a
   // worker of a controlled document. keploy knows the registrations of the
-  // document's origin once the browser answers the getRegistrations it asks
-  // as the document begins, and keeps them current: each document of the
-  // context says on keploy's channel the scope of each register it calls
-  // (before the browser registers it) and of each registration that answer
-  // finds, and hears what the others say. A context Playwright blocks
+  // document's origin once, as the document begins, the browser has said that
+  // no register of the origin's documents is in flight (none holds or asks for
+  // keploy's Web Lock, SW_LOCK, which each register takes before the browser
+  // registers it and lets go once it settles) and then, asked only after that,
+  // which registrations the origin has. In that order a register is known
+  // whenever it began: one that settled before the lock was read is among the
+  // registrations, one in flight holds the lock, and one that began after the
+  // lock was read is said on keploy's channel, which this document opened
+  // before it read the lock. A document that finds the lock held, or that has
+  // no Web Locks, never knows (its next document asks again). keploy keeps
+  // what it knows current: each document of the context says on keploy's
+  // channel the scope of each register it calls (before the browser
+  // registers it) and of each registration that answer finds, and hears
+  // what the others say. A context Playwright blocks
   // registers none, and keploy knows that as it begins (the context's first
   // document finds none: the fixture's context is a new one). A document with
   // no Service Workers (an insecure context) has none to know. A Service
@@ -1258,6 +1273,30 @@ ${DRAW_JS}
   const say = (m) => { try { apply(post, channel, [m]); } catch (e) {} };
   let realRegister = null;
   try { realRegister = g.ServiceWorkerContainer.prototype.register; } catch (e) { realRegister = null; }
+  // The document's Web Locks, as the browser gave them (null: none).
+  let locks = null;
+  let lockRequest = null;
+  let lockQuery = null;
+  try {
+    locks = g.navigator.locks;
+    lockRequest = locks.request;
+    lockQuery = locks.query;
+  } catch (e) { locks = null; }
+  const LOCK = ${JSON.stringify(SW_LOCK)};
+  // Takes keploy's lock for a register; what it gives lets it go. With no
+  // Web Locks it takes none, and the documents that begin meanwhile never
+  // know either way.
+  const hold = () => {
+    let free = () => {};
+    try {
+      const settled = new Promise((ok) => { free = ok; });
+      // A request the browser refuses says nothing to the app.
+      apply(lockRequest, locks, [LOCK, { mode: 'shared' }, () => settled]).catch(() => {});
+    } catch (e) {
+      // No lock to take.
+    }
+    return () => { free(); };
+  };
   try {
     if (/Service Worker registration blocked by Playwright/.test(Function.prototype.toString.call(realRegister))) known = true;
   } catch (e) {
@@ -1298,12 +1337,16 @@ ${DRAW_JS}
           scope = sc.href;
         } catch (e) { scope = ''; }
         // Known before the browser registers it: here, and in each other
-        // document of the context once it hears it.
+        // document of the context once it hears it; the lock first, so that
+        // a document that begins after it is said finds the lock held.
+        const free = hold();
         const had = regs.has(scope);
         if (!had) { regs.set(scope, at); say({ scope, at }); }
-        const p = realRegister.apply(this, arguments);
+        let p;
+        try { p = realRegister.apply(this, arguments); } catch (e) { free(); throw e; }
         try {
           p.then((r) => {
+            free();
             if (!r) {
               // Playwright's block registered none: what this register held
               // goes, unless the browser found that registration.
@@ -1311,9 +1354,11 @@ ${DRAW_JS}
               return;
             }
             if (tell !== null) { const t = tell(at, 'service', 0); if (t && typeof t.catch === 'function') t.catch(() => {}); }
-          }, () => {});
+          }, () => { free(); });
         } catch (e) {
-          // A register that returned no promise: nothing to hear.
+          // A register that returned no promise: nothing to hear, nothing
+          // in flight.
+          free();
         }
         return p;
       } }.register);
@@ -1326,22 +1371,28 @@ ${DRAW_JS}
     const c = g.navigator.serviceWorker;
     if (c === undefined) known = true;
     else {
-      c.getRegistrations().then((rs) => {
-        for (const r of rs) {
-          const s = String(r.scope);
-          found.add(s);
-          if (!regs.has(s)) {
-            const a = swAddress(r.active || r.waiting || r.installing);
-            regs.set(s, a);
-            say({ scope: s, at: a });
+      // keploy's lock, held or asked for: a register in flight. One of the
+      // app's own at that name counts too.
+      const busy = (l) => l.name === LOCK;
+      apply(lockQuery, locks, []).then((q) => {
+        if (q.held.some(busy) || q.pending.some(busy)) return undefined;
+        return c.getRegistrations().then((rs) => {
+          for (const r of rs) {
+            const s = String(r.scope);
+            found.add(s);
+            if (!regs.has(s)) {
+              const a = swAddress(r.active || r.waiting || r.installing);
+              regs.set(s, a);
+              say({ scope: s, at: a });
+            }
           }
-        }
-        known = true;
-      }, () => {});
+          known = true;
+        });
+      }).catch(() => {});
     }
   } catch (e) {
-    // No Service Worker can be read here (an opaque origin): keploy does not
-    // know.
+    // No Service Worker can be read here (an opaque origin), or no Web Locks:
+    // keploy does not know.
   }
   // The address of the Service Worker that may answer the script of a worker
   // at href ('' when keploy cannot read it); null when none may; false for

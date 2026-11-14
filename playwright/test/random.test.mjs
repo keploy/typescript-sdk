@@ -3,7 +3,7 @@
 // a page. No browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DOC_KEY, ENV_SEED_RANDOM, FAKER, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, esmFile, exportOf, fakerLine, fakersIn, fakersOf, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatFaker, seatRandom, seedFaker, seedingFromEnv, setAside, unplacedLine, unseededLine, WORKER_PARAM, SW_CHANNEL, markWorker, workerMark, workerScript, workerRoutes, workerAnswer, cspAllowsData } from '../dist/random.js';
+import { DOC_KEY, ENV_SEED_RANDOM, FAKER, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, esmFile, exportOf, fakerLine, fakersIn, fakersOf, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatFaker, seatRandom, seedFaker, seedingFromEnv, setAside, unplacedLine, unseededLine, WORKER_PARAM, SW_CHANNEL, SW_LOCK, markWorker, workerMark, workerScript, workerRoutes, workerAnswer, cspAllowsData } from '../dist/random.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -1465,24 +1465,50 @@ test('the lines for a worker keploy cannot reach say what it is, that each worke
     'it is a worker that a worker started, and Chromium and Firefox do not let keploy reach its script to put its seeding ahead of it; record and replay the test in WebKit to seed it.');
   assert.equal(unplacedLine('t', 'http://h/s.js', 'early'), 'keploy: in t, the Shared Worker at http://h/s.js draws the browser\'s own random numbers, ' + KIDS +
     'it is a Shared Worker started before the browser told keploy which Service Workers the page\'s origin has (keploy asks as each document begins, ' +
-    'and a document that cannot read its Service Workers, as a sandboxed one, is never told), and a Service Worker whose scope holds the worker\'s URL ' +
+    'and a document that begins while a document of the origin is registering a Service Worker, or that cannot read its Service Workers ' +
+    'or its Web Locks, as a sandboxed one, is never told), and a Service Worker whose scope holds the worker\'s URL ' +
     'would see keploy\'s __keploy_worker mark in the script\'s URL, so keploy starts the worker as the app asked; if the tests do not need it, ' +
     'set serviceWorkers: \'block\' in the project\'s use (Playwright then registers none, and keploy seeds the workers it would have answered).');
   assert.match(unplacedLine('t', 'http://h/w.js', 'routed'),/^keploy: in t, the worker at http:\/\/h\/w\.js draws the browser's own random numbers, and so does each worker it starts, so their draws may differ at replay: a route of the test's own /);
 });
 
 
+// An origin's Web Locks, as the browser's LockManager: request takes the
+// lock at once (none here waits on another), holds it until the callback's
+// promise settles and answers that; query answers what is held, and pending
+// is what the row puts there. asked keeps each request, and log each
+// request, query and release in order.
+const lockManager = () => {
+  const held = [];
+  const pending = [];
+  const asked = [];
+  const log = [];
+  const locks = {
+    request(name, options, cb) {
+      if (typeof options === 'function') { cb = options; options = {}; }
+      const l = { name, mode: options.mode ?? 'exclusive' };
+      held.push(l); asked.push(l); log.push(['request', l.name, l.mode]);
+      return Promise.resolve().then(() => cb(l)).finally(() => { held.splice(held.indexOf(l), 1); log.push(['release', l.name]); });
+    },
+    query() { log.push(['query', held.length]); return Promise.resolve({ held: held.map((l) => ({ ...l })), pending: pending.map((l) => ({ ...l })) }); },
+  };
+  return { locks, held, pending, asked, log };
+};
+
 // A document's ServiceWorkerContainer: register answers what answer gives
 // (a registration of its script, by default), getRegistrations the
-// registrations regs, and the controller is state.controller.
-const swGlobals = ({ answer = (u) => Promise.resolve({ active: { scriptURL: `http://h${u}` } }), regs = [], late = false, state = { controller: null } } = {}) => {
+// registrations regs, and the controller is state.controller; its navigator's
+// Web Locks are locks (a manager of its own by default; null: none).
+const swGlobals = ({ answer = (u) => Promise.resolve({ active: { scriptURL: `http://h${u}` } }), regs = [], late = false, state = { controller: null }, locks = lockManager(), log = [] } = {}) => {
   class ServiceWorkerContainer {
     register(u) { return answer(u); }
     // late: the registrations come 20 ms after.
-    getRegistrations() { return late ? new Promise((r) => setTimeout(() => r(regs), 20)) : Promise.resolve(regs); }
+    getRegistrations() { log.push('getRegistrations'); return late ? new Promise((r) => setTimeout(() => r(regs), 20)) : Promise.resolve(regs); }
     get controller() { return state.controller; }
   }
-  return { state, globals: { ServiceWorkerContainer, navigator: { serviceWorker: new ServiceWorkerContainer() } } };
+  const navigator = { serviceWorker: new ServiceWorkerContainer() };
+  if (locks !== null) navigator.locks = locks.locks;
+  return { state, locks, globals: { ServiceWorkerContainer, navigator } };
 };
 const turn = () => new Promise((r) => setImmediate(r));
 
@@ -1724,6 +1750,114 @@ test('the documents of a context say on keploy\'s channel each registration they
   const before = bus.all.length;
   documentAt(initScript(S1, 'tell', 'm1', false), '/p', new Map(), 't0', { report: 'tell', told: [], globals: { ...workerGlobals().globals, ...swGlobals().globals, BroadcastChannel: bus.BroadcastChannel } });
   assert.equal(bus.all.length, before);
+});
+
+// Rejections no handler took while fn ran, and a few turns after.
+const unhandled = async (fn) => {
+  const got = [];
+  const take = (e) => { got.push(e); };
+  process.on('unhandledRejection', take);
+  try { await fn(); for (let i = 0; i < 5; i++) await turn(); } finally { process.off('unhandledRejection', take); }
+  return got;
+};
+
+test('each register holds keploy\'s Web Lock, shared, taken before the channel hears it and let go once the register settles, however it ends; a document asks for its registrations only after the browser said that no lock of that name is held or asked for: one that begins while another document\'s register is in flight never knows (its Shared Workers start as the app asked and are named), and neither does one whose lock read is refused or makes no sense, or one with no Web Locks; another lock changes nothing', async () => {
+  const bus = channels();
+  const m = lockManager();
+  // The channel's messages, in order with the locks'.
+  class BC extends bus.BroadcastChannel { postMessage(x) { m.log.push(['say', x.scope]); super.postMessage(x); } }
+  const doc = (sw) => {
+    const told = [];
+    const w = workerGlobals();
+    const d = documentAt(initScript(S1, 'tell', 'm1'), '/p', new Map(), 't0', { report: 'tell', told, globals: { ...w.globals, ...sw.globals, BroadcastChannel: BC } });
+    return { d, told, made: () => w.made.map(([u]) => workerMark(u)) };
+  };
+  // a's register is in flight until release.
+  let release = null;
+  const a = doc(swGlobals({ locks: m, log: m.log, answer: (u) => new Promise((ok) => { release = () => ok({ active: { scriptURL: `http://h${u}` } }); }) }));
+  await turn(); await turn();
+  assert.deepEqual(m.log, [['query', 0], 'getRegistrations']);
+  m.log.length = 0;
+  a.d.run('navigator.serviceWorker.register("/app/sw.js");');
+  assert.deepEqual(m.log, [['request', SW_LOCK, 'shared'], ['say', 'http://h/app/']]);
+  // b begins meanwhile: it finds the lock held, never asks for its
+  // registrations, and starts its Shared Workers as the app asked, even once
+  // the register has settled.
+  m.log.length = 0;
+  const b = doc(swGlobals({ locks: m, log: m.log }));
+  await turn(); await turn();
+  assert.deepEqual(m.log, [['query', 1]]);
+  b.d.run('new SharedWorker("/s.js");');
+  release();
+  await turn(); await turn();
+  assert.deepEqual(m.held, []);
+  b.d.run('new SharedWorker("/t.js");');
+  assert.deepEqual([b.made(), b.told], [[null, null], [['http://h/s.js', 'early'], ['http://h/t.js', 'early']]]);
+  // c begins after: no lock, so it asks, and finds the registration.
+  m.log.length = 0;
+  const c = doc(swGlobals({ locks: m, log: m.log, regs: [{ scope: 'http://h/app/', active: { scriptURL: 'http://h/app/sw.js' } }] }));
+  await turn(); await turn();
+  assert.deepEqual(m.log.slice(0, 2), [['query', 0], 'getRegistrations']);
+  c.d.run('new SharedWorker("/s.js"); new SharedWorker("/app/s.js");');
+  assert.deepEqual([c.made().map((x) => x && x.kind), c.told], [['s', null], [['http://h/app/s.js', 'controlled', 'http://h/app/sw.js']]]);
+  // Two registers in flight at once both hold it.
+  const two = lockManager();
+  const t = doc(swGlobals({ locks: two, answer: () => new Promise(() => {}) }));
+  t.d.run('navigator.serviceWorker.register("/x/sw.js"); navigator.serviceWorker.register("/y/sw.js");');
+  await turn();
+  assert.deepEqual(two.held, [{ name: SW_LOCK, mode: 'shared' }, { name: SW_LOCK, mode: 'shared' }]);
+  // However the register ends, the lock goes: refused, thrown, Playwright's
+  // block, no promise at all.
+  for (const [how, answer, script] of [
+    ['refused', () => Promise.reject(new TypeError('no')), 'navigator.serviceWorker.register("/sw.js").catch(() => {});'],
+    ['thrown', () => { throw new TypeError('no'); }, 'try { navigator.serviceWorker.register("/sw.js"); } catch (e) {}'],
+    ['blocked', async () => undefined, 'navigator.serviceWorker.register("/sw.js");'],
+    ['no promise', () => 1, 'navigator.serviceWorker.register("/sw.js");'],
+  ]) {
+    const l = lockManager();
+    const d = doc(swGlobals({ locks: l, answer }));
+    d.d.run(script);
+    await turn(); await turn();
+    assert.deepEqual([l.asked.length, l.held], [1, []], how);
+  }
+  // A lock held or asked for, a lock read refused or one whose answer makes no
+  // sense, or no Web Locks: never known. A lock of another name: known.
+  const never = async (l) => {
+    const d = doc(swGlobals({ locks: l }));
+    await turn(); await turn();
+    d.d.run('new SharedWorker("/s.js");');
+    return [d.made(), d.told];
+  };
+  const pending = lockManager();
+  pending.pending.push({ name: SW_LOCK, mode: 'shared' });
+  const refused = lockManager();
+  refused.locks.query = () => Promise.reject(new Error('SecurityError'));
+  const odd = lockManager();
+  odd.locks.query = () => Promise.resolve({});
+  for (const [how, l] of [['pending', pending], ['refused', refused], ['odd', odd], ['none', null]]) {
+    assert.deepEqual(await never(l), [[null], [['http://h/s.js', 'early']]], how);
+  }
+  const other = lockManager();
+  other.held.push({ name: 'app-lock', mode: 'exclusive' });
+  other.pending.push({ name: 'app-lock', mode: 'shared' });
+  assert.deepEqual((await never(other))[1], []);
+  // With no Web Locks, a register still answers as the browser's does, and a
+  // context Playwright blocks still knows at once.
+  const bare = doc(swGlobals({ locks: null }));
+  assert.deepEqual(await bare.d.run('navigator.serviceWorker.register("/sw.js")'), { active: { scriptURL: 'http://h/sw.js' } });
+  const blocked = swGlobals({ locks: null });
+  blocked.globals.ServiceWorkerContainer.prototype.register = async () => { void 'Service Worker registration blocked by Playwright'; };
+  const k = doc(blocked);
+  k.d.run('new SharedWorker("/s.js");');
+  assert.equal(k.made()[0].kind, 's');
+  // A lock request or read the browser refuses says nothing to the app.
+  assert.deepEqual(await unhandled(async () => {
+    const r = lockManager();
+    r.locks.request = () => Promise.reject(new Error('AbortError'));
+    r.locks.query = () => Promise.reject(new Error('SecurityError'));
+    doc(swGlobals({ locks: r })).d.run('navigator.serviceWorker.register("/sw.js");');
+  }), []);
+  assert.deepEqual(bus.thrown, []);
 });
 
 test('a worker\'s seeding draws the same numbers for a token and instance every run, others for another; its location shows no mark, its own query and fragment kept', () => {

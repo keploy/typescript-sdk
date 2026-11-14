@@ -633,6 +633,10 @@ async function drawsServer() {
     };
   })();
   const rheld = [];
+  // service-known.spec.ts's registering: /swh/sw.js is answered only at
+  // /swh/release; /swh/asked answers once it has been asked for.
+  const swheld = [];
+  const swasked = [];
   // Every URL the server was asked for, as the request named it.
   const seen = [];
   const srv = http.createServer((req, res) => {
@@ -644,6 +648,14 @@ async function drawsServer() {
     // parse.spec.ts's removed: /rhold.js is answered at /rrelease.
     if (u.pathname === '/rhold.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); rheld.push(res); return; }
     if (u.pathname === '/rrelease') { for (const r of rheld.splice(0)) r.end(''); res.end(''); return; }
+    if (u.pathname === '/swh/sw.js') {
+      res.writeHead(200, { 'content-type': 'text/javascript' });
+      swheld.push(res);
+      for (const r of swasked.splice(0)) r.end('');
+      return;
+    }
+    if (u.pathname === '/swh/asked') { if (swheld.length > 0) res.end(''); else swasked.push(res); return; }
+    if (u.pathname === '/swh/release') { for (const r of swheld.splice(0)) r.end('self.addEventListener(\'fetch\', () => {});'); res.end(''); return; }
     // workers.spec.ts's workers, and the scripts they load; /wk/ref answers
     // the Referer it was sent.
     if (u.pathname === '/wk/ref') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end(req.headers.referer ?? 'none'); return; }
@@ -692,6 +704,8 @@ async function drawsServer() {
       // is a Shared Worker its scope holds.
       '/swr/sw.js': 'const seen = []; self.addEventListener(\'fetch\', (e) => { seen.push(e.request.url); }); self.addEventListener(\'message\', (e) => e.source.postMessage({ kind: \'sw-seen\', seen }));',
       '/swr/s.js': `onconnect = (e) => e.ports[0].postMessage({ kind: 'swr-shared', href: location.href, draws: ${DRAWS} });`,
+      // A Shared Worker the scope of /swh/sw.js holds.
+      '/swh/s.js': `onconnect = (e) => e.ports[0].postMessage({ kind: 'swh-shared', href: location.href, draws: ${DRAWS} });`,
     }[u.pathname];
     if (sw !== undefined) { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end(sw); return; }
     res.writeHead(200, { 'content-type': 'text/html' });
@@ -719,7 +733,7 @@ async function drawsServer() {
     // /nest holds /frame of its own origin.
     if (u.pathname === '/nest') { res.end(page('<iframe src="/frame"></iframe>')); return; }
     // /long/... is a page at an address of any length.
-    if (u.pathname.startsWith('/long/') || u.pathname === '/swr/p') { res.end(page('')); return; }
+    if (u.pathname.startsWith('/long/') || u.pathname === '/swr/p' || u.pathname === '/swh/p') { res.end(page('')); return; }
     // places.spec.ts's: /host puts in a (/fa, its own origin), c (/fc) and
     // w (/fw, both cross-site) in the order ?order= names; /race holds r0
     // and r1 at /fr, and /fr answers late the one ?slow= names; /nested
@@ -1660,10 +1674,10 @@ for (const engine of ENGINES) {
 }
 
 // service-known.spec.ts's tests.
-const KNOWN_TITLES = ['shared worker early', 'shared worker announced', 'shared worker known'];
+const KNOWN_TITLES = ['shared worker early', 'shared worker announced', 'shared worker registering', 'shared worker known'];
 
 for (const engine of ENGINES) {
-  test(`seeded, in ${engine}: a Shared Worker is marked only once keploy knows no Service Worker's scope holds its URL: one started before the browser answers starts as the app asked and is named; one whose URL the scope of a registration another page made holds starts as the app asked, so that Service Worker sees no mark, and is named with it; one started once the browser said there is none draws from the test's seed, the same at replay (in Firefox, whose route does not reach a Shared Worker's script, each is named for that)`, async () => {
+  test(`seeded, in ${engine}: a Shared Worker is marked only once keploy knows no Service Worker's scope holds its URL: one started before the browser answers starts as the app asked and is named; one whose URL the scope of a registration another page made holds starts as the app asked, so that Service Worker sees no mark, and is named with it; one of a page that began while another page's register was in flight starts as the app asked and is named, even once keploy's lock read would have answered; one started once the browser said there is none draws from the test's seed, the same at replay (in Firefox, whose route does not reach a Shared Worker's script, each is named for that)`, async () => {
     const j = journal();
     const rec = await fakeAgent(j);
     let kept = {};
@@ -1696,6 +1710,15 @@ for (const engine of ENGINES) {
       ].sort(), facts);
       assert.equal(ann.seen.kind, 'sw-seen', facts);
       assert.deepEqual(ann.seen.seen.filter((u) => u.includes('__keploy_worker')), [], facts);
+      // Registering: the page began while the other page's register held
+      // keploy's lock, so it never knows: as the app asked, named.
+      const reg = r.drew['shared worker registering'];
+      assert.equal(reg.w[0].href, `${origin}/swh/s.js`, facts);
+      assert.deepEqual(said('shared worker registering'), [
+        unplacedLine('shared worker registering', at('swh/sw.js'), 'service'),
+        unplacedLine('shared worker registering', at('swh/s.js'), ff ? 'shared' : 'early'),
+        sharedWorkerLine('shared worker registering', at('swh/s.js')),
+      ].sort(), facts);
       // Known: seeded (Chromium, WebKit), and only the settle line is said.
       const known = r.drew['shared worker known'].w[0];
       assert.equal(known.href, `${origin}/swk/s.js`, facts);
@@ -1709,8 +1732,10 @@ for (const engine of ENGINES) {
       const again = q.drew['shared worker known'].w[0];
       if (ff) assert.notDeepEqual(again.draws, known.draws, facts);
       else assert.deepEqual(again.draws, known.draws, facts);
-      // The early one is not seeded: it draws other numbers at replay.
+      // The early one is not seeded: it draws other numbers at replay, as
+      // does the registering one.
       assert.notDeepEqual(q.drew['shared worker early'].w[0].draws, early.draws, facts);
+      assert.notDeepEqual(q.drew['shared worker registering'].w[0].draws, reg.w[0].draws, facts);
     } finally { await rep.close(); await rec.close(); }
   });
 }
