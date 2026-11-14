@@ -614,15 +614,16 @@ async function drawsServer() {
     if (u.pathname === '/rrelease') { for (const r of rheld.splice(0)) r.end(''); res.end(''); return; }
     // workers.spec.ts's workers, and the scripts they load.
     const wk = {
-      '/wk/ded.js': `importScripts('dep.js'); postMessage({ kind: 'ded', draws: ${DRAWS}, href: location.href, dep: self.dep });`,
+      '/wk/ded.js': `importScripts('dep.js'); postMessage({ kind: 'ded', draws: ${DRAWS}, href: location.href, dep: self.dep, stack: String(new Error('at').stack) });`,
       '/wk/dep.js': 'self.dep = \'dep\';',
-      '/wk/mod.js': `import { dep } from './lib.mjs'; postMessage({ kind: 'mod', draws: ${DRAWS}, href: location.href, dep });`,
+      '/wk/mod.js': `import { dep } from './lib.mjs'; postMessage({ kind: 'mod', draws: ${DRAWS}, href: location.href, dep, meta: import.meta.url });`,
       '/wk/lib.mjs': 'export const dep = \'lib\';',
-      '/wk/shared.js': `onconnect = (e) => e.ports[0].postMessage({ kind: 'shared', draws: ${DRAWS}, href: location.href });`,
-      // Module Shared Workers: one plain, one (started twice, by two names)
-      // served with a policy that refuses data: scripts.
-      '/wk/mshared.js': `import { dep } from './lib.mjs'; self.onconnect = (e) => e.ports[0].postMessage({ kind: 'mshared', draws: ${DRAWS}, href: location.href, dep });`,
-      '/wk/cshared.js': `import { dep } from './lib.mjs'; self.onconnect = (e) => e.ports[0].postMessage({ kind: self.name, draws: ${DRAWS}, href: location.href, dep });`,
+      '/wk/shared.js': `onconnect = (e) => e.ports[0].postMessage({ kind: 'shared', draws: ${DRAWS}, href: location.href, stack: String(new Error('at').stack) });`,
+      // Module Shared Workers: one plain, one (started by two names, c1
+      // twice) served with a policy that refuses data: scripts. Each
+      // connection after a worker's first is named by its number (c1+2).
+      '/wk/mshared.js': `import { dep } from './lib.mjs'; self.onconnect = (e) => e.ports[0].postMessage({ kind: 'mshared', draws: ${DRAWS}, href: location.href, dep, meta: import.meta.url });`,
+      '/wk/cshared.js': `import { dep } from './lib.mjs'; let n = 0; const draws = ${DRAWS}; self.onconnect = (e) => { n++; e.ports[0].postMessage({ kind: self.name + (n > 1 ? \`+\${n}\` : ''), draws, href: location.href, dep, meta: import.meta.url }); };`,
     }[u.pathname];
     if (wk !== undefined) {
       res.writeHead(200, { 'content-type': 'text/javascript', ...(u.pathname === '/wk/cshared.js' ? { 'content-security-policy': 'script-src \'self\'' } : {}) });
@@ -1278,6 +1279,7 @@ const WK_STARTS = [
   'new SharedWorker(\'/wk/mshared.js\', { type: \'module\', name: \'mn\' })',
   'new SharedWorker(\'/wk/cshared.js\', { type: \'module\', name: \'c1\' })',
   'new SharedWorker(\'/wk/cshared.js\', { type: \'module\', name: \'c2\' })',
+  'new SharedWorker(\'/wk/cshared.js\', { type: \'module\', name: \'c1\' })',
 ];
 
 // The marks a document at /wk of page t0 gives the workers workers.spec.ts
@@ -1291,7 +1293,7 @@ function workerMarks(seed) {
 }
 
 for (const engine of ENGINES) {
-  test(`seeded, in ${engine}: a page's classic and module Web Workers and its classic and module Shared Workers draw from the test's seed, the same at replay, at the app's location and loading what sits beside them, and the app's server never sees keploy's mark; a module Shared Worker whose policy refuses data: draws its own and is named once; in Firefox each Shared Worker draws its own and is named`, async () => {
+  test(`seeded, in ${engine}: a page's classic and module Web Workers and its classic and module Shared Workers draw from the test's seed, the same at replay, a module Shared Worker whose policy refuses data: too (each connection that came before its script ran given to it, in order), at the app's location, URLs and stack, loading what sits beside them, and the app's server never sees keploy's mark; in Firefox each Shared Worker draws its own and is named`, async () => {
     const j = journal();
     const rec = await fakeAgent(j);
     let kept = {};
@@ -1302,30 +1304,44 @@ for (const engine of ENGINES) {
     try {
       const r = await drawRun(j, env(rec.url), ['workers.spec.ts'], ['workers']);
       const w = byKind(r);
-      const [ded, mod, shared, mshared, c1, c2] = workerMarks(r.seeds.workers);
-      assert.deepEqual([ded, mod, shared, mshared, c1, c2].map((m) => m.kind), ['w', 'm', 's', 'x', 'x', 'x']);
+      const [ded, mod, shared, mshared, c1, c2, c1again] = workerMarks(r.seeds.workers);
+      assert.deepEqual([ded, mod, shared, mshared, c1, c2, c1again].map((m) => m.kind), ['w', 'm', 's', 'x', 'x', 'x', 'x']);
       assert.notEqual(c1.token, c2.token);
+      assert.equal(c1again.token, c1.token);
       assert.match(w.ded.href, /^http:\/\/127\.0\.0\.1:\d+\/wk\/ded\.js\?x=1$/);
       assert.match(w.mod.href, /^http:\/\/127\.0\.0\.1:\d+\/wk\/mod\.js$/);
       assert.match(w.shared.href, /^http:\/\/127\.0\.0\.1:\d+\/wk\/shared\.js$/);
       assert.match(w.mshared.href, /^http:\/\/127\.0\.0\.1:\d+\/wk\/mshared\.js$/);
-      for (const c of [w.c1, w.c2]) assert.match(c.href, /^http:\/\/127\.0\.0\.1:\d+\/wk\/cshared\.js$/);
-      assert.deepEqual([w.ded.dep, w.mod.dep, w.mshared.dep, w.c1.dep, w.c2.dep], ['dep', 'lib', 'lib', 'lib', 'lib']);
+      for (const c of [w.c1, w.c2, w['c1+2']]) assert.match(c.href, /^http:\/\/127\.0\.0\.1:\d+\/wk\/cshared\.js$/);
+      // The app's script runs at its own URL: its import.meta.url and a
+      // stack through it show no mark.
+      assert.match(w.mod.meta, /^http:\/\/127\.0\.0\.1:\d+\/wk\/mod\.js$/);
+      assert.match(w.mshared.meta, /^http:\/\/127\.0\.0\.1:\d+\/wk\/mshared\.js$/);
+      for (const c of [w.c1, w.c2, w['c1+2']]) assert.match(c.meta, /^http:\/\/127\.0\.0\.1:\d+\/wk\/cshared\.js$/);
+      for (const k of ['ded', 'shared']) {
+        assert.match(w[k].stack, new RegExp(`/wk/${k === 'ded' ? 'ded' : 'shared'}\\.js`), w[k].stack);
+        assert.doesNotMatch(w[k].stack, /__keploy_worker/, w[k].stack);
+      }
+      assert.deepEqual([w.ded.dep, w.mod.dep, w.mshared.dep, w.c1.dep, w.c2.dep, w['c1+2'].dep], ['dep', 'lib', 'lib', 'lib', 'lib', 'lib']);
+      // c1's second connection is c1's worker's: what it drew as it loaded.
+      assert.deepEqual(w['c1+2'].draws, w.c1.draws);
       assert.deepEqual(w.ded.draws, workerAt('http://h/wk/ded.js?x=1', workerScript(ded.token, 0, 'w')).draws());
       assert.deepEqual(w.mod.draws, workerAt('http://h/wk/mod.js', workerScript(mod.token, 0, 'm')).draws());
       const model = workerAt('http://h/wk/shared.js', workerScript(shared.token, 0, 's')).draws();
       const mmodel = workerAt('http://h/wk/mshared.js', workerScript(mshared.token, 0, 'x')).draws();
-      for (const [c, m] of [[w.c1, c1], [w.c2, c2]]) assert.notDeepEqual(c.draws, workerAt('http://h/wk/cshared.js', workerScript(m.token, 0, 'x')).draws());
+      const cmodel = [c1, c2].map((m) => workerAt('http://h/wk/cshared.js', workerScript(m.token, 0, 'x')).draws());
       const said = r.tests.workers.stdout.split('\n').filter((l) => l.startsWith('keploy: in workers, ')).map((l) => l.replace(/:\d+\//, ':<port>/'));
       const at = (p) => `http://127.0.0.1:<port>/wk/${p}`;
       if (engine === 'firefox') {
         assert.notDeepEqual(w.shared.draws, model);
         assert.notDeepEqual(w.mshared.draws, mmodel);
+        assert.notDeepEqual([w.c1.draws, w.c2.draws], cmodel);
         assert.deepEqual(said.sort(), ['shared.js', 'mshared.js', 'cshared.js'].map((p) => unplacedLine('workers', at(p), 'shared')).sort());
       } else {
         assert.deepEqual(w.shared.draws, model);
         assert.deepEqual(w.mshared.draws, mmodel);
-        assert.deepEqual(said, [unplacedLine('workers', at('cshared.js'), 'csp')]);
+        assert.deepEqual([w.c1.draws, w.c2.draws], cmodel);
+        assert.deepEqual(said, []);
       }
       // What the app's server was asked for: never keploy's mark, and each
       // worker's script and what it loads.
@@ -1339,7 +1355,10 @@ for (const engine of ENGINES) {
         if (engine === 'firefox') assert.notDeepEqual(p[k].draws, w[k].draws, k);
         else assert.deepEqual(p[k].draws, w[k].draws, k);
       }
-      for (const k of ['c1', 'c2']) assert.notDeepEqual(p[k].draws, w[k].draws, k);
+      for (const k of ['c1', 'c2']) {
+        if (engine === 'firefox') assert.notDeepEqual(p[k].draws, w[k].draws, k);
+        else assert.deepEqual(p[k].draws, w[k].draws, k);
+      }
       assert.deepEqual(q.seen.filter((u) => u.includes('__keploy_worker')), []);
     } finally { await rep.close(); await rec.close(); }
   });

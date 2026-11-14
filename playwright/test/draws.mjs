@@ -69,8 +69,9 @@ export function documentAt(script, path = '/p', storage = new Map(), page = 't0'
 }
 
 // A worker's global scope: its own Crypto and a location whose href,
-// search and toString come from WorkerLocation.prototype.
-export function workerAt(href, prelude) {
+// search and toString come from WorkerLocation.prototype, and the globals
+// given.
+export function workerAt(href, prelude, globals = {}) {
   class Crypto {
     getRandomValues(a) { return webcrypto.getRandomValues(a); }
     randomUUID() { return webcrypto.randomUUID(); }
@@ -80,7 +81,7 @@ export function workerAt(href, prelude) {
     get search() { return new URL(href).search; }
     toString() { return href; }
   }
-  const ctx = { Crypto, crypto: new Crypto(), WorkerLocation, location: new WorkerLocation() };
+  const ctx = { Crypto, crypto: new Crypto(), WorkerLocation, location: new WorkerLocation(), ...globals };
   vm.createContext(ctx);
   if (prelude) vm.runInContext(prelude, ctx);
   return { run: (code) => vm.runInContext(code, ctx), draws: () => JSON.parse(JSON.stringify(vm.runInContext(DRAWS, ctx))) };

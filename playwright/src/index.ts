@@ -216,16 +216,7 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
       const mark = freshSeed();
       // The workers' scripts: Firefox's route does not reach a Shared
       // Worker's, so there it is not marked, and says so.
-      await workerRoutes(context, {
-        answered: (r) => inflight.answered(r),
-        unreached: (url, why) => {
-          const a = pageAddress(url);
-          const k = `${why}\n${a}`;
-          if (told.has(k)) return;
-          told.add(k);
-          process.stdout.write(`${unplacedLine(name, a, why)}\n`);
-        },
-      });
+      await workerRoutes(context, { answered: (r) => inflight.answered(r) });
       await context.addInitScript({ content: initScript(s.seed, report, mark, browserName !== 'firefox') });
       const placing = placePages(context, mark);
       restore = placing.restore;

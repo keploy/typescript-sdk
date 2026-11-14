@@ -98,19 +98,17 @@ export function pageAddress(at: unknown): string {
  * storage to count its documents in (other than a page's first document),
  * or a frame of its origin inside one.
  */
-export type Unplaced = 'own' | 'frame' | 'popup' | 'uncounted' | 'nostorage' | 'worker' | 'shared' | 'csp';
+export type Unplaced = 'own' | 'frame' | 'popup' | 'uncounted' | 'nostorage' | 'worker' | 'shared';
 
 // A worker keploy cannot reach: its line's reason (unplacedLine).
-const UNREACHED: Record<'worker' | 'shared' | 'csp', string> = {
+const UNREACHED: Record<'worker' | 'shared', string> = {
   worker: 'it is a worker started from a script keploy cannot mark (a blob: or data: URL, or a URL the browser refused with keploy\'s mark, as a Trusted Types policy may), ' +
     'so keploy cannot put its seeding ahead of the script; start it from the script\'s http(s) URL to seed it.',
   shared: 'it is a Shared Worker, and Firefox does not let keploy reach a Shared Worker\'s script to put its seeding ahead of it; ' +
     'record and replay the test in Chromium or WebKit to seed it.',
-  csp: 'it is a module Shared Worker whose script is served with a Content-Security-Policy that refuses data: scripts, and keploy puts its seeding ahead of ' +
-    'such a worker\'s modules only as a data: import; allow data: in that policy\'s script-src and worker-src for the test run to seed it.',
 };
 
-const UNPLACED: Record<Exclude<Unplaced, 'uncounted' | 'worker' | 'shared' | 'csp'>, string> = {
+const UNPLACED: Record<Exclude<Unplaced, 'uncounted' | 'worker' | 'shared'>, string> = {
   own: 'it is in a page the test opened, and it drew before keploy named that page: a script the test added with context.addInitScript ' +
     'runs in each of the page\'s documents before keploy\'s, and so does a draw the test makes there before newPage returns.',
   frame: 'it is a frame keploy cannot place among its parent\'s frames (one in a closed shadow root or in an object or embed element, ' +
@@ -132,7 +130,7 @@ const UNPLACED: Record<Exclude<Unplaced, 'uncounted' | 'worker' | 'shared' | 'cs
  * (othersNow).
  */
 export function unplacedLine(name: string, at: string, why: Unplaced = 'popup', others = 0): string {
-  if (why === 'worker' || why === 'shared' || why === 'csp') {
+  if (why === 'worker' || why === 'shared') {
     return `keploy: in ${name}, the ${why === 'worker' ? 'worker' : 'Shared Worker'} at ${at} draws the browser's own random numbers, so its draws may differ at replay: ${UNREACHED[why]}`;
   }
   const n = Math.floor(Number(others));
@@ -1170,9 +1168,9 @@ ${DRAW_JS}
   // it; a Shared Worker, which the documents of a context share, by its
   // script's path and its name alone. The script URL the worker starts
   // with carries that name as a mark (workerMark), which the fixture's
-  // route takes off before the request leaves the browser: it answers
-  // with the worker's seeding and then the app's own script, unchanged
-  // (workerRoutes). A worker keploy cannot mark (a blob: or data: URL, or a
+  // route answers with the worker's seeding, which then loads the app's
+  // own script from the URL the app asked for (workerRoutes, workerAnswer).
+  // A worker keploy cannot mark (a blob: or data: URL, or a
   // marked URL the browser refuses), and a Shared Worker where the route
   // does not reach its script (shared: false, Firefox), starts as the app
   // asked and draws the browser's own numbers, and says so through report.
@@ -1250,21 +1248,21 @@ ${DRAW_JS}
 /**
  * A worker's script URL, marked (initScript), read back: its kind ('w' a
  * classic Web Worker's script, 'm' a module Web Worker's, 's' a classic
- * Shared Worker's, 'x' a module Shared Worker's, 'o' the app's own script
- * that the answer to 'w' or 'm' loads, 'p' a module Web Worker's seeding),
- * its token, the instance n of a token ('o' and 'p'; -1 for the others), and
+ * Shared Worker's, 'x' a module Shared Worker's, 'p' the seeding that the
+ * answer to 'm' imports), its token, the instance n of a token ('p'; -1 for
+ * the others), and
  * the URL with no mark, as the app asked for it. null for a URL with no
  * mark keploy made.
  */
-export type WorkerMark = { kind: 'w' | 'm' | 's' | 'x' | 'o' | 'p'; token: string; n: number; url: string };
+export type WorkerMark = { kind: 'w' | 'm' | 's' | 'x' | 'p'; token: string; n: number; url: string };
 
 export function workerMark(href: string): WorkerMark | null {
   const i = href.indexOf('#');
   const b = i < 0 ? href : href.slice(0, i);
-  const m = /[?&]__keploy_worker=([wmsxop])\.([0-9a-f]{32})(?:\.(\d{1,9}))?$/.exec(b);
+  const m = /[?&]__keploy_worker=([wmsxp])\.([0-9a-f]{32})(?:\.(\d{1,9}))?$/.exec(b);
   if (m === null) return null;
   const kind = m[1] as WorkerMark['kind'];
-  const numbered = kind === 'o' || kind === 'p';
+  const numbered = kind === 'p';
   if (numbered !== (m[3] !== undefined)) return null;
   return { kind, token: m[2], n: numbered ? Number(m[3]) : -1, url: b.slice(0, m.index) + (i < 0 ? '' : href.slice(i)) };
 }
@@ -1282,8 +1280,8 @@ export function markWorker(url: string, kind: WorkerMark['kind'], token: string,
  * crypto.randomUUID, from the worker's token (initScript) and n, the
  * instance of the token (a Shared Worker started again after its documents
  * closed is the next). Its location (href, search, toString) does not show
- * the mark kind.token the worker's URL carries; a module worker's
- * import.meta.url, and a stack trace, show it.
+ * the mark kind.token the worker's URL carries; the app's script runs at
+ * its own URL (workerAnswer).
  */
 export function workerScript(token: string, n: number, kind: 'w' | 'm' | 's' | 'x'): string {
   return `(() => {
@@ -1323,41 +1321,6 @@ ${DRAW_JS}
 `;
 }
 
-// The seeding on one line: workerScript holds no line comment, and each of
-// its statements ends with a semicolon (rows check both).
-function oneLine(js: string): string {
-  return js.split('\n').map((l) => l.trim()).filter((l) => l !== '').join(' ');
-}
-
-const SPACE = /^(?:\s|\/\/[^\n\r\u2028\u2029]*|\/\*[\s\S]*?\*\/)*/;
-// What may follow a string literal on the next line and continue its
-// expression, so that no semicolon is inserted after it.
-const GOES_ON = /^(?:\+(?!\+)|-(?!-)|!=|[([.,?=*/%&|^<>`]|in(?![\w$])|instanceof(?![\w$]))/;
-
-/**
- * Whether a classic script's directive prologue (the string literals that
- * begin it, each a statement of its own) holds a Use Strict Directive: the
- * literal 'use strict' or "use strict", written with no escape.
- */
-export function strictPrologue(src: string): boolean {
-  let s = src;
-  for (;;) {
-    s = s.slice((SPACE.exec(s) ?? [''])[0].length);
-    const lit = /^(['"])((?:\\[\s\S]|(?!\1)[^\\\n\r\u2028\u2029])*)\1/.exec(s);
-    if (lit === null) return false;
-    s = s.slice(lit[0].length);
-    // The rest of its line: spaces and comments that end on it.
-    s = s.slice((/^(?:[ \t\v\f ﻿]|\/\*[^\n\r\u2028\u2029]*?\*\/)*/.exec(s) ?? [''])[0].length);
-    if (s.startsWith(';')) s = s.slice(1);
-    else if (/^(?:[\n\r\u2028\u2029]|\/\/|\/\*)/.test(s)) {
-      // A line ends after it: a statement ends there unless the next line
-      // goes on with its expression.
-      if (GOES_ON.test(s.slice((SPACE.exec(s) ?? [''])[0].length))) return false;
-    } else if (s !== '' && !s.startsWith('}')) return false;
-    if (lit[2] === 'use strict') return true;
-  }
-}
-
 /**
  * Whether a module Shared Worker answered with these headers may import a
  * data: module: each Content-Security-Policy that names a source list for
@@ -1383,51 +1346,65 @@ export function cspAllowsData(headers: Record<string, string>): boolean {
 }
 
 /**
- * A Shared Worker's whole answer: its seeding, then the app's own script.
- * Neither Chromium nor WebKit lets the route reach what a Shared Worker
- * loads after its script, so this answer cannot load the app's script from
- * a URL, as a Web Worker's does. A classic one gets the seeding on the
- * app's first line, so no line of the app's moves: after a hashbang, and
- * under 'use strict' when the app's directive prologue has it. A module
- * one imports its seeding as a data: module first, which runs before every
- * module the app's script imports.
+ * keploy's answer to a marked worker script ('w', 'm', 's' or 'x', for the
+ * instance n of token): the worker's seeding, then the app's own script,
+ * loaded from own, the URL the app asked for, with no mark. The app's
+ * script so runs at its own URL: its import.meta.url, the URLs its imports
+ * resolve against and a stack trace through it show no mark, and the
+ * worker's location hides the one its script URL carries (workerScript).
+ * A classic worker imports the app's script (importScripts) after its
+ * seeding. A module Web Worker imports its seeding (the route answers that
+ * import, marked 'p') and then the app's script. Chromium and WebKit let the
+ * route reach none of what a Shared Worker loads after its script, so a
+ * module Shared Worker imports its seeding as a data: module, which runs
+ * before every module the app's script imports; where its policy refuses
+ * data: scripts (dataOk false), its seeding runs in the answer itself, which
+ * then imports the app's script (import()), and holds each connect event
+ * that comes before the app's script has run, to give it, in order, to the
+ * handlers the app's script sets.
  */
-export function sharedScript(token: string, n: number, kind: 's' | 'x', own: string): string {
-  const bang = /^#![^\n\r\u2028\u2029]*(?:\r\n|[\n\r\u2028\u2029])?/.exec(own);
-  const head = bang === null ? '' : /[\n\r\u2028\u2029]$/.test(bang[0]) ? bang[0] : `${bang[0]}\n`;
-  const rest = own.slice(bang === null ? 0 : bang[0].length);
-  const seeding = workerScript(token, n, kind);
-  if (kind === 'x') return `${head}import ${JSON.stringify(`data:text/javascript;base64,${Buffer.from(seeding).toString('base64')}`)};${rest}`;
-  return `${head}${strictPrologue(rest) ? '\'use strict\';' : ''}${oneLine(seeding)}${rest}`;
+export function workerAnswer(token: string, n: number, kind: 'w' | 'm' | 's' | 'x', own: string, dataOk = true): string {
+  const url = JSON.stringify(own);
+  if (kind === 'w' || kind === 's') return `${workerScript(token, n, kind)}importScripts(${url});\n`;
+  if (kind === 'm') return `import ${JSON.stringify(markWorker(own, 'p', token, n))};\nimport ${url};\n`;
+  const seeding = workerScript(token, n, 'x');
+  if (dataOk) return `import ${JSON.stringify(`data:text/javascript;base64,${Buffer.from(seeding).toString('base64')}`)};\nimport ${url};\n`;
+  return `${seeding}const held = [];
+const hold = (e) => { held.push(e); };
+addEventListener('connect', hold);
+try {
+  await import(${url});
+} finally {
+  removeEventListener('connect', hold);
+  for (const e of held) dispatchEvent(new MessageEvent('connect', { data: e.data, origin: e.origin, lastEventId: e.lastEventId, source: e.source, ports: e.ports }));
+}
+`;
 }
 
 /** What the fixture hears from workerRoutes. */
 export type WorkerHooks = {
   /** The route answered this request whole: none of it is in flight. */
   answered?: (r: Request) => void;
-  /** A worker the route cannot seed, by its script's URL as the app asked. */
-  unreached?: (url: string, why: 'csp') => void;
 };
 
 /**
- * Answers each marked worker script the test's context asks for: a
- * classic Web Worker's with its seeding, then importScripts of the app's
- * own script; a module Web Worker's with an import of its seeding, then
- * one of the app's own; the app's own script with what its server answered
- * to the worker's request (fetched once, unchanged); a module worker's
- * seeding with workerScript; a Shared Worker's with sharedScript (a module
- * one whose policy refuses data: scripts with the app's own, unseeded, and
- * unreached says so). An answer that is not ok goes to the worker as the
- * server gave it, and a request keploy cannot fetch goes on with no mark.
- * Each instance of a token (a Shared Worker started again) is the next n.
- * Each request it fulfills is answered: Chromium reports no end for a
- * Shared Worker's script, as Playwright does not follow Shared Workers.
+ * Answers each marked worker script the test's context asks for with
+ * workerAnswer, under the status and headers the app's server answered for
+ * the script with no mark (a worker's policy comes from its script's
+ * answer), and a module Web Worker's seeding (marked 'p') with
+ * workerScript. So the app's server is asked for a worker's script twice:
+ * here, for that answer, and by the worker, for the app's script. An answer
+ * that is not ok goes to the worker as the server gave it; when keploy
+ * cannot fetch the script, the worker gets its seeding with no header of the
+ * app's and loads the app's script itself, as the browser would. Each
+ * instance of a token (a Shared Worker started again) is the next n. Each
+ * request it fulfills is answered: Chromium reports no end for a Shared
+ * Worker's script, as Playwright does not follow Shared Workers.
  */
 export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks = {}): Promise<void> {
   const counts = new Map<string, number>();
-  const kept = new Map<string, { status: number; headers: Record<string, string>; body: Buffer }>();
   // The answer's headers, but its encoding and length: the body given is
-  // decoded, and of another length.
+  // keploy's, of another length.
   const headersOf = (h: Record<string, string>): Record<string, string> => {
     const out: Record<string, string> = {};
     for (const [k, v] of Object.entries(h)) if (k !== 'content-encoding' && k !== 'content-length') out[k] = v;
@@ -1447,44 +1424,21 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
       await fulfill({ status: 200, contentType: 'text/javascript', body: workerScript(m.token, m.n, 'm') });
       return;
     }
-    if (m.kind === 'o') {
-      const k = kept.get(`${m.token}.${m.n}`);
-      kept.delete(`${m.token}.${m.n}`);
-      if (k === undefined) await route.continue({ url: m.url });
-      else await fulfill(k);
-      return;
-    }
     const n = counts.get(m.token) ?? 0;
     counts.set(m.token, n + 1);
-    let answer;
+    let status = 200;
+    let headers: Record<string, string> = { 'content-type': 'text/javascript' };
     try {
-      answer = await route.fetch({ url: m.url });
-    } catch {
-      await route.continue({ url: m.url });
-      return;
-    }
-    const headers = headersOf(answer.headers());
-    if (!answer.ok()) {
-      await fulfill({ status: answer.status(), headers, body: await answer.body() });
-      return;
-    }
-    if (m.kind === 's' || m.kind === 'x') {
-      const body = await answer.body();
-      if (m.kind === 'x' && !cspAllowsData(headers)) {
-        hooks.unreached?.(m.url, 'csp');
-        await fulfill({ status: answer.status(), headers, body });
+      const answer = await route.fetch({ url: m.url });
+      if (!answer.ok()) {
+        await fulfill({ status: answer.status(), headers: headersOf(answer.headers()), body: await answer.body() });
         return;
       }
-      // Scripts of workers are UTF-8; the browser drops a byte order mark.
-      const own = body.toString('utf8').replace(/^\ufeff/, '');
-      await fulfill({ status: answer.status(), headers, body: sharedScript(m.token, n, m.kind, own) });
-      return;
+      status = answer.status();
+      headers = headersOf(answer.headers());
+    } catch {
+      // The worker loads the app's script itself, and fails as it would.
     }
-    kept.set(`${m.token}.${n}`, { status: answer.status(), headers, body: await answer.body() });
-    const own = JSON.stringify(markWorker(m.url, 'o', m.token, n));
-    const body = m.kind === 'w'
-      ? `${workerScript(m.token, n, 'w')}importScripts(${own});\n`
-      : `import ${JSON.stringify(markWorker(m.url, 'p', m.token, n))};\nimport ${own};\n`;
-    await fulfill({ status: answer.status(), headers, body });
+    await fulfill({ status, headers, body: workerAnswer(m.token, n, m.kind, m.url, m.kind !== 'x' || cspAllowsData(headers)) });
   });
 }
