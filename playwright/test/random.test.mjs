@@ -2037,9 +2037,10 @@ test('a worker\'s seeding: an error the browser\'s own call throws in a seeded g
 // A fake browser context for workerRoutes, in Playwright's order: a page's
 // routes before its context's, the last added first; a route that falls
 // back hands the request on, at the URL its fallback gave, to the next
-// route that matches it there. What answered it is what ask returns: the
-// fetches and the fulfill, continue or abort that ended it, or, when no
-// route did, the fallback it went on to the server with.
+// route that matches it there, with the headers it gave. What answered it
+// is what ask returns: the fetches (each one's URL, and the headers it sent
+// when a route gave some) and the fulfill, continue or abort that ended it,
+// or, when no route did, the fallback it went on to the server with.
 function routed() {
   const r = {};
   const target = () => {
@@ -2067,10 +2068,15 @@ function routed() {
     let at = url;
     let over;
     let ended = false;
-    const request = { url: () => at, resourceType: () => as.type, headers: () => as.headers, postData: () => as.body ?? null };
+    const request = { url: () => at, resourceType: () => as.type, headers: () => over?.headers ?? as.headers, postData: () => as.body ?? null };
     const route = {
       request: () => request,
-      fetch: async (o) => { did.push(['fetch', o.url]); if (answer instanceof Error) throw answer; return answer; },
+      fetch: async (o = {}) => {
+        const h = o.headers ?? over?.headers;
+        did.push(h === undefined ? ['fetch', o.url ?? at] : ['fetch', o.url ?? at, h]);
+        if (answer instanceof Error) throw answer;
+        return answer;
+      },
       fulfill: async (o) => { ended = true; did.push(['fulfill', { ...o, body: String(o.body) }]); },
       continue: async (o) => { ended = true; did.push(['continue', o?.url ?? at]); },
       abort: async () => { ended = true; did.push(['abort']); },
@@ -2319,6 +2325,74 @@ test('workerRoutes keeps keploy\'s route ahead of every route the test adds to i
   assert.equal(context.routes.length, 3);
   assert.equal(context.routes[2].match(new URL('http://h/w.js?a=1')), true);
   assert.equal(context.routes[2].match(new URL('http://h/v.js')), false);
+});
+
+test('workerRoutes sends a worker\'s script on with what the test\'s continue and fallbacks asked (a URL or headers of their own), at a URL a fallback gave too; a Shared Worker\'s, classic or module, that they asked for otherwise than the browser sent it gets the answer to what they asked, whole, unseeded, and is heard; the browser\'s own headers in another case or with one given as undefined, an option left undefined, or none, seed it', async () => {
+  const { r, context } = routed();
+  const heard = [];
+  await workerRoutes(context, { routed: (at, why) => heard.push([at, why]) });
+  const page = r.page();
+  let mine = (route) => route.continue();
+  await page.route(() => true, (route) => mine(route));
+  const t = 'cd'.repeat(16);
+  const headers = { 'content-type': 'text/javascript', 'x-a': '1' };
+  const ask = (m, body, dest) => r.ask(m, answerOf(200, body), { type: 'script', headers: { 'sec-fetch-dest': dest, accept: '*/*' } }, page);
+  const sent = (dest) => ({ 'sec-fetch-dest': dest, accept: '*/*' });
+  const auth = (dest) => ({ ...sent(dest), 'x-auth': 'k' });
+  const seeded = (url, h, n, kind, own, tok = t) => [h === undefined ? ['fetch', url] : ['fetch', url, h], ['fulfill', { status: 200, headers, body: workerAnswer(tok, n, kind, own) }]];
+  const whole = (url, h, body) => [h === undefined ? ['fetch', url] : ['fetch', url, h], ['fulfill', { status: 200, headers, body }]];
+  // A Web Worker's: keploy's fetch sends what the test's route asked, and
+  // its seeding then loads the app's script through the test's routes again.
+  const w = markWorker('http://h/w.js', 'w', t);
+  mine = (route) => route.continue({ headers: auth('worker') });
+  assert.deepEqual(await ask(w, 'app()', 'worker'), seeded('http://h/w.js', auth('worker'), 0, 'w', 'http://h/w.js'));
+  mine = (route) => route.continue({ url: 'http://h/stand.js' });
+  assert.deepEqual(await ask(w, 'stand()', 'worker'), seeded('http://h/stand.js', undefined, 1, 'w', 'http://h/w.js'));
+  // Fallbacks: keploy's last route answers it with what they gave, at the
+  // URL one gave too.
+  mine = (route) => route.fallback({ headers: auth('worker') });
+  assert.deepEqual(await ask(w, 'app()', 'worker'), seeded('http://h/w.js', auth('worker'), 2, 'w', 'http://h/w.js'));
+  mine = (route) => route.fallback({ url: 'http://h/stand.js' });
+  assert.deepEqual(await ask(w, 'stand()', 'worker'), seeded('http://h/stand.js', undefined, 3, 'w', 'http://h/w.js'));
+  assert.deepEqual(heard, []);
+  // A Shared Worker's: the browser's own headers (in another case), an
+  // option left undefined, or none, seed it.
+  const ts = 'ce'.repeat(16);
+  const s = markWorker('http://h/s.js', 's', ts);
+  const other = { 'Sec-Fetch-Dest': 'sharedworker', ACCEPT: '*/*' };
+  mine = (route) => route.continue({ headers: other, url: undefined });
+  assert.deepEqual(await ask(s, 'app()', 'sharedworker'), seeded('http://h/s.js', other, 0, 's', 'http://h/s.js', ts));
+  mine = (route) => route.continue();
+  assert.deepEqual(await ask(s, 'app()', 'sharedworker'), seeded('http://h/s.js', undefined, 1, 's', 'http://h/s.js', ts));
+  // A header given as undefined, which Playwright does not send.
+  const none = { ...sent('sharedworker'), 'x-none': undefined };
+  mine = (route) => route.continue({ headers: none });
+  assert.deepEqual(await ask(s, 'app()', 'sharedworker'), seeded('http://h/s.js', none, 2, 's', 'http://h/s.js', ts));
+  assert.deepEqual(heard, []);
+  // Another header, one taken off, one the browser sent with another value,
+  // another URL, or a fallback's header: the answer to what they asked,
+  // whole, and heard.
+  mine = (route) => route.continue({ headers: auth('sharedworker') });
+  assert.deepEqual(await ask(s, 'app()', 'sharedworker'), whole('http://h/s.js', auth('sharedworker'), 'app()'));
+  const fewer = { ...sent('sharedworker'), accept: undefined };
+  mine = (route) => route.continue({ headers: fewer });
+  assert.deepEqual(await ask(s, 'app()', 'sharedworker'), whole('http://h/s.js', fewer, 'app()'));
+  const changed = { ...sent('sharedworker'), accept: 'text/javascript' };
+  mine = (route) => route.continue({ headers: changed });
+  assert.deepEqual(await ask(s, 'app()', 'sharedworker'), whole('http://h/s.js', changed, 'app()'));
+  mine = (route) => route.continue({ url: 'http://h/stand.js' });
+  assert.deepEqual(await ask(s, 'stand()', 'sharedworker'), whole('http://h/stand.js', undefined, 'stand()'));
+  mine = (route) => route.fallback({ headers: auth('sharedworker') });
+  assert.deepEqual(await ask(s, 'app()', 'sharedworker'), whole('http://h/s.js', auth('sharedworker'), 'app()'));
+  // A module Shared Worker's too.
+  const tx = 'cf'.repeat(16);
+  const x = markWorker('http://h/x.js', 'x', tx);
+  mine = (route) => route.continue({ headers: auth('sharedworker') });
+  assert.deepEqual(await ask(x, 'app()', 'sharedworker'), whole('http://h/x.js', auth('sharedworker'), 'app()'));
+  mine = (route) => route.continue();
+  assert.deepEqual(await ask(x, 'app()', 'sharedworker'), seeded('http://h/x.js', undefined, 1, 'x', 'http://h/x.js', tx));
+  assert.deepEqual(heard, [...Array(5).fill(['http://h/s.js', 'continued']), ['http://h/x.js', 'continued']]);
+  assert.match(unplacedLine('t', 'http://h/s.js', 'continued'), /^keploy: in t, the Shared Worker at http:\/\/h\/s\.js draws the browser's own random numbers, and so does each worker it starts, so their draws may differ at replay: a route of the test's own sent the Shared Worker's script on with a URL, method, headers or post data of its own .* have that route continue or fall back with no options for the Shared Worker's script to seed it\.$/);
 });
 
 test('workerRoutes answers a Shared Worker\'s script with workerAnswer, a module one whose policy refuses data: with its seeding in the answer; each request it fulfills is answered', async () => {

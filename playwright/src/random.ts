@@ -97,7 +97,9 @@ export function pageAddress(at: unknown): string {
  * a frame inside one, 'nostorage' for a top document with no session
  * storage to count its documents in (other than a page's first document),
  * or a frame of its origin inside one, 'routed' for a worker whose script
- * a route of the test's own answered itself (workerRoutes), 'nested' for a
+ * a route of the test's own answered itself (workerRoutes), 'continued' for a
+ * Shared Worker whose script a route of the test's own sent on with options
+ * of its own (workerRoutes), 'nested' for a
  * Web Worker a seeded Web Worker started where the route does not reach its
  * script (NESTED_JS), 'service' for a
  * Service Worker a document registered, 'controlled' for a worker whose
@@ -105,7 +107,7 @@ export function pageAddress(at: unknown): string {
  * before keploy knew whether a Service Worker may answer its script
  * (initScript).
  */
-export type Unplaced = 'own' | 'frame' | 'popup' | 'uncounted' | 'nostorage' | 'worker' | 'shared' | 'routed' | 'service' | 'controlled' | 'early' | 'nested';
+export type Unplaced = 'own' | 'frame' | 'popup' | 'uncounted' | 'nostorage' | 'worker' | 'shared' | 'routed' | 'continued' | 'service' | 'controlled' | 'early' | 'nested';
 
 // The next step for a Service Worker the tests do not need.
 const BLOCK = 'if the tests do not need it, set serviceWorkers: \'block\' in the project\'s use (Playwright then registers none, and keploy seeds the workers it would have answered)';
@@ -115,7 +117,7 @@ const BLOCK = 'if the tests do not need it, set serviceWorkers: \'block\' in the
 const KIDS = 'and so does each worker it starts, so their draws may differ at replay';
 
 // A worker keploy cannot reach: its line's reason (unplacedLine).
-const UNREACHED: Record<'worker' | 'shared' | 'routed' | 'service' | 'early' | 'nested', string> = {
+const UNREACHED: Record<'worker' | 'shared' | 'routed' | 'continued' | 'service' | 'early' | 'nested', string> = {
   worker: 'it is a worker started from a script keploy cannot mark (a blob: or data: URL, or a URL the browser refused with keploy\'s mark, as a Trusted Types policy may), ' +
     'so keploy cannot put its seeding ahead of the script; start it from the script\'s http(s) URL to seed it.',
   shared: 'it is a Shared Worker, and Firefox does not let keploy reach a Shared Worker\'s script to put its seeding ahead of it; ' +
@@ -123,6 +125,10 @@ const UNREACHED: Record<'worker' | 'shared' | 'routed' | 'service' | 'early' | '
   routed: 'a route of the test\'s own answered the worker\'s script itself (route.fulfill), so keploy cannot put its seeding ahead of the script, ' +
     'and the worker\'s URL, which its location shows, carries keploy\'s __keploy_worker mark; have that route call route.continue() or route.fallback() ' +
     'for the worker\'s script to seed it.',
+  continued: 'a route of the test\'s own sent the Shared Worker\'s script on with a URL, method, headers or post data of its own (route.continue or route.fallback with options), ' +
+    'and Chromium and WebKit route nothing a Shared Worker loads after its script, as keploy\'s seeding loads the app\'s script, so that load could not carry them; ' +
+    'keploy answers the worker with the script that route asked for, unseeded, and the worker\'s URL, which its location shows, carries keploy\'s __keploy_worker mark; ' +
+    'have that route continue or fall back with no options for the Shared Worker\'s script to seed it.',
   service: 'keploy cannot put its seeding ahead of a Service Worker\'s script, and a worker whose script the Service Worker may answer starts unseeded (each one is named); ' +
     `${BLOCK}.`,
   early: 'it is a Shared Worker started before the browser told keploy which Service Workers the page\'s origin has (keploy asks as each document begins, ' +
@@ -133,7 +139,7 @@ const UNREACHED: Record<'worker' | 'shared' | 'routed' | 'service' | 'early' | '
     'record and replay the test in WebKit to seed it.',
 };
 
-const UNPLACED: Record<Exclude<Unplaced, 'uncounted' | 'worker' | 'shared' | 'routed' | 'service' | 'controlled' | 'early' | 'nested'>, string> = {
+const UNPLACED: Record<Exclude<Unplaced, 'uncounted' | 'worker' | 'shared' | 'routed' | 'continued' | 'service' | 'controlled' | 'early' | 'nested'>, string> = {
   own: 'it is in a page the test opened, and it drew before keploy named that page: a script the test added with context.addInitScript ' +
     'runs in each of the page\'s documents before keploy\'s, and so does a draw the test makes there before newPage returns.',
   frame: 'it is a frame keploy cannot place among its parent\'s frames (one in a closed shadow root or in an object or embed element, ' +
@@ -161,8 +167,8 @@ export function unplacedLine(name: string, at: string, why: Unplaced = 'popup', 
       `a Service Worker${by === '' ? '' : ` (at ${by})`} may answer the worker's script, and it would see keploy's __keploy_worker mark in the script's URL, so keploy starts the worker as the app asked; ` +
       `${BLOCK}.`;
   }
-  if (why === 'worker' || why === 'shared' || why === 'routed' || why === 'service' || why === 'early' || why === 'nested') {
-    const what = why === 'shared' || why === 'early' ? 'Shared Worker' : why === 'service' ? 'Service Worker' : 'worker';
+  if (why === 'worker' || why === 'shared' || why === 'routed' || why === 'continued' || why === 'service' || why === 'early' || why === 'nested') {
+    const what = why === 'shared' || why === 'early' || why === 'continued' ? 'Shared Worker' : why === 'service' ? 'Service Worker' : 'worker';
     return `keploy: in ${name}, the ${what} at ${at} draws the browser's own random numbers, ${why === 'service' ? 'so its draws may differ at replay' : KIDS}: ${UNREACHED[why]}`;
   }
   const n = Math.floor(Number(others));
@@ -1831,9 +1837,10 @@ export type WorkerHooks = {
   answered?: (r: Request) => void;
   /**
    * A route of the test's own answered the script of the worker at at (its
-   * origin and path) itself: it runs unseeded, at its marked URL.
+   * origin and path) itself ('routed'), or sent a Shared Worker's on with
+   * options of its own ('continued'): it runs unseeded, at its marked URL.
    */
-  routed?: (at: string) => void;
+  routed?: (at: string, why: 'routed' | 'continued') => void;
   /**
    * A seeded Web Worker started a worker at at (its origin and path, or its
    * scheme: blob:, data:) that keploy cannot mark ('worker') or whose script
@@ -1881,6 +1888,21 @@ function keepFirst(target: Routes, url: (u: URL) => boolean, handler: (route: Ro
   return add();
 }
 
+/** What a test's route.continue or route.fallback asks a request be sent with. */
+type Asked = NonNullable<Parameters<Route['continue']>[0]>;
+
+/**
+ * Whether headers a and b are the same: each name, in any case, with the
+ * same value (Playwright sends no header whose value is undefined).
+ */
+function sameHeaders(a: Record<string, string>, b: Record<string, string>): boolean {
+  const low = (h: Record<string, string>): Map<string, string> =>
+    new Map(Object.entries(h).filter(([, v]) => v !== undefined).map(([k, v]) => [k.toLowerCase(), String(v)]));
+  const x = low(a);
+  const y = low(b);
+  return x.size === y.size && [...x].every(([k, v]) => y.get(k) === v);
+}
+
 /**
  * Answers each marked worker script the test's context asks for with
  * workerAnswer, under the status and headers the app's server answered for
@@ -1912,7 +1934,15 @@ function keepFirst(target: Routes, url: (u: URL) => boolean, handler: (route: Ro
  * it). A route of the test's that answers it itself (fulfill) answers it so,
  * unseeded, and the test hears of it (routed); one that aborts it aborts
  * it. One that falls back, or none, leaves it to keploy's last route, the
- * context's first, which answers it as above.
+ * context's first, which answers it as above, at the URL a fallback gave it
+ * too. What the test's continue and fallbacks ask (a URL, method, headers or
+ * post data of their own) is what keploy's fetch of the script sends, and a
+ * Web Worker's seeding loads the app's script through the test's routes
+ * again, so they ask the same of it. A Shared Worker's seeding cannot
+ * (Chromium and WebKit route none of its loads): one whose script the
+ * test's routes asked for otherwise than the browser sent it gets the answer
+ * to what they asked for, whole, unseeded, and the test hears of it
+ * (routed, 'continued').
  */
 export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks = {}, reach = false): Promise<void> {
   const counts = new Map<string, number>();
@@ -1924,10 +1954,25 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
     return out;
   };
   // The worker script loads handed on to the test's routes: each one's mark,
-  // and the route's own fulfill; and their URLs, for the last route.
-  const handed = new WeakMap<Request, { m: WorkerMark; fulfill: Route['fulfill'] }>();
+  // the route's own fulfill, the headers the browser sent it with, and what
+  // the test's routes asked of it (their continue's and fallbacks' options);
+  // and the URLs it may reach the last route at (the app's, or one a
+  // fallback of the test's gave it).
+  type Handed = { m: WorkerMark; fulfill: Route['fulfill']; sent: Record<string, string>; asked: Asked };
+  const handed = new WeakMap<Request, Handed>();
   const urls = new Set<string>();
-  const answer = async (route: Route, m: WorkerMark, own: Route['fulfill']): Promise<void> => {
+  const ask = (h: Handed, o: Asked | undefined): void => {
+    for (const [k, v] of Object.entries(o ?? {})) if (v !== undefined) (h.asked as Record<string, unknown>)[k] = v;
+  };
+  // Whether the test's routes asked for a worker's script otherwise than the
+  // browser sent it: a URL, method or post data of their own, or headers
+  // other than the browser's.
+  const otherwise = (h: Handed): boolean => Object.entries(h.asked)
+    .some(([k, v]) => k !== 'headers' || !sameHeaders(v as Record<string, string>, h.sent));
+  // A route's fetch with o is the request the test's routes asked for: o's
+  // URL, method, headers and post data, or the request's (the URL the app
+  // asked for, or one a fallback gave, and what fallbacks gave it).
+  const answer = async (route: Route, m: WorkerMark, own: Route['fulfill'], h?: Handed, o: Asked = {}): Promise<void> => {
     const fulfill = async (o: Parameters<Route['fulfill']>[0]): Promise<void> => {
       await own(o);
       hooks.answered?.(route.request());
@@ -1938,12 +1983,21 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
     }
     const n = counts.get(m.token) ?? 0;
     counts.set(m.token, n + 1);
+    // Chromium and WebKit route nothing a Shared Worker loads after its
+    // script, so its seeding's load of the app's script goes out as the
+    // browser asks: one the test's routes asked for otherwise gets what they
+    // asked for, whole, unseeded, and is named.
+    const whole = (m.kind === 's' || m.kind === 'x') && h !== undefined && otherwise(h);
     let status = 200;
     let headers: Record<string, string> = { 'content-type': 'text/javascript' };
     try {
-      const got = await route.fetch({ url: m.url });
-      if (!got.ok()) {
+      const got = await route.fetch(o);
+      if (whole || !got.ok()) {
         await fulfill({ status: got.status(), headers: headersOf(got.headers()), body: await got.body() });
+        if (whole) {
+          const u = new URL(m.url);
+          hooks.routed?.(u.origin + u.pathname, 'continued');
+        }
         return;
       }
       status = got.status();
@@ -1979,15 +2033,31 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
       await answer(route, m, own);
       return;
     }
-    handed.set(r, { m, fulfill: own });
+    const h: Handed = { m, fulfill: own, sent: r.headers(), asked: {} };
+    handed.set(r, h);
     urls.add(new URL(m.url).href);
-    route.continue = async () => answer(route, m, own);
+    const fallback = route.fallback.bind(route);
+    route.continue = async (o) => {
+      ask(h, o);
+      await answer(route, m, own, h, o);
+    };
+    route.fallback = async (o) => {
+      ask(h, o);
+      if (o?.url !== undefined) {
+        try {
+          urls.add(new URL(o.url).href);
+        } catch {
+          // Not a URL: Playwright refuses it.
+        }
+      }
+      await fallback(o);
+    };
     route.fulfill = async (o) => {
       const u = new URL(m.url);
-      hooks.routed?.(u.origin + u.pathname);
+      hooks.routed?.(u.origin + u.pathname, 'routed');
       await own(o);
     };
-    await route.fallback({ url: m.url });
+    await fallback({ url: m.url });
   };
   const last = async (route: Route): Promise<void> => {
     const h = handed.get(route.request());
@@ -1995,7 +2065,7 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
       await route.fallback();
       return;
     }
-    await answer(route, h.m, h.fulfill);
+    await answer(route, h.m, h.fulfill, h);
   };
   const marked = (u: URL): boolean => u.searchParams.has(WORKER_PARAM);
   const lastUrl = (u: URL): boolean => urls.has(u.href);
