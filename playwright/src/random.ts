@@ -1434,6 +1434,24 @@ try {
 `;
 }
 
+/**
+ * Whether the browser asks for r as a worker's script (a worker's own, or
+ * the seeding a module Web Worker's answer imports), not as a request the
+ * worker's code makes. A worker's code resolves URLs against its script's
+ * URL, so one that resolves to that URL (fetch(''), a fragment alone)
+ * carries keploy's mark too. Firefox and WebKit show the route the
+ * request's destination (sec-fetch-dest: worker or sharedworker for a
+ * worker's script, script for importScripts, empty for fetch and
+ * XMLHttpRequest; WebKit types a worker's script xhr). Chromium shows it
+ * none, and types a worker's script script, importScripts other, fetch
+ * fetch and XMLHttpRequest xhr.
+ */
+function workerScriptLoad(r: Request): boolean {
+  const dest = r.headers()['sec-fetch-dest'];
+  if (dest !== undefined) return dest === 'worker' || dest === 'sharedworker';
+  return r.resourceType() === 'script';
+}
+
 /** What the fixture hears from workerRoutes. */
 export type WorkerHooks = {
   /** The route answered this request whole: none of it is in flight. */
@@ -1452,7 +1470,12 @@ export type WorkerHooks = {
  * app's and loads the app's script itself, as the browser would. Each
  * instance of a token (a Shared Worker started again) is the next n. Each
  * request it fulfills is answered: Chromium reports no end for a Shared
- * Worker's script, as Playwright does not follow Shared Workers.
+ * Worker's script, as Playwright does not follow Shared Workers. Only the
+ * browser's load of a worker's script is answered so (workerScriptLoad): a
+ * request the worker's own code makes at its script's marked URL goes on
+ * to the test's other routes and the app's server with the mark taken off
+ * (the URL the app's code meant, as the worker's location shows it), and
+ * starts no instance of the token.
  */
 export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks = {}): Promise<void> {
   const counts = new Map<string, number>();
@@ -1471,6 +1494,10 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
     const m = workerMark(route.request().url());
     if (m === null) {
       await route.fallback();
+      return;
+    }
+    if (!workerScriptLoad(route.request())) {
+      await route.fallback({ url: m.url });
       return;
     }
     if (m.kind === 'p') {

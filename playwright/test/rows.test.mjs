@@ -637,10 +637,11 @@ async function drawsServer() {
     if (u.pathname === '/rrelease') { for (const r of rheld.splice(0)) r.end(''); res.end(''); return; }
     // workers.spec.ts's workers, and the scripts they load.
     const wk = {
-      // Each Web Worker answers the message its page posts as it starts it.
-      '/wk/ded.js': `importScripts('dep.js'); onmessage = (e) => postMessage({ kind: 'ded-early', data: e.data }); postMessage({ kind: 'ded', draws: ${DRAWS}, href: location.href, dep: self.dep, stack: String(new Error('at').stack), errs: ${ERRS} });`,
+      // Each Web Worker answers the message its page posts as it starts it,
+      // and sends what its own code gets at its script's URL (OWN).
+      '/wk/ded.js': `importScripts('dep.js'); onmessage = (e) => postMessage({ kind: 'ded-early', data: e.data }); postMessage({ kind: 'ded', draws: ${DRAWS}, href: location.href, dep: self.dep, stack: String(new Error('at').stack), errs: ${ERRS} }); ${OWN('ded')}`,
       '/wk/dep.js': 'self.dep = \'dep\';',
-      '/wk/mod.js': `import { dep } from './lib.mjs'; self.onmessage = (e) => postMessage({ kind: 'mod-early', data: e.data }); postMessage({ kind: 'mod', draws: ${DRAWS}, href: location.href, dep, meta: import.meta.url, top: String(new Error('at').stack), errs: ${ERRS} });`,
+      '/wk/mod.js': `import { dep } from './lib.mjs'; self.onmessage = (e) => postMessage({ kind: 'mod-early', data: e.data }); postMessage({ kind: 'mod', draws: ${DRAWS}, href: location.href, dep, meta: import.meta.url, top: String(new Error('at').stack), errs: ${ERRS} }); ${OWN('mod')}`,
       '/wk/lib.mjs': 'export const dep = \'lib\';',
       '/wk/shared.js': `onconnect = (e) => e.ports[0].postMessage({ kind: 'shared', draws: ${DRAWS}, href: location.href, stack: String(new Error('at').stack), errs: ${ERRS} });`,
       // Module Shared Workers: one plain, one (started by two names, c1
@@ -1314,6 +1315,13 @@ const ERRS = '[() => crypto.getRandomValues(new Float64Array(1)), () => crypto.g
   '...[\'href\', \'search\'].map((k) => () => Object.getOwnPropertyDescriptor(WorkerLocation.prototype, k).get.call({})), () => WorkerLocation.prototype.toString.call({})]' +
   '.map((f) => { try { f(); return \'none\'; } catch (e) { return e.stack === undefined ? null : String(e.stack); } })';
 
+// What a Web Worker's own code gets at its script's URL, which its script's
+// marked URL is the base of: fetch(''), fetch('#h') and an XMLHttpRequest of
+// '', each one's text (or 'error'), sent as kind <k>-own.
+const OWN = (k) => 'Promise.all([fetch(\'\'), fetch(\'#h\')].map((p) => p.then((r) => r.text(), () => \'error\')).concat(new Promise((ok) => { ' +
+  'const x = new XMLHttpRequest(); x.open(\'GET\', \'\'); x.onload = () => ok(x.responseText); x.onerror = () => ok(\'error\'); x.send(); })))' +
+  `.then((own) => postMessage({ kind: '${k}-own', own }));`;
+
 // The marks a document at /wk of page t0 gives the workers workers.spec.ts
 // starts (WK_STARTS).
 function workerMarks(seed) {
@@ -1325,7 +1333,7 @@ function workerMarks(seed) {
 }
 
 for (const engine of ENGINES) {
-  test(`seeded, in ${engine}: a page's classic and module Web Workers and its classic and module Shared Workers draw from the test's seed, the same at replay, a module Shared Worker whose policy refuses data: too (each connection that came before its script ran given to it, in order), at the app's location, URLs and stack, loading what sits beside them, and the app's server never sees keploy's mark; in Firefox each Shared Worker draws its own and is named`, async () => {
+  test(`seeded, in ${engine}: a page's classic and module Web Workers and its classic and module Shared Workers draw from the test's seed, the same at replay, a module Shared Worker whose policy refuses data: too (each connection that came before its script ran given to it, in order), at the app's location, URLs and stack, loading what sits beside them, a Web Worker's own requests at its script's URL getting the app's script, and the app's server never sees keploy's mark; in Firefox each Shared Worker draws its own and is named`, async () => {
     const j = journal();
     const rec = await fakeAgent(j);
     let kept = {};
@@ -1376,6 +1384,17 @@ for (const engine of ENGINES) {
       // A message the page posts as it starts a Web Worker reaches the app's
       // handler: the app's script has run before the worker takes it.
       assert.deepEqual([w['ded-early'], w['mod-early']], [{ kind: 'ded-early', data: 'early' }, { kind: 'mod-early', data: 'early' }]);
+      // What a Web Worker's own code asks for at its script's URL (fetch(''),
+      // a fragment alone, an XMLHttpRequest of '') is the app's script, from
+      // the app's server (which never sees the mark, below), not keploy's
+      // answer for a worker's script.
+      for (const [k, first] of [['ded', 'importScripts(\'dep.js\');'], ['mod', 'import { dep } from \'./lib.mjs\';']]) {
+        assert.equal(w[`${k}-own`].own.length, 3, k);
+        for (const body of w[`${k}-own`].own) {
+          assert.ok(body.startsWith(first), `${k}: ${body.slice(0, 120)}`);
+          assert.doesNotMatch(body, /__keploy_worker/, k);
+        }
+      }
       assert.deepEqual([w.ded.dep, w.mod.dep, w.mshared.dep, w.c1.dep, w.c2.dep, w['c1+2'].dep], ['dep', 'lib', 'lib', 'lib', 'lib', 'lib']);
       // c1's second connection is c1's worker's: what it drew as it loaded.
       assert.deepEqual(w['c1+2'].draws, w.c1.draws);

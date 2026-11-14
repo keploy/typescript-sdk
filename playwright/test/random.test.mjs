@@ -1560,18 +1560,19 @@ test('a worker\'s seeding: an error the browser\'s own call throws in a seeded g
 });
 
 // A context whose route keeps its matcher and handler, and a route of it
-// that records what the handler did.
+// that records what the handler did. A request is a worker's script load as
+// Chromium shows it (typed script, no sec-fetch-dest) unless as says.
 function routed() {
   const r = {};
   const context = { route: async (match, handler) => { r.match = match; r.handler = handler; } };
-  r.ask = async (url, answer) => {
+  r.ask = async (url, answer, as = { type: 'script', headers: {} }) => {
     const did = [];
     const route = {
-      request: () => ({ url: () => url }),
+      request: () => ({ url: () => url, resourceType: () => as.type, headers: () => as.headers }),
       fetch: async (o) => { did.push(['fetch', o.url]); if (answer instanceof Error) throw answer; return answer; },
       fulfill: async (o) => { did.push(['fulfill', { ...o, body: String(o.body) }]); },
       continue: async (o) => { did.push(['continue', o.url]); },
-      fallback: async () => { did.push(['fallback']); },
+      fallback: async (o) => { did.push(o === undefined ? ['fallback'] : ['fallback', o]); },
     };
     await r.handler(route);
     return did;
@@ -1612,6 +1613,33 @@ test('workerRoutes answers a module worker script with an import of its seeding 
   assert.equal(answered.length, 5);
   assert.deepEqual(await r.ask(`http://h/m.js?__keploy_worker=w.${t}.3`), [['fallback']]);
   assert.deepEqual(await r.ask(`http://h/m.js?__keploy_worker=o.${t}.3`), [['fallback']]);
+  assert.equal(answered.length, 5);
+});
+
+test('workerRoutes answers a marked URL as a worker\'s script only when the browser loads it as one (sec-fetch-dest worker or sharedworker where the route sees it, else typed script): what the worker\'s own code asks for there (fetch(\'\'), XMLHttpRequest, importScripts) goes on with no mark and starts no instance of its token', async () => {
+  const { r, context } = routed();
+  const answered = [];
+  await workerRoutes(context, { answered: (q) => answered.push(q.url()) });
+  const t = '67'.repeat(16);
+  const w = markWorker('http://h/w.js?a=1', 'w', t);
+  const as = (type, dest) => ({ type, headers: dest === undefined ? {} : { 'sec-fetch-dest': dest } });
+  const own = [
+    as('fetch'), as('xhr'), as('other'), // Chromium: fetch, XMLHttpRequest, importScripts
+    as('fetch', 'empty'), as('script', 'script'), // Firefox: fetch, importScripts
+    as('xhr', 'empty'), as('xhr', 'script'), // WebKit: XMLHttpRequest, importScripts
+  ];
+  for (const a of own) assert.deepEqual(await r.ask(w, answerOf(200, 'app()'), a), [['fallback', { url: 'http://h/w.js?a=1' }]], JSON.stringify(a));
+  assert.deepEqual(await r.ask(markWorker('http://h/m.js', 'p', t, 0), undefined, as('fetch', 'empty')), [['fallback', { url: 'http://h/m.js' }]]);
+  assert.deepEqual(answered, []);
+  // The worker's script, as each engine loads it: its first start is n 0.
+  const headers = { 'content-type': 'text/javascript', 'x-a': '1' };
+  assert.deepEqual(await r.ask(w, answerOf(200, 'app()'), as('xhr', 'worker')), [['fetch', 'http://h/w.js?a=1'],
+    ['fulfill', { status: 200, headers, body: workerAnswer(t, 0, 'w', 'http://h/w.js?a=1') }]]);
+  assert.equal((await r.ask(w, answerOf(200, 'app()'), as('script', 'worker')))[1][1].body, workerAnswer(t, 1, 'w', 'http://h/w.js?a=1'));
+  assert.equal((await r.ask(w, answerOf(200, 'app()'), as('script')))[1][1].body, workerAnswer(t, 2, 'w', 'http://h/w.js?a=1'));
+  const s = '89'.repeat(16);
+  assert.equal((await r.ask(markWorker('http://h/s.js', 's', s), answerOf(200, 'app()'), as('xhr', 'sharedworker')))[1][1].body, workerAnswer(s, 0, 's', 'http://h/s.js'));
+  assert.deepEqual(await r.ask(markWorker('http://h/m.js', 'p', t, 0), undefined, as('script', 'worker')), [['fulfill', { status: 200, contentType: 'text/javascript', body: workerScript(t, 0, 'm') }]]);
   assert.equal(answered.length, 5);
 });
 
