@@ -1495,8 +1495,10 @@ test('workerRoutes answers a module worker script with an import of its seeding 
 });
 
 test('strictPrologue: a Use Strict Directive anywhere in the directive prologue, after spaces and comments; not one that an expression goes on from, one with an escape, or one after a statement', () => {
-  const yes = ["'use strict';x()", '"use strict"\nx()', "// c\n/* d */ 'use strict'", "'use asm'; 'use strict'; f()", "'use strict'\n!x", "'use strict'\n++x", "'use strict' /* c */\n'next'", "'use strict'", "'a'\n'use strict'\n", "'use strict'}"];
-  const no = ["'use strict'\n(x)", "'use strict'.x", "'use\\x20strict';", "x; 'use strict'", "'use strict'\n+x", "'use strict'\nin x", "'use strict' + 1", "'use strict'\n[1]", '', "'unterminated", "'a'\n.x\n'use strict'", "'use strict' // c\n, 1", "'a' x 'use strict'"];
+  const yes = ["'use strict';x()", '"use strict"\nx()', "// c\n/* d */ 'use strict'", "'use asm'; 'use strict'; f()", "'use strict'\n!x", "'use strict'\n++x", "'use strict' /* c */\n'next'", "'use strict'", "'a'\n'use strict'\n", "'use strict'}",
+    "'use strict'\n--x", "'use strict'\ninit()", "'use strict' // c\nx()", "'use strict' /* a\nb */ x()"];
+  const no = ["'use strict'\n(x)", "'use strict'.x", "'use\\x20strict';", "x; 'use strict'", "'use strict'\n+x", "'use strict'\nin x", "'use strict' + 1", "'use strict'\n[1]", '', "'unterminated", "'a'\n.x\n'use strict'", "'use strict' // c\n, 1", "'a' x 'use strict'",
+    "'use strict'\n- x", "'use strict'\n!= 1", "'use strict'\ninstanceof X"];
   for (const src of yes) assert.equal(strictPrologue(src), true, JSON.stringify(src));
   for (const src of no) assert.equal(strictPrologue(src), false, JSON.stringify(src));
 });
@@ -1506,7 +1508,8 @@ test('cspAllowsData: no policy, or each policy whose script or worker source lis
   assert.equal(cspAllowsData({}), true);
   for (const v of ["img-src 'self'", "script-src 'self' data:", "default-src 'self' DATA:", "script-src data:; worker-src data:", "script-src-elem data:; worker-src 'self' data:"]) assert.equal(cspAllowsData(csp(v)), true, v);
   for (const v of ["script-src 'self'", "default-src 'self'", "script-src data:; worker-src 'self'", "script-src-elem 'self'; script-src data:", "child-src 'self'; script-src data:",
-    "script-src data:, default-src 'self'", "script-src data:\nscript-src 'none'", "script-src 'none'; script-src data:"]) assert.equal(cspAllowsData(csp(v)), false, v);
+    "script-src data:, default-src 'self'", "script-src data:\nscript-src 'none'", "script-src 'none'; script-src data:", "SCRIPT-SRC 'self'",
+    "script-src data:; Worker-Src 'self'"]) assert.equal(cspAllowsData(csp(v)), false, v);
 });
 
 test('sharedScript: a classic Shared Worker\'s answer is its seeding on the app\'s first line (no line moves), after a hashbang, under the app\'s use strict; a module one\'s imports its seeding as a data: module first', () => {
