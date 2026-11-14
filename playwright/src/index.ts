@@ -232,7 +232,17 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
           told.add(k);
           process.stdout.write(`${unplacedLine(name, a, 'routed')}\n`);
         },
-      });
+        // A worker a seeded Web Worker started that keploy cannot mark, or
+        // whose script the route does not reach: said as a page's is, once
+        // for each address and reason. WebKit's route reaches such a script.
+        unmarked: (at, why) => {
+          const a = pageAddress(at);
+          const k = `${why}\n${a}`;
+          if (told.has(k)) return;
+          told.add(k);
+          process.stdout.write(`${unplacedLine(name, a, why)}\n`);
+        },
+      }, browserName === 'webkit');
       await context.addInitScript({ content: initScript(s.seed, report, mark, browserName !== 'firefox') });
       const placing = placePages(context, mark);
       restore = placing.restore;

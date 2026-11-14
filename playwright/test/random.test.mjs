@@ -1365,7 +1365,7 @@ const workerGlobals = () => {
 test('a worker\'s mark: what markWorker makes, workerMark reads back, the URL as the app asked for it, query and fragment kept; any other URL has none', () => {
   const t = 'ab'.repeat(16);
   for (const url of ['http://h/w.js', 'http://h/w.js?a=1', 'http://h/w.js?', 'http://h/w.js#f', 'http://h/w.js?a=1#f?x']) {
-    for (const [kind, n] of [['w', -1], ['m', -1], ['s', -1], ['x', -1], ['p', 0], ['p', 7]]) {
+    for (const [kind, n] of [['w', -1], ['m', -1], ['s', -1], ['x', -1], ['t', -1], ['p', 0], ['p', 7]]) {
       const m = markWorker(url, kind, t, n);
       assert.ok(new URL(m).searchParams.has(WORKER_PARAM), m);
       assert.deepEqual(workerMark(m), { kind, token: t, n, url }, m);
@@ -1373,7 +1373,7 @@ test('a worker\'s mark: what markWorker makes, workerMark reads back, the URL as
   }
   assert.equal(markWorker('http://h/w.js?a=1#f', 'w', t), `http://h/w.js?a=1&__keploy_worker=w.${t}#f`);
   for (const u of ['http://h/w.js', `http://h/w.js?__keploy_worker=w.${t}&a=1`, `http://h/w.js?__keploy_worker=z.${t}`, `http://h/w.js?__keploy_worker=w.${t.toUpperCase()}`,
-    `http://h/w.js?__keploy_worker=w.${t}.0`, `http://h/w.js?__keploy_worker=o.${t}`, `http://h/w.js?__keploy_worker=o.${t}.0`, `http://h/w.js?__keploy_worker=p.${t}`, `http://h/w.js?__keploy_worker=w.${t.slice(1)}`]) {
+    `http://h/w.js?__keploy_worker=w.${t}.0`, `http://h/w.js?__keploy_worker=t.${t}.0`, `http://h/w.js?__keploy_worker=o.${t}`, `http://h/w.js?__keploy_worker=o.${t}.0`, `http://h/w.js?__keploy_worker=p.${t}`, `http://h/w.js?__keploy_worker=w.${t.slice(1)}`]) {
     assert.equal(workerMark(u), null, u);
   }
 });
@@ -1441,24 +1441,31 @@ test('a Shared Worker\'s token is the same in every document of the test, by scr
   assert.deepEqual([off, told], [[[null, undefined]], [['http://h/s.js', 'shared']]]);
 });
 
+// What a line for a worker keploy cannot reach says of the workers it starts.
+const KIDS = 'and so does each worker it starts, so their draws may differ at replay: ';
+
 test('the lines for a Service Worker and a worker one may answer say what it is, why, and the next step', () => {
   const block = 'if the tests do not need it, set serviceWorkers: \'block\' in the project\'s use (Playwright then registers none, and keploy seeds the workers it would have answered).';
   assert.equal(unplacedLine('t', 'http://h/sw.js', 'service'), 'keploy: in t, the Service Worker at http://h/sw.js draws the browser\'s own random numbers, so its draws may differ at replay: ' +
     'keploy cannot put its seeding ahead of a Service Worker\'s script, and a worker whose script the Service Worker may answer starts unseeded (each one is named); ' + block);
-  assert.equal(unplacedLine('t', 'http://h/w.js', 'controlled', 0, 'http://h/sw.js'), 'keploy: in t, the worker at http://h/w.js draws the browser\'s own random numbers, so its draws may differ at replay: ' +
+  assert.equal(unplacedLine('t', 'http://h/w.js', 'controlled', 0, 'http://h/sw.js'), 'keploy: in t, the worker at http://h/w.js draws the browser\'s own random numbers, ' + KIDS +
     'a Service Worker (at http://h/sw.js) may answer the worker\'s script, and it would see keploy\'s __keploy_worker mark in the script\'s URL, so keploy starts the worker as the app asked; ' + block);
-  assert.equal(unplacedLine('t', 'http://h/w.js', 'controlled'), 'keploy: in t, the worker at http://h/w.js draws the browser\'s own random numbers, so its draws may differ at replay: ' +
+  assert.equal(unplacedLine('t', 'http://h/w.js', 'controlled'), 'keploy: in t, the worker at http://h/w.js draws the browser\'s own random numbers, ' + KIDS +
     'a Service Worker may answer the worker\'s script, and it would see keploy\'s __keploy_worker mark in the script\'s URL, so keploy starts the worker as the app asked; ' + block);
 });
 
-test('the lines for a worker keploy cannot reach say what it is, why, and the next step', () => {
-  assert.equal(unplacedLine('t', 'blob:', 'worker'), 'keploy: in t, the worker at blob: draws the browser\'s own random numbers, so its draws may differ at replay: ' +
+test('the lines for a worker keploy cannot reach say what it is, that each worker it starts is unseeded too, why, and the next step', () => {
+  assert.equal(unplacedLine('t', 'blob:', 'worker'), 'keploy: in t, the worker at blob: draws the browser\'s own random numbers, ' + KIDS +
     'it is a worker started from a script keploy cannot mark (a blob: or data: URL, or a URL the browser refused with keploy\'s mark, as a Trusted Types policy may), ' +
     'so keploy cannot put its seeding ahead of the script; start it from the script\'s http(s) URL to seed it.');
-  assert.equal(unplacedLine('t', 'http://h/s.js', 'shared'), 'keploy: in t, the Shared Worker at http://h/s.js draws the browser\'s own random numbers, so its draws may differ at replay: ' +
+  assert.equal(unplacedLine('t', 'http://h/s.js', 'shared'), 'keploy: in t, the Shared Worker at http://h/s.js draws the browser\'s own random numbers, ' + KIDS +
     'it is a Shared Worker, and Firefox does not let keploy reach a Shared Worker\'s script to put its seeding ahead of it; ' +
     'record and replay the test in Chromium or WebKit to seed it.');
+  assert.equal(unplacedLine('t', 'http://h/b.js', 'nested'), 'keploy: in t, the worker at http://h/b.js draws the browser\'s own random numbers, ' + KIDS +
+    'it is a worker that a worker started, and Chromium and Firefox do not let keploy reach its script to put its seeding ahead of it; record and replay the test in WebKit to seed it.');
+  assert.match(unplacedLine('t', 'http://h/w.js', 'routed'),/^keploy: in t, the worker at http:\/\/h\/w\.js draws the browser's own random numbers, and so does each worker it starts, so their draws may differ at replay: a route of the test's own /);
 });
+
 
 // A document's ServiceWorkerContainer: register answers what answer gives
 // (a registration of its script, by default), getRegistrations the
@@ -1590,6 +1597,68 @@ test('a worker\'s seeding draws the same numbers for a token and instance every 
   assert.equal(workerAt(other, workerScript(t, 0, 'w')).run('location.href'), other);
 });
 
+// A worker's seeding (token, instance n, kind; reach: whether the route
+// reaches the scripts of the workers it starts) at /d/a.js?x=1, with a Worker
+// that keeps what it is given (or W) and a fetch that keeps what it posts;
+// code then runs in it.
+const nestedAt = (token, n, kind, code, W, reach = true) => {
+  const made = [];
+  const posted = [];
+  class Worker { constructor(url, opts) { made.push([String(url), opts === undefined ? undefined : JSON.parse(JSON.stringify(opts))]); } }
+  const fetch = (u, o) => { posted.push([String(u), o === undefined ? undefined : JSON.parse(JSON.stringify(o))]); return Promise.resolve(); };
+  const w = workerAt(markWorker('http://h/d/a.js?x=1', kind, token), workerScript(token, n, kind, reach), { URL, Worker: W ?? Worker, fetch, Request: class Request {} });
+  return { made, posted, v: w.run(code) };
+};
+
+test('a Web Worker\'s seeding starts each Web Worker it starts at its script URL, resolved against the URL the app asked for, marked with a token of its own: the same each run, another for the next worker at that path, another path, token or instance; a module one is marked so; it keeps new, instanceof and its constructor; a Shared Worker\'s seeding leaves Worker as it is', () => {
+  const t = 'cd'.repeat(16);
+  const code = 'new Worker("b.js", { name: "b0" }); new Worker("b.js", null); new Worker("/e/m.js", { type: "module" }); new Worker("?q=1#f"); new Worker("#f"); new Worker("https://h/s.js"); 0';
+  for (const kind of ['w', 'm']) {
+    const a = nestedAt(t, 0, kind, code);
+    const marks = a.made.map(([u]) => workerMark(u));
+    assert.deepEqual(a.made.map(([, o], i) => [marks[i].kind, marks[i].url, o]), [['w', 'http://h/d/b.js', { name: 'b0' }], ['w', 'http://h/d/b.js', null],
+      ['m', 'http://h/e/m.js', { type: 'module' }], ['w', 'http://h/d/a.js?q=1#f', undefined], ['w', 'http://h/d/a.js?x=1#f', undefined], ['w', 'https://h/s.js', undefined]], kind);
+    for (const m of marks) assert.match(m.token, TOKEN);
+    assert.equal(new Set(marks.map((m) => m.token)).size, 6);
+    assert.deepEqual(nestedAt(t, 0, kind, code).made, a.made);
+    assert.deepEqual(a.posted, []);
+    for (const [tt, n] of [['ef'.repeat(16), 0], [t, 1]]) assert.notEqual(workerMark(nestedAt(tt, n, kind, code).made[0][0]).token, marks[0].token);
+    assert.equal(nestedAt(t, 0, kind, 'const x = new Worker("b.js"); x instanceof Worker && Worker.prototype.constructor === Worker && Worker.name === "Worker" && Worker.length === 1').v, true);
+    assert.throws(() => nestedAt(t, 0, kind, 'Worker("b.js")'), TypeError);
+  }
+  // Each worker counts its own: the same for the same worker.
+  assert.equal(workerMark(nestedAt(t, 0, 'w', 'new Worker("b.js"); 0').made[0][0]).token, workerMark(nestedAt(t, 0, 'm', 'new Worker("b.js"); 0').made[0][0]).token);
+  for (const kind of ['s', 'x']) assert.deepEqual(nestedAt(t, 0, kind, 'new Worker("b.js"); 0').made, [['b.js', undefined]], kind);
+  // Where the route does not reach their scripts (Chromium, Firefox): each
+  // starts as the app asked, and its address is posted, with why.
+  const to = markWorker('http://h/d/a.js?x=1', 't', t);
+  for (const kind of ['w', 'm']) {
+    const a = nestedAt(t, 0, kind, 'new Worker("b.js", { name: "b0" }); new Worker("https://h/s.js?q=1"); new Worker("blob:http://h/0f"); 0', undefined, false);
+    assert.deepEqual(a.made, [['b.js', { name: 'b0' }], ['https://h/s.js?q=1', undefined], ['blob:http://h/0f', undefined]], kind);
+    assert.deepEqual(a.posted, [[to, { method: 'POST', body: '["nested","http://h/d/b.js"]' }], [to, { method: 'POST', body: '["nested","https://h/s.js"]' }],
+      [to, { method: 'POST', body: '["worker","blob:"]' }]], kind);
+  }
+  assert.deepEqual(workerAnswer(t, 0, 'w', 'http://h/w.js', true, true).split('queueMicrotask(')[0], workerScript(t, 0, 'w', true));
+  assert.notEqual(workerScript(t, 0, 'w', true), workerScript(t, 0, 'w'));
+});
+
+test('a Web Worker\'s seeding starts a Web Worker keploy cannot mark as the app asked and posts its address to the worker\'s own URL marked t: a blob: or data: URL, or a marked URL the browser refuses; a URL the browser cannot read throws its own error and posts nothing', () => {
+  const t = 'cd'.repeat(16);
+  const to = markWorker('http://h/d/a.js?x=1', 't', t);
+  const post = (at) => [to, { method: 'POST', body: JSON.stringify(['worker', at]) }];
+  const a = nestedAt(t, 0, 'w', 'new Worker("blob:http://h/0f0e"); new Worker("data:text/javascript,1"); 0');
+  assert.deepEqual([a.made.map(([u]) => u), a.posted], [['blob:http://h/0f0e', 'data:text/javascript,1'], [post('blob:'), post('data:')]]);
+  const made = [];
+  class Picky { constructor(url) { if (workerMark(String(url)) !== null) throw new TypeError('refused'); made.push(String(url)); } }
+  assert.deepEqual(nestedAt(t, 0, 'm', 'new Worker("/e/b.js?q=1"); 0', Picky).posted, [post('http://h/e/b.js')]);
+  assert.deepEqual(made, ['/e/b.js?q=1']);
+  class Strict { constructor(url) { if (String(url) === 'http://[') throw new SyntaxError('the browser\'s own'); } }
+  const posted = [];
+  assert.throws(() => workerAt(markWorker('http://h/d/a.js', 'w', t), workerScript(t, 0, 'w'), { URL, Worker: Strict, fetch: (u) => { posted.push(u); return Promise.resolve(); }, Request: class Request {} })
+    .run('new Worker("http://[")'), (e) => e.message === 'the browser\'s own');
+  assert.deepEqual(posted, []);
+});
+
 test('a worker\'s seeding: an Error\'s or a DOMException\'s stack read through its prototype\'s getter (Firefox) leaves out each frame at a URL whose query has keploy\'s mark, any kind; its setter, flags and a value that is no string are kept; a stack that is no getter stays as it was', () => {
   const t = 'ab'.repeat(16);
   const href = markWorker('http://h/w.js', 'w', t);
@@ -1716,7 +1785,7 @@ function routed() {
     let at = url;
     let over;
     let ended = false;
-    const request = { url: () => at, resourceType: () => as.type, headers: () => as.headers };
+    const request = { url: () => at, resourceType: () => as.type, headers: () => as.headers, postData: () => as.body ?? null };
     const route = {
       request: () => request,
       fetch: async (o) => { did.push(['fetch', o.url]); if (answer instanceof Error) throw answer; return answer; },
@@ -1803,6 +1872,26 @@ test('workerRoutes answers a marked URL as a worker\'s script only when the brow
   assert.equal((await r.ask(markWorker('http://h/s.js', 's', s), answerOf(200, 'app()'), as('xhr', 'sharedworker')))[1][1].body, workerAnswer(s, 0, 's', 'http://h/s.js'));
   assert.deepEqual(await r.ask(markWorker('http://h/m.js', 'p', t, 0), undefined, as('script', 'worker')), [['fulfill', { status: 200, contentType: 'text/javascript', body: workerScript(t, 0, 'm') }]]);
   assert.equal(answered.length, 5);
+});
+
+test('workerRoutes answers a seeded Web Worker\'s word of a worker keploy cannot mark (marked t) itself, with no body, and hears its address; one with no address is answered and names none; neither reaches a route of the test\'s', async () => {
+  const { r, context } = routed();
+  const answered = [];
+  const unmarked = [];
+  await workerRoutes(context, { answered: (q) => answered.push(q.url()), unmarked: (at, why) => unmarked.push([why, at]) });
+  let theirs = 0;
+  await context.route('**/*', async (route) => { theirs++; await route.continue(); });
+  const t = 'ab'.repeat(16);
+  const to = markWorker('http://h/d/a.js?x=1', 't', t);
+  const one = [['worker', 'blob:']];
+  const two = [...one, ['nested', 'http://h/e/b.js']];
+  const words = [['["worker","blob:"]', one], ['["nested","http://h/e/b.js"]', two], [undefined, two], ['blob:', two], ['["routed","http://h/x.js"]', two],
+    ['["worker",""]', two], ['["worker",7]', two], ['{"0":"worker","1":"blob:"}', two]];
+  for (const [body, said] of words) {
+    assert.deepEqual(await r.ask(to, undefined, { type: 'fetch', headers: { 'sec-fetch-dest': 'empty' }, body }), [['fulfill', { status: 204, body: 'undefined' }]]);
+    assert.deepEqual(unmarked, said);
+  }
+  assert.deepEqual([answered.length, new Set(answered).size, theirs], [words.length, 1, 0]);
 });
 
 test('cspAllowsData: no policy, or each policy whose script or worker source list is named lists data:; a policy that names one without it refuses', () => {

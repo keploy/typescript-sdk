@@ -97,17 +97,23 @@ export function pageAddress(at: unknown): string {
  * a frame inside one, 'nostorage' for a top document with no session
  * storage to count its documents in (other than a page's first document),
  * or a frame of its origin inside one, 'routed' for a worker whose script
- * a route of the test's own answered itself (workerRoutes), 'service' for a
+ * a route of the test's own answered itself (workerRoutes), 'nested' for a
+ * Web Worker a seeded Web Worker started where the route does not reach its
+ * script (NESTED_JS), 'service' for a
  * Service Worker a document registered, 'controlled' for a worker whose
  * script a Service Worker may answer (initScript).
  */
-export type Unplaced = 'own' | 'frame' | 'popup' | 'uncounted' | 'nostorage' | 'worker' | 'shared' | 'routed' | 'service' | 'controlled';
+export type Unplaced = 'own' | 'frame' | 'popup' | 'uncounted' | 'nostorage' | 'worker' | 'shared' | 'routed' | 'service' | 'controlled' | 'nested';
 
 // The next step for a Service Worker the tests do not need.
 const BLOCK = 'if the tests do not need it, set serviceWorkers: \'block\' in the project\'s use (Playwright then registers none, and keploy seeds the workers it would have answered)';
 
+// A worker keploy cannot reach starts its own workers unseeded too: its
+// line says so (unplacedLine).
+const KIDS = 'and so does each worker it starts, so their draws may differ at replay';
+
 // A worker keploy cannot reach: its line's reason (unplacedLine).
-const UNREACHED: Record<'worker' | 'shared' | 'routed' | 'service', string> = {
+const UNREACHED: Record<'worker' | 'shared' | 'routed' | 'service' | 'nested', string> = {
   worker: 'it is a worker started from a script keploy cannot mark (a blob: or data: URL, or a URL the browser refused with keploy\'s mark, as a Trusted Types policy may), ' +
     'so keploy cannot put its seeding ahead of the script; start it from the script\'s http(s) URL to seed it.',
   shared: 'it is a Shared Worker, and Firefox does not let keploy reach a Shared Worker\'s script to put its seeding ahead of it; ' +
@@ -117,9 +123,11 @@ const UNREACHED: Record<'worker' | 'shared' | 'routed' | 'service', string> = {
     'for the worker\'s script to seed it.',
   service: 'keploy cannot put its seeding ahead of a Service Worker\'s script, and a worker whose script the Service Worker may answer starts unseeded (each one is named); ' +
     `${BLOCK}.`,
+  nested: 'it is a worker that a worker started, and Chromium and Firefox do not let keploy reach its script to put its seeding ahead of it; ' +
+    'record and replay the test in WebKit to seed it.',
 };
 
-const UNPLACED: Record<Exclude<Unplaced, 'uncounted' | 'worker' | 'shared' | 'routed' | 'service' | 'controlled'>, string> = {
+const UNPLACED: Record<Exclude<Unplaced, 'uncounted' | 'worker' | 'shared' | 'routed' | 'service' | 'controlled' | 'nested'>, string> = {
   own: 'it is in a page the test opened, and it drew before keploy named that page: a script the test added with context.addInitScript ' +
     'runs in each of the page\'s documents before keploy\'s, and so does a draw the test makes there before newPage returns.',
   frame: 'it is a frame keploy cannot place among its parent\'s frames (one in a closed shadow root or in an object or embed element, ' +
@@ -143,13 +151,13 @@ const UNPLACED: Record<Exclude<Unplaced, 'uncounted' | 'worker' | 'shared' | 'ro
  */
 export function unplacedLine(name: string, at: string, why: Unplaced = 'popup', others = 0, by = ''): string {
   if (why === 'controlled') {
-    return `keploy: in ${name}, the worker at ${at} draws the browser's own random numbers, so its draws may differ at replay: ` +
+    return `keploy: in ${name}, the worker at ${at} draws the browser's own random numbers, ${KIDS}: ` +
       `a Service Worker${by === '' ? '' : ` (at ${by})`} may answer the worker's script, and it would see keploy's __keploy_worker mark in the script's URL, so keploy starts the worker as the app asked; ` +
       `${BLOCK}.`;
   }
-  if (why === 'worker' || why === 'shared' || why === 'routed' || why === 'service') {
+  if (why === 'worker' || why === 'shared' || why === 'routed' || why === 'service' || why === 'nested') {
     const what = why === 'shared' ? 'Shared Worker' : why === 'service' ? 'Service Worker' : 'worker';
-    return `keploy: in ${name}, the ${what} at ${at} draws the browser's own random numbers, so its draws may differ at replay: ${UNREACHED[why]}`;
+    return `keploy: in ${name}, the ${what} at ${at} draws the browser's own random numbers, ${why === 'service' ? 'so its draws may differ at replay' : KIDS}: ${UNREACHED[why]}`;
   }
   const n = Math.floor(Number(others));
   const reason = why === 'uncounted'
@@ -1329,17 +1337,18 @@ ${DRAW_JS}
  * A worker's script URL, marked (initScript), read back: its kind ('w' a
  * classic Web Worker's script, 'm' a module Web Worker's, 's' a classic
  * Shared Worker's, 'x' a module Shared Worker's, 'p' the seeding that the
- * answer to 'm' imports), its token, the instance n of a token ('p'; -1 for
- * the others), and
+ * answer to 'm' imports, 't' a seeded Web Worker telling keploy the address
+ * of a worker it started that keploy cannot mark: NESTED_JS), its token,
+ * the instance n of a token ('p'; -1 for the others), and
  * the URL with no mark, as the app asked for it. null for a URL with no
  * mark keploy made.
  */
-export type WorkerMark = { kind: 'w' | 'm' | 's' | 'x' | 'p'; token: string; n: number; url: string };
+export type WorkerMark = { kind: 'w' | 'm' | 's' | 'x' | 'p' | 't'; token: string; n: number; url: string };
 
 export function workerMark(href: string): WorkerMark | null {
   const i = href.indexOf('#');
   const b = i < 0 ? href : href.slice(0, i);
-  const m = /[?&]__keploy_worker=([wmsxp])\.([0-9a-f]{32})(?:\.(\d{1,9}))?$/.exec(b);
+  const m = /[?&]__keploy_worker=([wmsxpt])\.([0-9a-f]{32})(?:\.(\d{1,9}))?$/.exec(b);
   if (m === null) return null;
   const kind = m[1] as WorkerMark['kind'];
   const numbered = kind === 'p';
@@ -1370,7 +1379,7 @@ export function markWorker(url: string, kind: WorkerMark['kind'], token: string,
  * is no Crypto or location) reaches its caller with none of the seeding's
  * frames on the stack it keeps (V8's and WebKit's).
  */
-export function workerScript(token: string, n: number, kind: 'w' | 'm' | 's' | 'x'): string {
+export function workerScript(token: string, n: number, kind: 'w' | 'm' | 's' | 'x', reach = false): string {
   return `(() => {
   const g = globalThis;
   const k = ${JSON.stringify(`${token}\n${n}\n`)};
@@ -1466,9 +1475,71 @@ ${DRAW_JS}
       Object.defineProperty(C.prototype, 'stack', { get: Object.getOwnPropertyDescriptor(v, 'stack').get, set: d.set, enumerable: d.enumerable, configurable: true });
     } catch (e) {}
   }
-})();
+${kind === 'w' || kind === 'm' ? NESTED_JS(token, reach) : ''}})();
 `;
 }
+
+/**
+ * A Web Worker's seeding of the Web Workers it starts (workerScript). Where
+ * the context's route reaches their scripts (reach: WebKit), each is named by this worker's key, its script's path and how many workers
+ * this worker started at that path before it, and its script URL, resolved
+ * against the URL the app asked for, carries keploy's mark, which the
+ * context's route answers with its seeding (workerAnswer), as a page's
+ * workers are. Chromium and Firefox let the route reach none of them, so
+ * there each starts as the app asked, with no mark ('nested'), as does one
+ * keploy cannot mark (a blob: or data: URL, or a marked URL the browser
+ * refuses: 'worker'). For each of these this worker tells keploy why and
+ * the address: it posts them to its own script's URL marked t (kind t), a
+ * request keploy's route answers itself (workerRoutes), so the app's server
+ * never sees it. A Shared Worker's scope is left as it is.
+ */
+const NESTED_JS = (token: string, reach: boolean): string => `  const RW = g.Worker;
+  if (typeof RW === 'function') {
+    const U = g.URL;
+    const hex = (s) => hash(s).map((w) => (w + 4294967296).toString(16).slice(1)).join('');
+    const started = new Map();
+    const mark = (h, kind, t) => {
+      const i = h.indexOf('#');
+      const b = i < 0 ? h : h.slice(0, i);
+      return b + (b.indexOf('?') < 0 ? '?' : '&') + ${JSON.stringify(`${WORKER_PARAM}=`)} + kind + '.' + t + (i < 0 ? '' : h.slice(i));
+    };
+    const tell = (why, where) => {
+      try { F.call(g, mark(own, 't', ${JSON.stringify(token)}), { method: 'POST', body: JSON.stringify([why, where]) }).then(undefined, () => {}); } catch (e) {}
+    };
+    const W = { Worker: function (url) {
+      // Called without new, it throws as the browser's own does.
+      if (!new.target) return RW.apply(this, arguments);
+      const args = Array.prototype.slice.call(arguments);
+      let u = null;
+      try { u = new U(String(url), own); } catch (e) { u = null; }
+      // A URL the browser cannot read: its own error.
+      if (u === null) return Reflect.construct(RW, args, new.target);
+      const web = u.protocol === 'http:' || u.protocol === 'https:';
+      if (web) {
+        const n = started.get(u.pathname) || 0;
+        started.set(u.pathname, n + 1);
+        const o = args[1];
+        const m = ${reach ? 'true' : 'false'} && mark(u.href, o !== null && typeof o === 'object' && o.type === 'module' ? 'm' : 'w', hex(k + 'worker\\n' + u.pathname + '\\n' + n));
+        if (m) {
+          try { return Reflect.construct(RW, [m].concat(args.slice(1)), new.target); } catch (e) {
+            // Refused with the mark (a Trusted Types policy): as the app asked.
+          }
+        }
+      }
+      const w = Reflect.construct(RW, args, new.target);
+      tell(web && !${reach ? 'true' : 'false'} ? 'nested' : 'worker', web ? u.origin + u.pathname : u.protocol);
+      return w;
+    } }.Worker;
+    try {
+      W.prototype = RW.prototype;
+      Object.defineProperty(RW.prototype, 'constructor', { value: W, writable: true, enumerable: false, configurable: true });
+      Object.setPrototypeOf(W, Object.getPrototypeOf(RW));
+      define(g, 'Worker', W);
+    } catch (e) {
+      // A scope that takes no property: its workers draw their own.
+    }
+  }
+`;
 
 /**
  * Whether a module Shared Worker answered with these headers may import a
@@ -1521,9 +1592,9 @@ export function cspAllowsData(headers: Record<string, string>): boolean {
  * order, each in a microtask of its own, to the handlers the app's script
  * sets.
  */
-export function workerAnswer(token: string, n: number, kind: 'w' | 'm' | 's' | 'x', own: string, dataOk = true): string {
+export function workerAnswer(token: string, n: number, kind: 'w' | 'm' | 's' | 'x', own: string, dataOk = true, reach = false): string {
   const url = JSON.stringify(own);
-  if (kind === 'w' || kind === 's') return `${workerScript(token, n, kind)}queueMicrotask(importScripts.bind(globalThis, ${url}));\n`;
+  if (kind === 'w' || kind === 's') return `${workerScript(token, n, kind, reach)}queueMicrotask(importScripts.bind(globalThis, ${url}));\n`;
   if (kind === 'm') return `import ${JSON.stringify(markWorker(own, 'p', token, n))};\nimport ${url};\n`;
   const seeding = workerScript(token, n, 'x');
   if (dataOk) return `import ${JSON.stringify(`data:text/javascript;${WORKER_PARAM}=x.${token};base64,${Buffer.from(seeding).toString('base64')}`)};\nimport ${url};\n`;
@@ -1566,6 +1637,12 @@ export type WorkerHooks = {
    * origin and path) itself: it runs unseeded, at its marked URL.
    */
   routed?: (at: string) => void;
+  /**
+   * A seeded Web Worker started a worker at at (its origin and path, or its
+   * scheme: blob:, data:) that keploy cannot mark ('worker') or whose script
+   * the route does not reach ('nested'), which so runs unseeded.
+   */
+  unmarked?: (at: string, why: 'worker' | 'nested') => void;
 };
 
 /** What keploy's routes go on: the test's context, or one of its pages. */
@@ -1625,7 +1702,10 @@ function keepFirst(target: Routes, url: (u: URL) => boolean, handler: (route: Ro
  * XMLHttpRequest's: its fetch and Request ask for no mark, workerScript)
  * goes on to the test's routes and the app's server with the mark taken off
  * (the URL the app's code meant, as the worker's location shows it), and
- * starts no instance of the token.
+ * starts no instance of the token. A seeded Web Worker's word of a worker it
+ * started that keploy cannot mark (marked t: NESTED_JS) is answered here, with
+ * no body, and heard (unmarked); it reaches no route of the test's and not
+ * the app's server.
  *
  * keploy's route comes first, ahead of every route the test adds to its
  * context or to one of its pages (keepFirst), so no route of the test's sees
@@ -1637,7 +1717,7 @@ function keepFirst(target: Routes, url: (u: URL) => boolean, handler: (route: Ro
  * it. One that falls back, or none, leaves it to keploy's last route, the
  * context's first, which answers it as above.
  */
-export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks = {}): Promise<void> {
+export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks = {}, reach = false): Promise<void> {
   const counts = new Map<string, number>();
   // The answer's headers, but its encoding and length: the body given is
   // keploy's, of another length.
@@ -1656,7 +1736,7 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
       hooks.answered?.(route.request());
     };
     if (m.kind === 'p') {
-      await fulfill({ status: 200, contentType: 'text/javascript', body: workerScript(m.token, m.n, 'm') });
+      await fulfill({ status: 200, contentType: 'text/javascript', body: workerScript(m.token, m.n, 'm', reach) });
       return;
     }
     const n = counts.get(m.token) ?? 0;
@@ -1674,13 +1754,23 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
     } catch {
       // The worker loads the app's script itself, and fails as it would.
     }
-    await fulfill({ status, headers, body: workerAnswer(m.token, n, m.kind as 'w' | 'm' | 's' | 'x', m.url, cspAllowsData(headers)) });
+    await fulfill({ status, headers, body: workerAnswer(m.token, n, m.kind as 'w' | 'm' | 's' | 'x', m.url, cspAllowsData(headers), reach) });
   };
   const first = async (route: Route): Promise<void> => {
     const r = route.request();
     const m = workerMark(r.url());
     if (m === null) {
       await route.fallback();
+      return;
+    }
+    // A seeded Web Worker's word of a worker keploy cannot mark: heard, then
+    // answered here, so it never leaves the browser.
+    if (m.kind === 't') {
+      let said: unknown = null;
+      try { said = JSON.parse(r.postData() ?? ''); } catch { said = null; }
+      if (Array.isArray(said) && (said[0] === 'worker' || said[0] === 'nested') && typeof said[1] === 'string' && said[1] !== '') hooks.unmarked?.(said[1], said[0]);
+      await route.fulfill({ status: 204 });
+      hooks.answered?.(r);
       return;
     }
     if (!workerScriptLoad(r)) {

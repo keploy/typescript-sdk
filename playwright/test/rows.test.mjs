@@ -10,7 +10,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { LOADS_KEY, OFF_LINE, SEEDED_LINE, fakerLine, initScript, processRandom, unplacedLine, unseededLine, workerMark, workerScript } from '../dist/random.js';
+import { LOADS_KEY, OFF_LINE, SEEDED_LINE, fakerLine, initScript, processRandom, unplacedLine, unseededLine, markWorker, workerMark, workerScript } from '../dist/random.js';
 import { sharedWorkerLine } from '../dist/settle.js';
 import { BLANK_DRAWS, DRAWS, documentAt, workerAt } from './draws.mjs';
 
@@ -650,6 +650,18 @@ async function drawsServer() {
       // twice) served with a policy that refuses data: scripts. Each
       // connection after a worker's first is named by its number (c1+2).
       '/wk/mshared.js': `import { dep } from './lib.mjs'; const top = String(new Error('at').stack); const ref = ${REFS}; self.onconnect = (e) => { e.ports[0].postMessage({ kind: 'mshared', draws: ${DRAWS}, href: location.href, dep, meta: import.meta.url, top, errs: ${ERRS} }); ref.then((v) => e.ports[0].postMessage({ kind: 'mshared-ref', ...v })); };`,
+      // nested.spec.ts's: the page at /nw starts the classic Web Worker
+      // /nw/a.js?x=1 and the module one /nw/am.js, which start the workers
+      // beside them and pass on what each sends; /nw/b.js named b0 starts
+      // /nw/c.js. /nw/s.js, a Shared Worker, says whether its scope has Worker.
+      '/nw/a.js': `postMessage({ kind: 'a', draws: ${DRAWS}, href: location.href, worker: typeof Worker }); const start = (u, o) => { new Worker(u, o).onmessage = (e) => postMessage(e.data); }; ` +
+        'if (typeof Worker === \'function\') { start(\'b.js\', { name: \'b0\' }); start(\'b.js\', { name: \'b1\' }); start(\'bm.js\', { type: \'module\' }); ' +
+        'const blob = URL.createObjectURL(new Blob([\'postMessage({ kind: "blob" });\'], { type: \'text/javascript\' })); start(blob); start(blob); }',
+      '/nw/am.js': `postMessage({ kind: 'am', draws: ${DRAWS}, href: location.href, meta: import.meta.url }); if (typeof Worker === 'function') new Worker('b.js', { name: 'mb' }).onmessage = (e) => postMessage(e.data);`,
+      '/nw/b.js': `postMessage({ kind: self.name, draws: ${DRAWS}, href: location.href }); if (self.name === 'b0') new Worker('c.js').onmessage = (e) => postMessage(e.data);`,
+      '/nw/bm.js': `postMessage({ kind: 'bm', draws: ${DRAWS}, href: location.href, meta: import.meta.url });`,
+      '/nw/c.js': `postMessage({ kind: 'c', draws: ${DRAWS}, href: location.href });`,
+      '/nw/s.js': 'onconnect = (e) => e.ports[0].postMessage({ kind: \'sh\', worker: typeof Worker });',
       '/wk/cshared.js': `import { dep } from './lib.mjs'; let n = 0; const draws = ${DRAWS}; const errs = ${ERRS}; const top = String(new Error('at').stack); const ref = ${REFS}; self.onconnect = (e) => { n++; if (n === 1) ref.then((v) => e.ports[0].postMessage({ kind: self.name + '-ref', ...v })); e.ports[0].postMessage({ kind: self.name + (n > 1 ? \`+\${n}\` : ''), draws, href: location.href, dep, meta: import.meta.url, top, stack: String(new Error('at').stack), errs }); };`,
     }[u.pathname];
     if (wk !== undefined) {
@@ -672,6 +684,11 @@ async function drawsServer() {
     if (u.pathname === '/wk') {
       const start = (s) => (s.startsWith('new Worker(') ? `{ const w = ${s}; w.onmessage = take; w.postMessage('early'); }` : `{ const s = ${s}; s.port.onmessage = take; s.port.start(); }`);
       res.end(page(`<script>window.__w = []; const take = (e) => window.__w.push(e.data);${WK_STARTS.map(start).join('')}</script>`));
+      return;
+    }
+    if (u.pathname === '/nw') {
+      res.end(page('<script>window.__w = []; const take = (e) => window.__w.push(e.data); new Worker(\'/nw/a.js?x=1\').onmessage = take; ' +
+        'new Worker(\'/nw/am.js\', { type: \'module\' }).onmessage = take; new SharedWorker(\'/nw/s.js\').port.onmessage = take;</script>'));
       return;
     }
     // /sw registers /sw.js and, once the browser registered it, waits until
@@ -1493,6 +1510,72 @@ for (const engine of ENGINES) {
         if (engine === 'firefox') assert.notDeepEqual(p[k].draws, w[k].draws, k);
         else assert.deepEqual(p[k].draws, w[k].draws, k);
       }
+      }
+      assert.deepEqual(q.seen.filter((u) => u.includes('__keploy_worker')), []);
+    } finally { await rep.close(); await rec.close(); }
+  });
+}
+
+// The marks a document at /nw of page t0 gives the workers nested.spec.ts's
+// page starts, and the marks those Web Workers' seedings give theirs.
+function nestedMarks(seed) {
+  const made = [];
+  class Worker { constructor(url) { made.push(workerMark(String(url))); } }
+  documentAt(initScript(seed), '/nw', new Map(), 't0', { globals: { URL, Worker, SharedWorker: Worker } })
+    .run('new Worker(\'/nw/a.js?x=1\'); new Worker(\'/nw/am.js\', { type: \'module\' }); new SharedWorker(\'/nw/s.js\');');
+  const kids = (m, code) => {
+    const got = [];
+    class W { constructor(url) { got.push(workerMark(String(url))); } }
+    workerAt(markWorker(m.url, m.kind, m.token), workerScript(m.token, 0, m.kind, true), { URL, Worker: W, fetch: () => Promise.resolve(), Request: class Request {} }).run(code);
+    return got;
+  };
+  const [a, am] = made;
+  const [b0, b1, bm] = kids(a, 'new Worker(\'b.js\', { name: \'b0\' }); new Worker(\'b.js\', { name: \'b1\' }); new Worker(\'bm.js\', { type: \'module\' });');
+  const [mb] = kids(am, 'new Worker(\'b.js\', { name: \'mb\' });');
+  const [c] = kids(b0, 'new Worker(\'c.js\');');
+  return { a, am, b0, b1, bm, mb, c };
+}
+
+for (const engine of ENGINES) {
+  test(`seeded, in ${engine}: the Web Workers a Web Worker starts, classic and module, and one that one of them starts, draw from the test's seed in WebKit, each its own numbers, the same at replay, at the app's location; in Chromium and Firefox, whose route does not reach their scripts, they start as the app asked and each address is named once; the app's server never sees keploy's mark; one it starts from a blob: URL draws its own and is named once`, async () => {
+    const j = journal();
+    const rec = await fakeAgent(j);
+    let kept = {};
+    const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+      ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+    const env = (url) => ({ ...keployEnv(url), PW_BROWSER: engine });
+    const SEEDED = [['a', 'a.js?x=1'], ['am', 'am.js'], ['b0', 'b.js'], ['b1', 'b.js'], ['bm', 'bm.js'], ['mb', 'b.js'], ['c', 'c.js']];
+    try {
+      const r = await drawRun(j, env(rec.url), ['nested.spec.ts'], ['nested']);
+      const w = Object.fromEntries(r.drew.nested.map((x) => [x.kind, x]));
+      const facts = JSON.stringify(r.drew.nested);
+      assert.deepEqual(Object.keys(w).sort(), ['a', 'am', 'b0', 'b1', 'blob', 'bm', 'c', 'mb', 'sh'], facts);
+      // Chromium has no Worker in a Shared Worker's scope.
+      assert.equal(w.sh.worker, engine === 'chromium' ? 'undefined' : 'function', facts);
+      const seeds = engine === 'webkit';
+      const m = nestedMarks(r.seeds.nested);
+      assert.deepEqual(SEEDED.map(([k]) => m[k].kind), ['w', 'm', 'w', 'w', 'm', 'w', 'w']);
+      assert.equal(new Set(SEEDED.map(([k]) => m[k].token)).size, SEEDED.length);
+      for (const [k, file] of SEEDED) {
+        assert.match(w[k].href, new RegExp(`^http://127\\.0\\.0\\.1:\\d+/nw/${file.replace(/[.?]/g, '\\$&')}$`), `${k} ${facts}`);
+        const model = workerAt(`http://h/nw/${file}`, workerScript(m[k].token, 0, m[k].kind)).draws();
+        if (seeds || k === 'a' || k === 'am') assert.deepEqual(w[k].draws, model, `${k} ${facts}`);
+        else assert.notDeepEqual(w[k].draws, model, `${k} ${facts}`);
+      }
+      for (const k of ['am', 'bm']) assert.equal(w[k].meta, w[k].href);
+      const said = r.tests.nested.stdout.split('\n').filter((l) => l.startsWith('keploy: in nested, ')).map((l) => l.replace(/:\d+\//, ':<port>/'));
+      const at = (p) => `http://127.0.0.1:<port>/nw/${p}`;
+      assert.deepEqual(said.sort(), [unplacedLine('nested', 'blob:', 'worker'), sharedWorkerLine('nested', at('s.js')),
+        ...(seeds ? [] : ['b.js', 'bm.js'].map((f) => unplacedLine('nested', at(f), 'nested'))),
+        ...(engine === 'firefox' ? [unplacedLine('nested', at('s.js'), 'shared')] : [])].sort(), facts);
+      assert.deepEqual(r.seen.filter((u) => u.includes('__keploy_worker')), []);
+      for (const u of ['/nw/a.js?x=1', '/nw/am.js', '/nw/b.js', '/nw/bm.js', '/nw/c.js', '/nw/s.js']) assert.ok(r.seen.includes(u), `${u}: ${r.seen.join(' ')}`);
+      kept = r.seeds;
+      const q = await drawRun(j, env(rep.url), ['nested.spec.ts'], ['nested']);
+      const p = Object.fromEntries(q.drew.nested.map((x) => [x.kind, x]));
+      for (const [k] of SEEDED) {
+        if (seeds || k === 'a' || k === 'am') assert.deepEqual(p[k].draws, w[k].draws, k);
+        else assert.notDeepEqual(p[k].draws, w[k].draws, k);
       }
       assert.deepEqual(q.seen.filter((u) => u.includes('__keploy_worker')), []);
     } finally { await rep.close(); await rec.close(); }
