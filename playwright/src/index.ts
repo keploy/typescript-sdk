@@ -67,15 +67,13 @@ let open: TestRef | null = null;
 const files = new WorkerFiles();
 
 // enterFile ends the values keploy holds for this worker's earlier test file
-// before the worker works in file (files.ts), so no test of file carries
-// them. An end keploy refuses throws, and the worker stays in its earlier
-// file: the next test tries again.
-async function enterFile(c: AgentClient, file: string | null): Promise<void> {
-  if (files.mustEnd(file)) {
-    await c.endGiven();
-    files.ended();
-  }
-  files.entered(file);
+// before the worker works in file (files.ts), so no test or setup of file
+// carries them; callers that enter file at once wait for that one end. An
+// end keploy refuses throws in the test or the setup that entered file, which
+// fails, and Playwright then runs the worker's later tests in a new worker,
+// which claims the run again.
+function enterFile(c: AgentClient, file: string | null): Promise<void> {
+  return files.enter(file, () => c.endGiven());
 }
 
 // The test file of the hook that runs now (a test.beforeAll runs with its
@@ -159,11 +157,13 @@ export const test = base.extend<TestFixtures, WorkerFixtures>({
  * test's. Given while none of the worker's tests is open (a test.beforeAll
  * of this package's test, which runs once the worker claimed keploy's run),
  * it is the worker's: keploy gives it to each test the worker begins after
- * it, so a name a test file's setup mints once is followed in each of its
- * tests. Once the worker moves on to another test file, this package ends
- * that file's values, so no test of a later file carries them. A process no worker of this package's test runs in (a test file's
- * top level, globalSetup) has no test or worker to give it to, and given
- * fails there, naming where to give it instead.
+ * it and follows it in the calls the worker makes outside its tests from the
+ * given on (the hook's own), so a name a test file's setup mints once is
+ * followed in its setup and in each of its tests. Once the worker moves on to
+ * another test file, this package ends that file's values, so no test or
+ * setup of a later file carries them. A process no worker of this package's
+ * test runs in (a test file's top level, globalSetup) has no test or worker
+ * to give it to, and given fails there, naming where to give it instead.
  * Without keploy it returns value and does nothing else.
  */
 export async function given(name: string, value: string): Promise<string> {

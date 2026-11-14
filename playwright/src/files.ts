@@ -1,11 +1,12 @@
 // The values a worker gives outside its tests (in a test.beforeAll) are its
-// test file's. keploy holds them for each test the worker begins, until this
-// package ends them (POST /agent/scope/given with {"end": true}). Playwright
-// runs a worker's files one after another, so the worker ends them as it
-// moves on to another file: after that file's afterAll, before the next
-// file's setup gives a value or its first test begins. Each file's values are
-// then numbered alike however a run spreads its files over workers, and no
-// test of a later file carries an earlier file's value.
+// test file's. keploy holds them for each test the worker begins and for the
+// worker's calls outside its tests, until this package ends them (POST
+// /agent/scope/given with {"end": true}). Playwright runs a worker's files one
+// after another, so the worker ends them as it moves on to another file:
+// after that file's afterAll, before the next file's setup gives a value or
+// its first test begins. Each file's values are then numbered alike however a
+// run spreads its files over workers, and no test or setup of a later file
+// carries an earlier file's value.
 
 /** Which test file a worker is in, and whether keploy holds values it gave outside its tests. */
 export class WorkerFiles {
@@ -14,28 +15,30 @@ export class WorkerFiles {
   private current: string | null = null;
   // keploy holds values the worker gave outside its tests.
   private holds = false;
+  // The worker's move into current: the end of the values keploy held for
+  // the earlier file, or nothing to wait for. Each caller in current waits
+  // for this one promise, so a move sends one end however many callers enter
+  // the file at once (two values a setup gives together).
+  private moved: Promise<void> = Promise.resolve();
 
   /**
-   * Whether the values keploy holds must end before the worker works in
-   * file (null: a place no test file is known for, which leaves the file as
-   * it is). A value given before the worker's first file is that file's.
+   * The worker works in file now (null: a place no test file is known for,
+   * which leaves the file as it is). When keploy holds values the worker
+   * gave in its earlier file, end ends them, once for the move, and every
+   * caller in file waits for that end; it rejects for each of them when the
+   * end is refused. A value given before the worker's first file is that
+   * file's.
    */
-  mustEnd(file: string | null): boolean {
-    return this.holds && this.current !== null && file !== null && file !== this.current;
-  }
-
-  /** The worker works in file now (null: as before). */
-  entered(file: string | null): void {
-    if (file !== null) this.current = file;
+  enter(file: string | null, end: () => Promise<void>): Promise<void> {
+    if (file === null || file === this.current) return this.moved;
+    const earlier = this.current;
+    this.current = file;
+    this.moved = this.holds && earlier !== null ? end().then(() => { this.holds = false; }) : Promise.resolve();
+    return this.moved;
   }
 
   /** keploy holds a value the worker gave outside its tests. */
   gave(): void {
     this.holds = true;
-  }
-
-  /** keploy dropped the worker's values. */
-  ended(): void {
-    this.holds = false;
   }
 }

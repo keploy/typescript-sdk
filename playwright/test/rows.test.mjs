@@ -20,16 +20,16 @@ function journal() {
   return { events, add: (e) => events.push(e) };
 }
 
-// A fake keploy agent. answer(call) returns {status, body} or undefined for
-// the protocol's plain "ok".
+// A fake keploy agent. answer(call) returns (or resolves to) {status, body},
+// or undefined for the protocol's plain "ok".
 async function fakeAgent(j, answer = () => undefined) {
   const srv = http.createServer((req, res) => {
     let body = '';
     req.on('data', (d) => { body += d; });
-    req.on('end', () => {
+    req.on('end', async () => {
       const call = { path: req.url, auth: req.headers.authorization ?? '', body: body ? JSON.parse(body) : null };
       j.add({ agent: call });
-      let a = answer(call);
+      let a = await answer(call);
       if (!a) {
         a = { body: call.path === '/agent/instance' ? { v: 1, instance: 'run', timeFile: '' }
           : call.path === '/agent/scope/given' ? { v: 1, status: 'ok', variable: `given:${call.body.name}` }
@@ -299,6 +299,57 @@ test('a worker ends a test file\'s values given outside its tests as it moves on
       end, b1Begin, g('b', 'own', 'own-b'), b1End,
       // c's setup gives the same name: b's value was its test's, so nothing is held and no end comes.
       g('c', 'run', 'run-c'), ...ran('c', 'c1'),
+    ]);
+  } finally { await a.close(); }
+});
+
+test('two adjacent files whose setups give one name: the earlier file\'s value ends before the next file\'s setup gives it', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  try {
+    const { tests } = await playwright(['given-files-a', 'given-files-c'], keployEnv(a.url));
+    assert.deepEqual(Object.fromEntries(Object.entries(tests).map(([k, t]) => [k, t.status])), { a1: 'passed', a2: 'passed', c1: 'passed' });
+    const r = (f, n) => ref(`given-files-${f}.spec.ts`, n);
+    const ran = (f, n) => [['/agent/scope/begin', { ...r(f, n), canSkip: true }], ['/agent/scope/end', { ...r(f, n), outcome: 'passed' }]];
+    const g = (f, value) => ['/agent/scope/given', { name: 'run', value, source: `test/fixtures/given-files-${f}.spec.ts:5` }];
+    assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
+      ['/agent/instance', { key: 'p1', dir: fs.realpathSync(PKG) }],
+      g('a', 'run-a'), ...ran('a', 'a1'), ...ran('a', 'a2'),
+      // c's setup gives while a's value is held: a's value ends first, so c's tests and setup carry only c's.
+      ['/agent/scope/given', { end: true }],
+      g('c', 'run-c'), ...ran('c', 'c1'),
+    ]);
+  } finally { await a.close(); }
+});
+
+test('two values a setup gives at once, while the earlier file\'s value is held, send one end and wait for its answer', async () => {
+  const j = journal();
+  // The end is answered once a value arrives, or after 2 s: a value sent
+  // before the end's answer then shows in the journal before "end answered".
+  let valueCame = () => {};
+  const came = new Promise((r) => { valueCame = r; });
+  const a = await fakeAgent(j, async (c) => {
+    if (c.path !== '/agent/scope/given') return undefined;
+    if (c.body.end) {
+      await Promise.race([came, new Promise((r) => setTimeout(r, 2000))]);
+      j.add({ answered: 'end' });
+    } else valueCame();
+    return undefined;
+  });
+  try {
+    const { tests } = await playwright(['given-files-a', 'given-together'], keployEnv(a.url));
+    assert.deepEqual(Object.fromEntries(Object.entries(tests).map(([k, t]) => [k, t.status])), { a1: 'passed', a2: 'passed', t1: 'passed' });
+    const g = (name, value, f) => ['/agent/scope/given', { name, value, source: `test/fixtures/${f}:5` }];
+    const ran = (f, n) => [['/agent/scope/begin', { ...ref(f, n), canSkip: true }], ['/agent/scope/end', { ...ref(f, n), outcome: 'passed' }]];
+    const seen = j.events.map((e) => (e.agent ? [e.agent.path, e.agent.body] : ['answered', e.answered])).filter((e) => e[0] !== 'answered' || e[1] === 'end');
+    // The two values come in either order.
+    const values = seen.slice(8, 10).sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
+    assert.deepEqual([...seen.slice(0, 8), ...values, ...seen.slice(10)], [
+      ['/agent/instance', { key: 'p1', dir: fs.realpathSync(PKG) }],
+      g('run', 'run-a', 'given-files-a.spec.ts'), ...ran('given-files-a.spec.ts', 'a1'), ...ran('given-files-a.spec.ts', 'a2'),
+      ['/agent/scope/given', { end: true }], ['answered', 'end'],
+      g('one', 'one-t', 'given-together.spec.ts'), g('two', 'two-t', 'given-together.spec.ts'),
+      ...ran('given-together.spec.ts', 't1'),
     ]);
   } finally { await a.close(); }
 });

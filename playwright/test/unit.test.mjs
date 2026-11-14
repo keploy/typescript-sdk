@@ -207,22 +207,38 @@ test('endGiven: sends {end: true} alone to the given route, and an answer other 
   } finally { await b.close(); }
 });
 
-test('WorkerFiles: the values keploy holds end only as the worker moves on to another file', () => {
+test('WorkerFiles: the values keploy holds end once as the worker moves on to another file, and each caller there waits for that end', async () => {
   const f = new WorkerFiles();
-  assert.equal(f.mustEnd('/p/a.spec.ts'), false, 'nothing held, no file yet');
+  let ends = 0;
+  // An end is answered at once, or, while held is set, once answer is called.
+  let held = null;
+  let answer = () => {};
+  const end = () => { ends++; return held ?? Promise.resolve(); };
+  // Whether p settled by the time the callbacks queued now have run.
+  const state = (p) => Promise.race([p.then(() => 'ended', (e) => `refused: ${e.message}`), new Promise((r) => setImmediate(() => r('waiting')))]);
   f.gave();
-  assert.equal(f.mustEnd('/p/a.spec.ts'), false, 'a value given before the first file is that file\'s');
-  f.entered('/p/a.spec.ts');
-  assert.equal(f.mustEnd('/p/a.spec.ts'), false, 'the same file');
-  assert.equal(f.mustEnd(null), false, 'a place no file is known for');
-  assert.equal(f.mustEnd('/p/b.spec.ts'), true, 'another file');
-  f.ended();
-  f.entered('/p/b.spec.ts');
-  assert.equal(f.mustEnd('/p/c.spec.ts'), false, 'ended: nothing held');
+  await f.enter('/p/a.spec.ts', end);
+  assert.equal(ends, 0, 'a value given before the first file is that file\'s');
+  await f.enter('/p/a.spec.ts', end);
+  await f.enter(null, end);
+  assert.equal(ends, 0, 'the same file; a place no file is known for');
+  held = new Promise((r) => { answer = r; });
+  const moves = [f.enter('/p/b.spec.ts', end), f.enter('/p/b.spec.ts', end), f.enter(null, end)];
+  assert.equal(ends, 1, 'another file: one end for every caller that enters it at once');
+  assert.deepEqual(await Promise.all(moves.map(state)), ['waiting', 'waiting', 'waiting'], 'each caller waits for the end');
+  answer();
+  held = null;
+  assert.deepEqual(await Promise.all(moves.map(state)), ['ended', 'ended', 'ended']);
+  await f.enter('/p/b.spec.ts', end);
+  await f.enter('/p/c.spec.ts', end);
+  assert.equal(ends, 1, 'ended: nothing held');
   f.gave();
-  f.entered(null);
-  assert.equal(f.mustEnd('/p/b.spec.ts'), false, 'entered(null) leaves the file as it was');
-  assert.equal(f.mustEnd('/p/c.spec.ts'), true);
+  await f.enter(null, end);
+  await f.enter('/p/c.spec.ts', end);
+  assert.equal(ends, 1, 'enter(null) leaves the file as it was');
+  const refused = [f.enter('/p/d.spec.ts', () => { ends++; return Promise.reject(new Error('no')); }), f.enter('/p/d.spec.ts', end)];
+  assert.equal(ends, 2);
+  assert.deepEqual(await Promise.all(refused.map(state)), ['refused: no', 'refused: no'], 'a refused end rejects for each caller in the file');
 });
 
 test('settle: a cancel that comes while settle already waits wakes it (its page closes; then, for a service worker\'s call, the test closes its context)', async () => {
