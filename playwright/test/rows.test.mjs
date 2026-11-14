@@ -10,7 +10,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { LOADS_KEY, OFF_LINE, SEEDED_LINE, initScript, processRandom, unplacedLine, unseededLine, workerMark, workerScript } from '../dist/random.js';
+import { LOADS_KEY, OFF_LINE, SEEDED_LINE, fakerLine, initScript, processRandom, unplacedLine, unseededLine, workerMark, workerScript } from '../dist/random.js';
 import { sharedWorkerLine } from '../dist/settle.js';
 import { BLANK_DRAWS, DRAWS, documentAt, workerAt } from './draws.mjs';
 
@@ -105,15 +105,15 @@ async function pageServer(j) {
   return { url: `http://127.0.0.1:${srv.address().port}`, close: () => new Promise((r) => { srv.closeAllConnections(); srv.close(r); }) };
 }
 
-// Runs one Playwright run of the fixture specs, from the folder cwd;
-// returns each test's result.
-async function playwright(specs, env, cwd = PKG) {
+// Runs one Playwright run of the fixture specs (or of config's), from the
+// folder cwd; returns each test's result.
+async function playwright(specs, env, cwd = PKG, config = CONFIG) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kpw-'));
   const report = path.join(tmp, 'report.json');
   const stepsFile = path.join(tmp, 'steps.jsonl');
   const childEnv = { ...process.env, PLAYWRIGHT_JSON_OUTPUT_NAME: report, PW_OUTPUT_DIR: path.join(tmp, 'out'), MARKER_DIR: tmp, STEPS_FILE: stepsFile, ...env };
   for (const k of Object.keys(childEnv)) if (childEnv[k] === undefined) delete childEnv[k];
-  const child = spawn(process.execPath, [CLI, 'test', '-c', CONFIG, ...specs], { cwd, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [CLI, 'test', '-c', config, ...specs], { cwd, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   child.stdout.on('data', (d) => { out += d; });
   child.stderr.on('data', (d) => { out += d; });
@@ -1674,6 +1674,55 @@ test('seeded: faker\'s instances in the test process make from the test\'s seed 
     assert.notDeepEqual(r2.made['esm made'], r.made['esm made']);
     assert.notDeepEqual(r2.made.own.mine, r.made.own.mine);
   } finally { await rep.close(); await rec.close(); }
+});
+
+test('a worker says once for each reason that it cannot seed faker, however many seeded tests and test files that reason meets', async () => {
+  // Two folders whose tests import a faker keploy cannot seed: one that
+  // exports no instance, one that throws as it loads. The first folder's
+  // two files hold three tests; the second's one file, one. One worker
+  // runs them all, seeded, and a fifth test that imports a faker keploy
+  // seeds.
+  fs.mkdirSync(path.join(PKG, 'test-results'), { recursive: true });
+  const dir = fs.mkdtempSync(path.join(PKG, 'test-results', 'faker-said-'));
+  const j = journal();
+  const a = await fakeAgent(j);
+  try {
+    const fakerIn = (sub, main) => {
+      const d = path.join(dir, sub, 'node_modules', '@faker-js', 'faker');
+      fs.mkdirSync(d, { recursive: true });
+      fs.writeFileSync(path.join(d, 'package.json'), JSON.stringify({ name: '@faker-js/faker', main: 'm.cjs' }));
+      fs.writeFileSync(path.join(d, 'm.cjs'), main);
+    };
+    fakerIn('none', 'exports.x = 1;\n');
+    fakerIn('throws', 'throw new Error(\'this faker cannot load\');\n');
+    const spec = (sub, file, names) => fs.writeFileSync(path.join(dir, sub, file),
+      `import { test } from ${JSON.stringify(path.join(PKG, 'dist'))};\n` +
+      names.map((n) => `test(${JSON.stringify(n)}, () => {});\n`).join(''));
+    spec('none', 'one.spec.ts', ['none one a', 'none one b']);
+    spec('none', 'two.spec.ts', ['none two']);
+    spec('throws', 'three.spec.ts', ['throws three']);
+    // A folder whose tests import the package's own faker, which keploy
+    // seeds: no line.
+    fs.mkdirSync(path.join(dir, 'seeds'));
+    spec('seeds', 'four.spec.ts', ['seeds four']);
+    const config = path.join(dir, 'playwright.config.mjs');
+    fs.writeFileSync(config, 'export default { testDir: \'.\', workers: 1, retries: 0, reporter: [[\'json\']], ' +
+      `outputDir: ${JSON.stringify(path.join(dir, 'out'))}, projects: [{ name: 'p1' }] };\n`);
+    const { tests, out } = await playwright([], keployEnv(a.url), PKG, config);
+    assert.deepEqual(Object.keys(tests).sort(), ['none one a', 'none one b', 'none two', 'seeds four', 'throws three'], out);
+    for (const [k, t] of Object.entries(tests)) assert.equal(t.status, 'passed', `${k}: ${t.error}\n${out}`);
+    const seeds = calls(j).filter((c) => c.path === '/agent/scope/begin').map((c) => c.body.seed);
+    assert.equal(seeds.length, 5);
+    for (const sd of seeds) assert.match(sd, /^[0-9a-f]{32}$/);
+    const said = Object.values(tests).map((t) => t.stdout).join('').split('\n').filter((l) => l.includes('cannot seed it')).sort();
+    assert.deepEqual(said, [
+      fakerLine('it exports no instance keploy knows how to seed (faker 8, 9 and 10 do)'),
+      fakerLine('this faker cannot load'),
+    ].sort(), out);
+  } finally {
+    await a.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('the test process draws its own Math.random when keploy answers no seed, each test saying so, or with KEPLOY_SEED_RANDOM=off, the worker saying once what that costs', async () => {
