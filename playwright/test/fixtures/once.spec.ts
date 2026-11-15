@@ -9,14 +9,16 @@ import { test } from '../../dist';
 // Workers at /ov/<k>w.js (a needs x-auth: k; n and g need it too, under
 // Referrer-Policy no-referrer and origin; p asks nothing) and keeps what
 // each sent (its kind, location and draws), or 'error', under its title.
+// The doc tests start them from a document under a referrer policy of its
+// own, at /ovd/<how>/<policy> (a meta tag, or a header on the HTML only).
 const base = process.env.DRAWS_BASE ?? '';
 const keep = (name: string, v: unknown): void => fs.writeFileSync(`${process.env.MARKER_DIR}/${name}.json`, JSON.stringify(v));
 
 test.use({ serviceWorkers: 'block' });
 
 type Start = { url: string; type?: 'classic' | 'module'; shared?: boolean };
-const start = async (page: Page, list: Start[]): Promise<void> => {
-  await page.goto(`${base}/ov`);
+const start = async (page: Page, list: Start[], doc = '/ov'): Promise<void> => {
+  await page.goto(`${base}${doc}`);
   const got: unknown[] = [];
   // One at a time, in order: each worker's place is its order.
   for (const s of list) {
@@ -101,4 +103,44 @@ test('two routes', async ({ context, page }) => {
   await context.route('**/ov/a*.js', (r) => r.continue(auth(r)));
   await page.route('**/ov/a*.js', (r) => r.fallback({ headers: r.request().headers() }));
   await start(page, [{ url: '/ov/aw.js' }, { url: '/ov/as.js', shared: true }]);
+});
+
+// A document under each referrer policy, set by a meta tag or by a header
+// on the HTML only, starts a classic Web Worker at /ov/aw.js and a module
+// one at /ov/tw.js, each sent on once with the header the server needs
+// (times: 1), then a classic and a module one at /ov/pw.js, whose loads a
+// route counts (kept as <title>-n).
+for (const how of ['meta', 'header']) {
+  for (const policy of ['no-referrer', 'origin', 'strict-origin']) {
+    test(`doc ${how} ${policy}`, async ({ page }) => {
+      let n = 0;
+      await page.route('**/ov/aw.js', (r) => r.continue(auth(r)), { times: 1 });
+      await page.route('**/ov/tw.js', (r) => r.continue(auth(r)), { times: 1 });
+      await page.route('**/ov/pw.js', (r) => {
+        n += 1;
+        return r.continue();
+      });
+      await start(page, [{ url: '/ov/aw.js' }, { url: '/ov/tw.js', type: 'module' }, { url: '/ov/pw.js' }, { url: '/ov/pw.js', type: 'module' }], `/ovd/${how}/${policy}`);
+      keep(`${test.info().title}-n`, n);
+    });
+  }
+}
+
+// A classic and a module Web Worker at /ov/ew.js throw after they start:
+// kept is the filename and line the error event names in the worker (as
+// the worker posts it) and in the page.
+test('error event', async ({ page }) => {
+  await page.goto(`${base}/ov`);
+  const got: unknown[] = [];
+  for (const type of ['classic', 'module'] as const) {
+    got.push(await page.evaluate((t) => new Promise((resolve) => {
+      const seen: Record<string, unknown> = {};
+      const done = (): void => { if (seen.in !== undefined && seen.page !== undefined) resolve(seen); };
+      const w = new Worker('/ov/ew.js', { type: t });
+      w.onmessage = (e) => { seen.in = e.data; done(); };
+      w.onerror = (e) => { seen.page = { filename: e.filename, lineno: e.lineno }; e.preventDefault(); done(); };
+      setTimeout(() => resolve(seen), 10000);
+    }), type));
+  }
+  keep(test.info().title, got);
 });

@@ -655,12 +655,26 @@ async function drawsServer() {
     // with no x-auth: k; /ov/ow.js and /ov/os.js are not there (404), and
     // their stand-ins /ov/mw.js and /ov/ms.js are; /ov/pw.js and /ov/ps.js
     // ask nothing; once.spec.ts's /ov/nw.js and /ov/gw.js need x-auth: k too,
-    // under Referrer-Policy no-referrer and origin. Each Web Worker (w) and
-    // Shared Worker (s) sends its kind,
-    // its location and what it drew.
+    // under Referrer-Policy no-referrer and origin, and /ov/tw.js needs it
+    // with none. Each Web Worker (w) and Shared Worker (s) sends its kind,
+    // its location and what it drew. /ovd/<how>/<policy> is /ov's document
+    // under that referrer policy, by a meta tag or a header on it alone.
     if (u.pathname === '/ov') { res.writeHead(200, { 'content-type': 'text/html' }); res.end(page('ov')); return; }
+    const ovd = /^\/ovd\/(meta|header)\/(no-referrer|origin|strict-origin)$/.exec(u.pathname);
+    if (ovd !== null) {
+      res.writeHead(200, { 'content-type': 'text/html', ...(ovd[1] === 'header' ? { 'referrer-policy': ovd[2] } : {}) });
+      res.end(ovd[1] === 'meta' ? page('ov').replace('<head>', `<head><meta name="referrer" content="${ovd[2]}">`) : page('ov'));
+      return;
+    }
     if (u.pathname === '/ov/ow.js' || u.pathname === '/ov/os.js') { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('none'); return; }
-    const ov = /^\/ov\/([ampng])([ws])\.js$/.exec(u.pathname);
+    // /ov/ew.js: a worker that posts what its error event names, then throws
+    // on its second line.
+    if (u.pathname === '/ov/ew.js') {
+      res.writeHead(200, { 'content-type': 'text/javascript' });
+      res.end('self.addEventListener(\'error\', (e) => postMessage({ kind: \'ew-in\', filename: e.filename, lineno: e.lineno }));\nsetTimeout(() => { throw new Error(\'boom\'); });');
+      return;
+    }
+    const ov = /^\/ov\/([ampngt])([ws])\.js$/.exec(u.pathname);
     if (ov !== null) {
       if (ov[1] !== 'm' && ov[1] !== 'p' && req.headers['x-auth'] !== 'k') { res.writeHead(401, { 'content-type': 'text/plain' }); res.end('no auth'); return; }
       const sent = `{ kind: '${ov[1]}${ov[2]}', href: location.href, draws: ${DRAWS} }`;
@@ -1705,31 +1719,34 @@ for (const engine of ENGINES) {
 
 // once.spec.ts's tests, and the workers each one's page starts, in order
 // (each script's URL, and w a classic Web Worker, m a module one, s a
-// Shared Worker).
+// Shared Worker), and the doc tests' document paths (/ov for the others).
+const DOCS = ['meta', 'header'].flatMap((how) => ['no-referrer', 'origin', 'strict-origin'].map((policy) => [how, policy]));
+const DOC_PATH = Object.fromEntries(DOCS.map(([how, policy]) => [`doc ${how} ${policy}`, `/ovd/${how}/${policy}`]));
 const ONCE = [['once on page', [['/ov/aw.js', 'w']]], ['once on context, module', [['/ov/aw.js', 'm']]], ['by destination', [['/ov/aw.js', 'w']]],
   ['once under no-referrer', [['/ov/nw.js', 'w']]], ['once under no-referrer, module', [['/ov/nw.js', 'm']]], ['once under origin, module', [['/ov/gw.js', 'm']]],
   ['counted', [['/ov/pw.js', 'w'], ['/ov/pw.js', 'm']]], ['answered then continued at one address', [['/ov/as.js', 'w'], ['/ov/as.js', 's']]],
-  ['two routes', [['/ov/aw.js', 'w'], ['/ov/as.js', 's']]]];
+  ['two routes', [['/ov/aw.js', 'w'], ['/ov/as.js', 's']]],
+  ...Object.keys(DOC_PATH).map((t) => [t, [['/ov/aw.js', 'w'], ['/ov/tw.js', 'm'], ['/ov/pw.js', 'w'], ['/ov/pw.js', 'm']]])];
 
-// The marks a document at /ov of page t0 gives the workers list starts.
-function onceMarks(seed, list) {
+// The marks a document at doc of page t0 gives the workers list starts.
+function onceMarks(seed, list, doc = '/ov') {
   const made = [];
   class Worker { constructor(url) { made.push(workerMark(String(url))); } }
   const code = list.map(([u, k]) => (k === 's' ? `new SharedWorker('${u}');` : `new Worker('${u}'${k === 'm' ? ', { type: \'module\' }' : ''});`)).join(' ');
-  documentAt(initScript(seed), '/ov', new Map(), 't0', { globals: { URL, Worker, SharedWorker: Worker } }).run(code);
+  documentAt(initScript(seed), doc, new Map(), 't0', { globals: { URL, Worker, SharedWorker: Worker } }).run(code);
   return made;
 }
 
 for (const engine of ENGINES) {
-  test(`seeded, in ${engine}: a test's own route that treats a Web Worker's script loads apart (one that answers once, on its page or its context, one that picks the worker's script by its destination, one that counts its loads) sees what it sees with seeding off and the worker runs, seeded, at the app's URL: keploy answers the seeding's load of the app's script with what it fetched for the worker's own, under a Referrer-Policy that sends less too, so the app's server is asked for a Web Worker's script once; a Web Worker at one address whose script the test's route answers itself and a Shared Worker there whose script it sends on with a header are each named; of two routes, the last one's options count`, async () => {
+  test(`seeded, in ${engine}: a test's own route that treats a Web Worker's script loads apart (one that answers once, on its page or its context, one that picks the worker's script by its destination, one that counts its loads) sees what it sees with seeding off and the worker runs, seeded, at the app's URL: the worker's script is loaded once, keploy's seeding ahead of it, so the app's server is asked for a Web Worker's script once, under a script's Referrer-Policy and under a document's (no-referrer, origin, strict-origin, by a meta tag or a header), classic and module; an error a seeded Web Worker throws names the app's script and its line, in the worker and in the page; a Web Worker at one address whose script the test's route answers itself and a Shared Worker there whose script it sends on with a header are each named; of two routes, the last one's options count`, async () => {
     const j = journal();
     const rec = await fakeAgent(j);
     try {
-      const names = [...ONCE.map(([t]) => t), 'counted-n'];
+      const names = [...ONCE.map(([t]) => t), 'counted-n', ...Object.keys(DOC_PATH).map((t) => `${t}-n`), 'error event'];
       const r = await drawRun(j, { ...keployEnv(rec.url), PW_BROWSER: engine }, ['once.spec.ts'], names);
       const off = await drawRun(j, { ...keployEnv(rec.url), PW_BROWSER: engine, KEPLOY_SEED_RANDOM: 'off' }, ['once.spec.ts'], names);
       for (const [title, list] of ONCE) {
-        const marks = onceMarks(r.seeds[title], list);
+        const marks = onceMarks(r.seeds[title], list, DOC_PATH[title]);
         const at = (u) => `http://127.0.0.1:<port>${u}`;
         const lines = [];
         list.forEach(([u, k], i) => {
@@ -1767,6 +1784,27 @@ for (const engine of ENGINES) {
       // The counting route saw each worker's script once, as with seeding
       // off; the app's server was asked for the same scripts.
       assert.deepEqual([r.drew['counted-n'], off.drew['counted-n']], [2, 2]);
+      // Under each document's referrer policy too: the counting route saw
+      // its two workers' script twice, the app's server was asked once for
+      // each Web Worker's script (tw.js only by the doc tests; pw.js by them
+      // and counted), as with seeding off.
+      for (const t of Object.keys(DOC_PATH)) assert.deepEqual([r.drew[`${t}-n`], off.drew[`${t}-n`]], [2, 2], t);
+      const asked = (seen, u) => seen.filter((s) => s === u).length;
+      assert.deepEqual([asked(r.seen, '/ov/tw.js'), asked(off.seen, '/ov/tw.js')], [DOCS.length, DOCS.length]);
+      assert.deepEqual([asked(r.seen, '/ov/pw.js'), asked(off.seen, '/ov/pw.js')], [2 + 2 * DOCS.length, 2 + 2 * DOCS.length]);
+      // An error a seeded Web Worker throws, classic and module, names the
+      // app's script and the line it was thrown on, in the worker and in
+      // the page, as with seeding off: no mark.
+      const port = (x) => JSON.parse(JSON.stringify(x).replace(/:\d+\//g, ':<port>/'));
+      const ew = 'http://127.0.0.1:<port>/ov/ew.js';
+      [0, 1].forEach((i) => {
+        const [got, was] = [port(r.drew['error event'][i]), port(off.drew['error event'][i])];
+        const what = `error event ${i === 0 ? 'classic' : 'module'}: ${JSON.stringify(got)} (off: ${JSON.stringify(was)})`;
+        assert.deepEqual(got, was, what);
+        assert.deepEqual([got.in.kind, got.in.filename, got.page.filename], ['ew-in', ew, ew], what);
+        assert.equal(got.in.lineno, 2, what);
+      });
+      assert.deepEqual(r.tests['error event'].stdout.split('\n').filter((l) => l.startsWith('keploy: in error event, ')), []);
       const scripts = (seen) => seen.filter((u) => u.startsWith('/ov/')).sort();
       assert.deepEqual(scripts(r.seen), scripts(off.seen));
       assert.deepEqual(r.seen.filter((u) => u.includes('__keploy_worker')), []);
