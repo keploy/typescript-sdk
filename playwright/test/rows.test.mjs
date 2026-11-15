@@ -1786,12 +1786,15 @@ for (const engine of ENGINES) {
       for (const r of [s1, s2]) {
         assert.equal(said(r, /^keploy: in .*csp.*, the module Web Worker at http:\/\/127\.0\.0\.1:\d+\/sv\/cn\.js is served with a Content-Security-Policy/).length, 1);
         assert.equal(said(r, /Content-Security-Policy/).length, 1);
-        for (const p of ['/rd/w.js', '/rdm/m.js', '/rds/s.js']) {
+        // Firefox routes no Shared Worker's script: its redirected one is named as one keploy cannot reach.
+        const moved = engine === 'firefox' ? ['/rd/w.js', '/rdm/m.js'] : ['/rd/w.js', '/rdm/m.js', '/rds/s.js'];
+        for (const p of moved) {
           const l = said(r, new RegExp(`^keploy: in .*redirect.*, the worker at http://127\\.0\\.0\\.1:\\d+${p.replace(/\./g, '\\.')} draws the browser's own random numbers, .*: the server redirects its script, `));
           assert.equal(l.length, 1, p);
           assert.equal(/once more than with seeding off/.test(l[0]), engine !== 'firefox', p);
         }
-        assert.equal(said(r, /redirects its script/).length, 3);
+        assert.equal(said(r, /redirects its script/).length, moved.length);
+        assert.equal(said(r, /^keploy: in .*redirect.*, the Shared Worker at http:\/\/127\.0\.0\.1:\d+\/rds\/s\.js draws the browser's own random numbers, .*: it is a Shared Worker, and Firefox does not let keploy reach/).length, engine === 'firefox' ? 1 : 0);
       }
       for (const r of [o1, o2]) assert.deepEqual(said(r, /redirects its script|Content-Security-Policy/), []);
     } finally { await a.close(); }
