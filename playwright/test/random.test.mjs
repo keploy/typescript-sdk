@@ -3196,6 +3196,11 @@ test('cspAllowsOwn: a policy that allows a script from the worker\'s own origin 
     ['script-src *.h', 'http://a.h/w.js', true, 'chromium', true],
     ['script-src *.h', 'http://h/w.js', true, 'chromium', false],
     ['script-src *.h', 'http://ah/w.js', true, 'chromium', false],
+    // A host with no wildcard matches only itself: not a subdomain, nor a
+    // longer name that ends in it.
+    ['script-src h', 'http://h/w.js', true, 'chromium', true],
+    ['script-src h', 'http://a.h/w.js', true, 'chromium', false],
+    ['script-src h', 'http://ah/w.js', true, 'chromium', false],
     ['script-src http://h:8080', 'http://h:8080/w.js', true, 'chromium', true],
     ['script-src http://h:8080', 'http://h/w.js', true, 'chromium', false],
     ['script-src http://h', 'http://h:8080/w.js', true, 'chromium', false],
