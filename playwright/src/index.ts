@@ -67,7 +67,7 @@ import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
 import { NO_NOTE_LINE, differences, docLog, keepDocDraws, noteText, readNote, unreadNoteLine, type DocLog } from './note';
 import { OFF_LINE, SEEDED_LINE, besideOf, fakerLine, fakersOf, freshSeed, initScript, lateLine, othersNow, pageAddress, placePages, processRandom, redirectLine, seatFaker, seatRandom, seedingFromEnv, setAside, tally, unplacedLine, unseededLine, workerRoutes, type Fakers, type Unplaced } from './random';
-import { Inflight, sharedWorkerLine, workersScript } from './settle';
+import { Inflight, busyWorkerLine, sharedWorkerLine, workersScript } from './settle';
 
 export { expect, KeployError };
 export { seedFaker } from './random';
@@ -101,6 +101,9 @@ let reports = 0;
 // How many contexts of a keploy test this worker opened: each one's Shared
 // Worker report function has its own name.
 let sharedReports = 0;
+// How long a test's end waits on Web Workers' script loads alone before it
+// says why (busyWorkerLine).
+const BUSY_WORKER_MS = 3000;
 
 // How a test's browser draws its random numbers.
 type PageSeeding = {
@@ -319,7 +322,14 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
     if (inflight.size > 0) {
       const calls = inflight.describe();
       const shown = calls.slice(0, 5).join(', ') + (calls.length > 5 ? `, and ${calls.length - 5} more` : '');
-      await base.step(`keploy: wait for the test's ${calls.length} call(s) in flight before its browser context closes: ${shown}`, () => inflight.settled());
+      // Chromium ends a Web Worker's script load only when its top-level
+      // code returns: a wait on such loads alone says so, once for each.
+      const stop = inflight.busyWorkers(BUSY_WORKER_MS, (u) => { process.stdout.write(`${busyWorkerLine(name, pageAddress(u))}\n`); });
+      try {
+        await base.step(`keploy: wait for the test's ${calls.length} call(s) in flight before its browser context closes: ${shown}`, () => inflight.settled());
+      } finally {
+        stop();
+      }
     }
   },
 

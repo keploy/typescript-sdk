@@ -286,6 +286,17 @@ test('two Web Workers at one URL, the second terminated while their scripts load
   await reached();
   await page.evaluate(() => { (globalThis as unknown as { w: Worker[] }).w[1].terminate(); });
 });
+// A Web Worker whose top-level code runs on (10 s) after its first message,
+// which the body waits for (its URL's fragment is no part of the request).
+test('a Web Worker whose top-level code runs long', async ({ page }) => {
+  await page.goto(`${base}/page`);
+  const said = await page.evaluate(() => new Promise<string>((resolve) => {
+    const g = globalThis as unknown as { w: Worker };
+    g.w = new Worker('/busyw.js#f');
+    g.w.onmessage = (e) => resolve(String(e.data));
+  }));
+  if (said !== 'busy') throw new Error(`the Web Worker said ${said}`);
+});
 // The test's own routes answer a classic Web Worker's script with a 302, a
 // module one's with a 307 and a page fetch with a 302 (each to a URL the
 // page server does not know). Chromium reports no end for such a worker

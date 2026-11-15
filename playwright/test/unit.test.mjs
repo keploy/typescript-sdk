@@ -680,6 +680,87 @@ test('settle (Chromium): a commit with no answer (a route change inside the page
   assert.equal(inflight.size, 3);
 });
 
+test('settle (Chromium): busyWorkers names each Web Worker script URL (fragment aside) once, when its time has passed with only Web Workers\' script loads in flight, or as a call ends after; not before its time, not beside a fetch at a worker\'s URL or a script at a URL no worker of the test has, not after stop, and not in another engine', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const setup = (stops) => {
+    const ctx = fakeContext();
+    const inflight = new Inflight(ctx, stops);
+    const page = new EventEmitter();
+    ctx.emit('page', page);
+    const f = { page: () => page };
+    const load = (url, type = 'script') => ({ frame: () => f, isNavigationRequest: () => false, method: () => 'GET', url: () => url, resourceType: () => type });
+    return { ctx, inflight, page, load };
+  };
+  // Only a Web Worker's load in flight: said once its time has passed.
+  {
+    const { ctx, inflight, page, load } = setup(true);
+    page.emit('worker', { url: () => 'http://h/w.js#a' });
+    ctx.emit('request', load('http://h/w.js#b'));
+    const said = [];
+    const stop = inflight.busyWorkers(3000, (u) => said.push(u));
+    t.mock.timers.tick(2999);
+    assert.deepEqual(said, []);
+    t.mock.timers.tick(1);
+    assert.deepEqual(said, ['http://h/w.js']);
+    stop();
+  }
+  // Beside a page script at a URL no worker has, and then beside a fetch at
+  // the worker's URL: nothing; said as the last of them ends.
+  {
+    const { ctx, inflight, page, load } = setup(true);
+    page.emit('worker', { url: () => 'http://h/busy.js' });
+    const busy = load('http://h/busy.js');
+    const own = load('http://h/own.js');
+    const fetched = load('http://h/busy.js', 'fetch');
+    for (const r of [busy, own]) ctx.emit('request', r);
+    const said = [];
+    const stop = inflight.busyWorkers(3000, (u) => said.push(u));
+    t.mock.timers.tick(3000);
+    assert.deepEqual(said, []);
+    ctx.emit('request', fetched);
+    ctx.emit('requestfinished', own);
+    assert.deepEqual(said, []);
+    ctx.emit('requestfinished', fetched);
+    assert.deepEqual(said, ['http://h/busy.js']);
+    // A second load at that URL and another worker's: the new URL alone is
+    // said, once, as a call ends; a request that starts says nothing.
+    page.emit('worker', { url: () => 'http://h/two.js' });
+    const again = load('http://h/busy.js');
+    ctx.emit('request', again);
+    ctx.emit('request', load('http://h/two.js'));
+    assert.deepEqual(said, ['http://h/busy.js']);
+    ctx.emit('requestfailed', again);
+    assert.deepEqual(said, ['http://h/busy.js', 'http://h/two.js']);
+    // After stop, nothing more.
+    stop();
+    page.emit('worker', { url: () => 'http://h/three.js' });
+    ctx.emit('request', load('http://h/three.js'));
+    ctx.emit('requestfinished', busy);
+    assert.deepEqual(said, ['http://h/busy.js', 'http://h/two.js']);
+  }
+  // Stopped before its time: nothing.
+  {
+    const { ctx, inflight, page, load } = setup(true);
+    page.emit('worker', { url: () => 'http://h/w.js' });
+    ctx.emit('request', load('http://h/w.js'));
+    const said = [];
+    inflight.busyWorkers(3000, (u) => said.push(u))();
+    t.mock.timers.tick(3000);
+    assert.deepEqual(said, []);
+  }
+  // Another engine reports the load's end as the script arrives: nothing.
+  {
+    const { ctx, inflight, page, load } = setup(false);
+    page.emit('worker', { url: () => 'http://h/w.js' });
+    ctx.emit('request', load('http://h/w.js'));
+    const said = [];
+    const stop = inflight.busyWorkers(3000, (u) => said.push(u));
+    t.mock.timers.tick(3000);
+    assert.deepEqual(said, []);
+    stop();
+  }
+});
+
 test('settle: a cancel that comes while settle already waits wakes it (its page closes; then, for a service worker\'s call, the test closes its context)', async () => {
   for (const worker of [false, true]) {
     const c = worker ? 'a page\'s call and a service worker\'s' : 'a page\'s call';

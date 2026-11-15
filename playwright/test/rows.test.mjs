@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LOADS_KEY, OFF_LINE, SEEDED_LINE, fakerLine, initScript, processRandom, unplacedLine, unseededLine, markWorker, workerMark, workerScript } from '../dist/random.js';
-import { sharedWorkerLine } from '../dist/settle.js';
+import { busyWorkerLine, sharedWorkerLine } from '../dist/settle.js';
 import { NO_NOTE_LINE, readNote, unreadNoteLine } from '../dist/note.js';
 import { BLANK_DRAWS, DRAWS, documentAt, workerAt } from './draws.mjs';
 
@@ -70,6 +70,9 @@ async function pageServer(j) {
     // A Shared Worker that answers each page that connects.
     if (req.url === '/shared.js?v=1') { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end("onconnect = (e) => { e.ports[0].postMessage('up'); };"); return; }
     if (req.url === '/nocontent') { res.writeHead(204); res.end(); return; }
+    // A Web Worker whose top-level code runs on for 10 s after its first
+    // message.
+    if (req.url === '/busyw.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end("postMessage('busy'); const end = Date.now() + 10000; while (Date.now() < end) { /* busy */ }"); return; }
     // A Web Worker's script, classic or module, answered only once /release
     // is called.
     if (req.url === '/heldw.js' || req.url === '/heldw.mjs') {
@@ -493,6 +496,35 @@ for (const engine of ['chromium', 'firefox', 'webkit']) {
           t.diagnostic(`${title}: ${order.filter((e) => e.startsWith('heldw') || e === '/agent/scope/end').join(', ')}; steps: ${r.steps.filter((x) => x.startsWith('keploy: wait for')).join(' | ')}`);
         } finally { await p.close(); await a.close(); }
       }
+    });
+  }
+}
+
+// A Web Worker whose top-level code runs on (10 s) after its first message,
+// which the test's body waits for: Chromium reports its script loaded only
+// once that code returns, so with seeding off settle waits on that load and,
+// once its wait has run 3 s with only that load in flight, the test says why,
+// once, naming the worker. Firefox and WebKit report the load's end as the
+// script arrives, and seeded, keploy's route answers it whole: no wait on it,
+// and nothing said. The wait ends by the worker's own code (no wall-clock
+// bound in the row; the config's 30 s timeout would fail it).
+for (const engine of ['chromium', 'firefox', 'webkit']) {
+  for (const seed of ['seeded', 'off']) {
+    const says = engine === 'chromium' && seed === 'off';
+    test(`settle, in ${engine}, ${seed}: a test whose Web Worker's top-level code runs long after the body ends ${says ? 'waits for its script load and says once why, naming the worker and the next step' : 'does not wait for its script load, and says nothing of it'}`, async () => {
+      const j = journal();
+      const a = await fakeAgent(j);
+      const p = await pageServer(j);
+      try {
+        const title = 'a Web Worker whose top-level code runs long';
+        const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), ...(seed === 'off' ? { KEPLOY_SEED_RANDOM: 'off' } : {}), SLOW_BASE: p.url, PW_BROWSER: engine });
+        const t = tests[title];
+        assert.equal(t.status, 'passed', out);
+        const waited = t.steps.filter((x) => x.startsWith('keploy: wait for') && /\/busyw\.js/.test(x));
+        assert.equal(waited.length, says ? 1 : 0, t.steps.join('\n'));
+        const said = t.stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${title}, the test's end waits`)).map((l) => l.replace(/:\d+\//, ':<port>/'));
+        assert.deepEqual(said, says ? [busyWorkerLine(title, 'http://127.0.0.1:<port>/busyw.js')] : [], out);
+      } finally { await p.close(); await a.close(); }
     });
   }
 }

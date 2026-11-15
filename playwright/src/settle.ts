@@ -24,6 +24,11 @@ export class Inflight {
   // Each document's number (webWorkerDocument), the document it names.
   private readonly numbered = new Map<number, Doc>();
   private documents = 0;
+  // Chromium (stops): the script URLs, with no fragment, of the Web Workers
+  // the test's pages started (Playwright's worker event), for busyWorkers.
+  private readonly workerUrls = new Set<string>();
+  // While busyWorkers watches: its check, run again as each call ends.
+  private busy: (() => void) | null = null;
 
   /**
    * stops: the browser reports no end for the script load of a Web Worker
@@ -98,6 +103,7 @@ export class Inflight {
         this.drop((o) => o.frame === f);
       });
       onRoute(p, (r, threw) => this.routed(r, threw));
+      if (this.stops) p.on('worker', (w) => this.workerUrls.add(noFragment(w.url())));
     };
     // Nor for a request a route answers itself with a redirect (Chromium,
     // for a Web Worker's script: its worker never starts, with no keploy
@@ -127,6 +133,47 @@ export class Inflight {
   settled(): Promise<void> {
     if (this.open.size === 0) return Promise.resolve();
     return new Promise((resolve) => this.waiters.push(resolve));
+  }
+
+  /**
+   * Chromium (stops) reports a Web Worker's script load finished only once
+   * the worker's top-level code returns, so settle waits as long as that
+   * code runs. Once ms have passed from this call, and again as each call
+   * ends after, when every call still in flight is the script load of a Web
+   * Worker (a script request at the URL, fragment aside, of a Web Worker one
+   * of the test's pages started), say gets each such URL, once for each.
+   * Returns the function that stops it. Other engines report the load's end
+   * as the script arrives, and nothing is said there.
+   */
+  busyWorkers(ms: number, say: (url: string) => void): () => void {
+    const told = new Set<string>();
+    const check = (): void => {
+      for (const u of this.workerLoads()) {
+        if (told.has(u)) continue;
+        told.add(u);
+        say(u);
+      }
+    };
+    const t = setTimeout(() => {
+      this.busy = check;
+      check();
+    }, ms);
+    return () => {
+      clearTimeout(t);
+      this.busy = null;
+    };
+  }
+
+  // The URLs (no fragment) of the calls in flight when every one is a Web
+  // Worker's script load (busyWorkers); none otherwise.
+  private workerLoads(): string[] {
+    const urls = new Set<string>();
+    for (const r of this.open.keys()) {
+      const u = noFragment(r.url());
+      if (r.resourceType() !== 'script' || !this.workerUrls.has(u)) return [];
+      urls.add(u);
+    }
+    return [...urls];
   }
 
   /**
@@ -251,7 +298,10 @@ export class Inflight {
   }
 
   private wake(): void {
-    if (this.open.size !== 0) return;
+    if (this.open.size !== 0) {
+      this.busy?.();
+      return;
+    }
     const w = this.waiters;
     this.waiters = [];
     w.forEach((f) => f());
@@ -420,6 +470,17 @@ export function workersScript(report: string): string {
   }
 })();
 `;
+}
+
+/**
+ * The line a test shows, once for each Web Worker script URL (at), when its
+ * end has waited busyWorkers' time with only Web Workers' script loads in
+ * flight (Chromium).
+ */
+export function busyWorkerLine(name: string, at: string): string {
+  return `keploy: in ${name}, the test's end waits for the script of the Web Worker at ${at}: Chromium reports a Web Worker's script loaded only once its top-level code returns, ` +
+    'so keploy waits until that code returns (or the test times out, naming the load); ' +
+    "move the worker's long-running top-level work into its onmessage handler, or end the worker (terminate()) before the test ends.";
 }
 
 /**
