@@ -3,7 +3,7 @@
 // a page. No browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DOC_KEY, ENV_SEED_RANDOM, FAKER, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, esmFile, exportOf, fakerLine, fakersIn, fakersOf, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatFaker, seatRandom, seedFaker, seedingFromEnv, setAside, unplacedLine, unseededLine, WORKER_PARAM, SW_CHANNEL, SW_LOCK, markWorker, useStrict, withBytes, oneLine, lateLine, redirectLine, STOPPED, workerMark, workerScript, workerRoutes, workerAnswer, cspAllowsData } from '../dist/random.js';
+import { DOC_KEY, ENV_SEED_RANDOM, FAKER, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, esmFile, exportOf, fakerLine, fakersIn, fakersOf, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatFaker, seatRandom, seedFaker, seedingFromEnv, setAside, unplacedLine, unseededLine, WORKER_PARAM, SW_CHANNEL, SW_LOCK, markWorker, useStrict, withBytes, oneLine, lateLine, redirectLine, STOPPED, workerMark, workerScript, workerRoutes, workerAnswer, cspAllowsData, cspAllowsOwn } from '../dist/random.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -3160,5 +3160,170 @@ test('workerRoutes answers a Web Worker whose script carries a Content-Security-
   // A script keploy could not fetch: its seeding's load, as before, and no line.
   assert.equal((await r.ask(markWorker('http://h/m.js', 'm', t), new Error('net')))[1][1].body, workerAnswer(t, 5, 'm', 'http://h/m.js'));
   assert.deepEqual(late, ['http://h/m.js']);
-  assert.match(lateLine('a test', 'http://h/m.js'), /^keploy: in a test, the module Web Worker at http:\/\/h\/m\.js is served with a Content-Security-Policy, .* runs after the modules the script imports: .*; if one does, serve the worker's script with no Content-Security-Policy where the tests run/);
+  assert.match(lateLine('a test', 'http://h/m.js'), /^keploy: in a test, the module Web Worker at http:\/\/h\/m\.js is served with a Content-Security-Policy that could refuse keploy's load of a script from the worker's own origin, .* runs after the modules the script imports: .*; if one does, have the policy allow scripts from the worker's own origin \('self' in script-src\) where the tests run, or serve the worker's script with no Content-Security-Policy there/);
+});
+
+test('cspAllowsOwn: a policy that allows a script from the worker\'s own origin lets keploy load there; one it cannot tell does (none, another host or port, a nonce, a sandbox, Trusted Types for a classic worker, an upgrade of http but in Chromium on a loopback host) refuses', () => {
+  const csp = (v) => ({ 'content-type': 'text/javascript', 'content-security-policy': v });
+  const helmet = "default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests";
+  assert.equal(cspAllowsOwn({}, 'http://h/w.js', true), true);
+  assert.equal(cspAllowsOwn({ 'content-security-policy-report-only': "default-src 'none'" }, 'http://h/w.js', true), true);
+  // [policy, url, classic, engine, allows]
+  const rows = [
+    ["default-src 'self'", 'http://h/w.js', false, 'webkit', true],
+    ["default-src 'SELF'", 'http://h/w.js', true, 'firefox', true],
+    ["img-src 'none'", 'http://h/w.js', false, 'firefox', true],
+    ["default-src 'none'", 'http://h/w.js', true, 'chromium', false],
+    ["default-src 'none'; script-src 'self'", 'http://h/w.js', false, 'chromium', true],
+    ["script-src-elem 'none'; script-src 'self'", 'http://h/w.js', true, 'chromium', false],
+    ["script-src 'none' 'self'", 'http://h/w.js', true, 'chromium', true],
+    ["script-src 'nonce-k'", 'http://h/w.js', true, 'chromium', false],
+    ["script-src 'nonce-k' 'strict-dynamic'", 'http://h/w.js', false, 'webkit', true],
+    ["script-src 'sha256-AAAA' 'unsafe-inline' 'unsafe-eval' data: blob:", 'http://h/w.js', true, 'chromium', false],
+    ['script-src *', 'http://h/w.js', true, 'chromium', true],
+    ['script-src *', 'ftp://h/w.js', true, 'chromium', false],
+    ['script-src http:', 'http://h/w.js', true, 'chromium', true],
+    ['script-src http:', 'https://h/w.js', true, 'chromium', true],
+    ['script-src https:', 'http://h/w.js', true, 'chromium', false],
+    ['script-src http://h', 'http://h/w.js', true, 'chromium', true],
+    ['script-src HTTP://H/', 'http://h/w.js', true, 'chromium', true],
+    ['script-src http://h', 'https://h/w.js', true, 'chromium', true],
+    ['script-src https://h', 'http://h/w.js', true, 'chromium', false],
+    ['script-src h', 'http://h/w.js', true, 'chromium', true],
+    ['script-src h', 'ftp://h/w.js', true, 'chromium', false],
+    ['script-src g', 'http://h/w.js', true, 'chromium', false],
+    ['script-src http://*', 'http://h/w.js', true, 'chromium', true],
+    ['script-src *.h', 'http://a.h/w.js', true, 'chromium', true],
+    ['script-src *.h', 'http://h/w.js', true, 'chromium', false],
+    ['script-src *.h', 'http://ah/w.js', true, 'chromium', false],
+    ['script-src http://h:8080', 'http://h:8080/w.js', true, 'chromium', true],
+    ['script-src http://h:8080', 'http://h/w.js', true, 'chromium', false],
+    ['script-src http://h', 'http://h:8080/w.js', true, 'chromium', false],
+    ['script-src http://h:80', 'http://h/w.js', true, 'chromium', true],
+    ['script-src http://h:*', 'http://h:9/w.js', true, 'chromium', true],
+    ['script-src http://h/js/', 'http://h/js/w.js', true, 'chromium', true],
+    ['script-src http://h/js/', 'http://h/w.js', true, 'chromium', false],
+    ['script-src http://h/JS/', 'http://h/js/w.js', true, 'chromium', false],
+    ['script-src http://h/js/w.js', 'http://h/js/w.js', true, 'chromium', true],
+    ['script-src http://h/js/w.js', 'http://h/js/w.jsx', true, 'chromium', false],
+    ['script-src http://h/js%20a/', 'http://h/js%20a/w.js', true, 'chromium', false],
+    ['script-src http://h/j/', 'http://h/j/%61.js', true, 'chromium', false],
+    ["script-src 'self'; worker-src 'none'", 'http://h/w.js', true, 'chromium', true],
+    ["script-src 'self'; worker-src 'none'", 'http://h/w.js', false, 'chromium', false],
+    ["script-src 'self'; child-src 'none'", 'http://h/w.js', false, 'chromium', false],
+    ["script-src 'self'; worker-src 'self'; child-src 'none'", 'http://h/w.js', false, 'chromium', true],
+    ["default-src 'self'; sandbox allow-scripts", 'http://h/w.js', false, 'chromium', false],
+    ["default-src 'self'; require-trusted-types-for 'script'", 'http://h/w.js', true, 'chromium', false],
+    ["default-src 'self'; require-trusted-types-for 'script'", 'http://h/w.js', false, 'chromium', true],
+    ["default-src 'self'; trusted-types a", 'http://h/w.js', true, 'chromium', true],
+    ["script-src 'self', default-src 'none'", 'http://h/w.js', false, 'chromium', false],
+    ["script-src 'self'\ndefault-src 'self'", 'http://h/w.js', false, 'chromium', true],
+    ["default-src 'self', img-src 'none'", 'http://h/w.js', true, 'chromium', true],
+    ["img-src 'none'\ndefault-src 'none'", 'http://h/w.js', true, 'chromium', false],
+    ["script-src 'none'; script-src 'self'", 'http://h/w.js', true, 'chromium', false],
+    ["Default-Src 'none'", 'http://h/w.js', true, 'chromium', false],
+    ["require-trusted-types-for 'SCRIPT'", 'http://h/w.js', true, 'chromium', false],
+    ['script-src https://h:443', 'https://h/w.js', true, 'chromium', true],
+    ['script-src *', 'https://h/w.js', true, 'chromium', true],
+    ['script-src http://h/', 'http://h/a%20b.js', true, 'chromium', true],
+    [helmet, 'http://127.0.0.1:3000/w.js', false, 'chromium', true],
+    [helmet, 'http://localhost:3000/w.js', false, 'chromium', true],
+    [helmet, 'http://a.localhost:3000/w.js', false, 'chromium', true],
+    [helmet, 'http://127.9.0.1/w.js', true, 'chromium', true],
+    [helmet, 'http://[::1]:3000/w.js', false, 'chromium', true],
+    [helmet, 'http://127.0.0.1:3000/w.js', false, 'firefox', false],
+    [helmet, 'http://127.0.0.1:3000/w.js', false, 'webkit', false],
+    [helmet, 'http://127.0.0.1:3000/w.js', false, '', false],
+    [helmet, 'http://app.test:3000/w.js', false, 'chromium', false],
+    [helmet, 'http://128.0.0.1/w.js', false, 'chromium', false],
+    [helmet, 'https://app.test/w.js', false, 'webkit', true],
+  ];
+  for (const [v, url, classic, engine, allows] of rows) assert.equal(cspAllowsOwn(csp(v), url, classic, engine), allows, `${v} | ${url} | ${classic ? 'classic' : 'module'} | ${engine}`);
+  assert.equal(cspAllowsOwn(csp("default-src 'self'"), 'not a url', true), false);
+});
+
+test('workerRoutes loads a Web Worker\'s seeding at its script\'s URL under a policy that allows a script from the worker\'s own origin, and says nothing; under one that could refuse it, puts the seeding on the script\'s first line, and names a module one', async () => {
+  const { r, context } = routed();
+  const late = [];
+  await workerRoutes(context, { late: (...a) => late.push(a) });
+  const t = 'ce'.repeat(16);
+  const self = { 'content-type': 'text/javascript', 'content-security-policy': "default-src 'self'" };
+  const m = await r.ask(markWorker('http://h/m.js', 'm', t), answerOf(200, 'import "./a.js";b()', self));
+  assert.equal(m[1][1].body, `import ${JSON.stringify(markWorker('http://h/m.js', 'p', t, 0))};import "./a.js";b()\n//# sourceURL=http://h/m.js\n`);
+  const w = await r.ask(markWorker('http://h/w.js', 'w', t), answerOf(200, 'b()', self));
+  assert.equal(w[1][1].body, `importScripts(${JSON.stringify(markWorker('http://h/w.js', 'q', t, 1))});b()\n//# sourceURL=http://h/w.js\n`);
+  assert.deepEqual(late, []);
+  // Trusted Types refuse a classic worker's importScripts of a string, not a module's import.
+  const tt = { 'content-type': 'text/javascript', 'content-security-policy': "default-src 'self'; require-trusted-types-for 'script'" };
+  assert.equal((await r.ask(markWorker('http://h/w.js', 'w', t), answerOf(200, 'b()', tt)))[1][1].body, `${oneLine(workerScript(t, 2, 'w'))}b()\n//# sourceURL=http://h/w.js\n`);
+  assert.equal((await r.ask(markWorker('http://h/m.js', 'm', t), answerOf(200, 'b()', tt)))[1][1].body, `import ${JSON.stringify(markWorker('http://h/m.js', 'p', t, 3))};b()\n//# sourceURL=http://h/m.js\n`);
+  assert.deepEqual(late, []);
+  // helmet's policy upgrades http: in Chromium (the routes' engine here) not on a loopback host.
+  const helmet = { 'content-type': 'text/javascript', 'content-security-policy': "default-src 'self';script-src 'self';upgrade-insecure-requests" };
+  assert.equal((await r.ask(markWorker('http://127.0.0.1:9/m.js', 'm', t), answerOf(200, 'b()', helmet)))[1][1].body, `import ${JSON.stringify(markWorker('http://127.0.0.1:9/m.js', 'p', t, 4))};b()\n//# sourceURL=http://127.0.0.1:9/m.js\n`);
+  assert.equal((await r.ask(markWorker('http://h/m.js', 'm', t), answerOf(200, 'b()', helmet)))[1][1].body, `${oneLine(workerScript(t, 5, 'm'))}b()\n//# sourceURL=http://h/m.js\n`);
+  assert.deepEqual(late, [['http://h/m.js', false]]);
+  // In Firefox and WebKit, a loopback host too.
+  for (const engine of ['firefox', 'webkit']) {
+    const e = routed();
+    const said = [];
+    await workerRoutes(e.context, { late: (...a) => said.push(a) }, engine);
+    assert.equal((await e.r.ask(markWorker('http://127.0.0.1:9/m.js', 'm', t), answerOf(200, 'b()', helmet)))[1][1].body, `${oneLine(workerScript(t, 0, 'm', engine === 'webkit'))}b()\n//# sourceURL=http://127.0.0.1:9/m.js\n`, engine);
+    assert.deepEqual(said, [['http://127.0.0.1:9/m.js', false]], engine);
+  }
+});
+
+test('workerRoutes answers a Shared Worker whose script\'s policy could refuse the load of the app\'s script with the app\'s script itself, its seeding on the first line (kept strict), and names a module one; one whose policy allows it loads the app\'s script as before', async () => {
+  const { r, context } = routed();
+  const late = [];
+  const answered = [];
+  await workerRoutes(context, { late: (...a) => late.push(a), answered: (q) => answered.push(q.url()) });
+  const t = 'cf'.repeat(16);
+  const none = { 'content-type': 'text/javascript', 'content-security-policy': "default-src 'none'" };
+  const s = await r.ask(markWorker('http://h/s.js', 's', t), answerOf(200, '"use strict";app()', none));
+  assert.deepEqual(s, [['fetch', 'http://h/s.js'], ['fulfill', { status: 200, headers: none, body: `"use strict";${oneLine(workerScript(t, 0, 's', false, true))}"use strict";app()\n//# sourceURL=http://h/s.js\n` }]]);
+  assert.equal((await r.ask(markWorker('http://h/s.js', 's', t), answerOf(200, 'app()', none)))[1][1].body, `${oneLine(workerScript(t, 1, 's', false, true))}app()\n//# sourceURL=http://h/s.js\n`);
+  assert.deepEqual(late, []);
+  const x = await r.ask(markWorker('http://h/x.js', 'x', t), answerOf(200, 'import "./a.js";b()', none));
+  assert.equal(x[1][1].body, `${oneLine(workerScript(t, 2, 'x', false, true))}import "./a.js";b()\n//# sourceURL=http://h/x.js\n`);
+  assert.deepEqual(late, [['http://h/x.js', true]]);
+  // Its bytes as the server sent them.
+  const latin1 = Buffer.from('app("hé")', 'latin1');
+  const l = await r.ask(markWorker('http://h/l.js', 's', t), { status: () => 200, ok: () => true, headers: () => none, body: async () => latin1 });
+  assert.deepEqual(r.raw, withBytes(latin1, oneLine(workerScript(t, 3, 's', false, true)), '\n//# sourceURL=http://h/l.js\n'));
+  assert.equal(l[1][0], 'fulfill');
+  // Trusted Types refuse a classic one's importScripts of a string; a module one's import() is no sink.
+  const tt = { 'content-type': 'text/javascript', 'content-security-policy': "require-trusted-types-for 'script'" };
+  assert.equal((await r.ask(markWorker('http://h/t.js', 's', t), answerOf(200, 'app()', tt)))[1][1].body, `${oneLine(workerScript(t, 4, 's', false, true))}app()\n//# sourceURL=http://h/t.js\n`);
+  assert.equal((await r.ask(markWorker('http://h/u.js', 'x', t), answerOf(200, 'app()', tt)))[1][1].body, workerAnswer(t, 5, 'x', 'http://h/u.js', true));
+  // A policy that allows a script from the worker's origin: the app's script is loaded from its own URL, as before.
+  const self = { 'content-type': 'text/javascript', 'content-security-policy': "script-src 'self'" };
+  assert.equal((await r.ask(markWorker('http://h/v.js', 's', t), answerOf(200, 'app()', self)))[1][1].body, workerAnswer(t, 6, 's', 'http://h/v.js'));
+  assert.equal((await r.ask(markWorker('http://h/y.js', 'x', t), answerOf(200, 'app()', self)))[1][1].body, workerAnswer(t, 7, 'x', 'http://h/y.js', false));
+  assert.deepEqual(late, [['http://h/x.js', true]]);
+  // A body keploy cannot read: the seeding's load of the app's script, as before, and no line.
+  const gone = await r.ask(markWorker('http://h/g.js', 'x', t), { status: () => 200, ok: () => true, headers: () => none, body: async () => { throw new Error('gone'); } });
+  assert.equal(gone[1][1].body, workerAnswer(t, 8, 'x', 'http://h/g.js', false));
+  assert.deepEqual(late, [['http://h/x.js', true]]);
+  assert.equal(answered.length, 9);
+});
+
+test('an inline Shared Worker\'s answer runs its seeding, then the app\'s script, at the worker\'s marked URL: it draws the seed\'s numbers, and its location and an ErrorEvent\'s filename there show no mark', () => {
+  const t = 'd0'.repeat(16);
+  for (const kind of ['s', 'x']) {
+    const href = markWorker('http://h/s.js?q=1', kind, t);
+    const w = workerAt(href, workerAnswer(t, 2, kind, 'http://h/s.js?q=1', true, 'globalThis.ran = location.href;', true));
+    assert.equal(w.run('ran'), 'http://h/s.js?q=1', kind);
+    assert.deepEqual(w.draws(), workerAt(href, workerScript(t, 2, kind)).draws(), kind);
+    // In place, the app's script runs at the marked URL: an ErrorEvent's filename there shows it with no mark.
+    class ErrorEvent {}
+    const e = workerAt(href, '', { ErrorEvent });
+    e.run('Object.defineProperty(ErrorEvent.prototype, \'filename\', { get() { return this.f; }, enumerable: true, configurable: true });');
+    e.run(workerScript(t, 2, kind, false, true));
+    assert.equal(e.run(`(() => { const v = new ErrorEvent(); v.f = ${JSON.stringify(href)}; return v.filename; })()`), 'http://h/s.js?q=1', kind);
+  }
+  assert.match(workerScript(t, 0, 's', false, true), /const main = new RegExp\(/);
+  assert.match(workerScript(t, 0, 's'), /const main = null;/);
+  assert.match(lateLine('a test', 'http://h/x.js', true), /^keploy: in a test, the module Shared Worker at http:\/\/h\/x\.js is served with a Content-Security-Policy that could refuse keploy's load of a script from the worker's own origin, .* runs after the modules the script imports: .*; if one does, have the policy allow scripts from the worker's own origin \('self' in script-src\) where the tests run, or serve the worker's script with no Content-Security-Policy there/);
+  assert.match(lateLine('a test', 'http://h/m.js'), /^keploy: in a test, the module Web Worker at /);
 });

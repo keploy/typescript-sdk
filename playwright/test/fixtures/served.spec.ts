@@ -36,3 +36,8 @@ const start = async (page: Page, list: Start[]): Promise<void> => {
 test('latin1', async ({ page }) => start(page, [{ url: '/sv/l1.js' }, { url: '/sv/l1.js', type: 'module' }]));
 test('csp', async ({ page }) => start(page, [{ url: '/sv/cn.js' }, { url: '/sv/csn.js' }, { url: '/sv/ctt.js' }, { url: '/sv/cn.js', type: 'module' }, { url: '/sv/cn.js', type: 'module' }]));
 test('redirect', async ({ page }) => start(page, [{ url: '/rd/w.js' }, { url: '/rdm/m.js', type: 'module' }, { url: '/rds/s.js', shared: true }, { url: '/rd/w.js' }]));
+// Under a Content-Security-Policy of the script's own: module Web Workers
+// that import a module drawing as it loads (default-src 'self', helmet's
+// default), a module and a classic one under 'strict-dynamic', and a
+// classic and a module Shared Worker under default-src 'none'.
+test('own', async ({ page }) => start(page, [{ url: '/mc/s.js', type: 'module' }, { url: '/mc/h.js', type: 'module' }, { url: '/mc/sd.js', type: 'module' }, { url: '/mc/sdc.js' }, { url: '/sv/sn.js', shared: true }, { url: '/sv/snm.js', type: 'module', shared: true }]));

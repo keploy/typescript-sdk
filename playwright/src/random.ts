@@ -1607,9 +1607,12 @@ export function markWorker(url: string, kind: WorkerMark['kind'], token: string,
  * marked: keploy's own code. An error the browser's own call throws in a
  * seeded function or in the location's getters (a float array, a this that
  * is no Crypto or location) reaches its caller with none of the seeding's
- * frames on the stack it keeps (V8's and WebKit's).
+ * frames on the stack it keeps (V8's and WebKit's). inPlace: the app's
+ * script runs in keploy's answer itself, after this, at the worker's
+ * marked URL, as a Web Worker's always does and a Shared Worker's does
+ * when its policy could refuse the load of the app's script (workerAnswer).
  */
-export function workerScript(token: string, n: number, kind: 'w' | 'm' | 's' | 'x', reach = false): string {
+export function workerScript(token: string, n: number, kind: 'w' | 'm' | 's' | 'x', reach = false, inPlace = false): string {
   return `(() => {
   const g = globalThis;
   const k = ${JSON.stringify(`${token}\n${n}\n`)};
@@ -1622,12 +1625,12 @@ ${STREAM_JS}
   // and WebKit, a stack of its own, made as it was thrown, with the seeding's
   // frames: they are left out of it before it reaches the caller, and a
   // stack with none, or that is no string, stays as it was. A Web Worker's
-  // app's script runs at the worker's own marked URL, after its seeding
-  // (workerAnswer): a frame there is the app's, kept, with the mark taken
+  // app's script (and a Shared Worker's, in place) runs at the worker's
+  // own marked URL, after its seeding (workerAnswer): a frame there is the app's, kept, with the mark taken
   // off (each engine names the app's URL there already: the answer's
   // sourceURL).
   const marked = new RegExp(${JSON.stringify(`[?&;]${WORKER_PARAM}=`)});
-  const main = ${kind === 'w' || kind === 'm' ? `new RegExp(${JSON.stringify(`[?&]${WORKER_PARAM}=${kind}\\.${token}(?![.0-9a-f])`)}, 'g')` : 'null'};
+  const main = ${kind === 'w' || kind === 'm' || inPlace ? `new RegExp(${JSON.stringify(`[?&]${WORKER_PARAM}=${kind}\\.${token}(?![.0-9a-f])`)}, 'g')` : 'null'};
   const unmark = (s) => s.split('\\n').map((l) => (main === null ? l : l.replace(main, ''))).filter((l) => !marked.test(l)).join('\\n');
   const thrown = (e) => {
     try {
@@ -1712,7 +1715,8 @@ ${DRAW_JS}
   }
   // An error the app's script lets out names the script it was thrown in
   // (an ErrorEvent's filename): Firefox and WebKit name a Web Worker's
-  // marked URL, shown here with no mark, as Chromium names it.
+  // marked URL (and a Shared Worker's, in place), shown here with no mark,
+  // as Chromium names it.
   if (main !== null) {
     try {
       const E = g.ErrorEvent;
@@ -1815,8 +1819,75 @@ export function cspAllowsData(headers: Record<string, string>): boolean {
 }
 
 /**
- * The encoding a script's bytes name with a byte order mark (which every
- * engine reads a worker's script by, whatever its charset says), and the
+ * Whether the Content-Security-Policy of a worker's script (headers, its
+ * response's) lets the worker load a script from url, a URL of the
+ * worker's own origin (keploy's seeding, at the script's own URL marked,
+ * or the app's script there with no mark), so keploy may load it there:
+ * no policy holds a sandbox (which could give the worker an opaque origin,
+ * which 'self' does not match); each policy that names a source list for
+ * scripts (script-src-elem, else script-src, else default-src) lists
+ * 'self', 'strict-dynamic' (which allows a script a script loads, as
+ * keploy's are), *, url's scheme, or url's origin (a host source of its
+ * scheme, host and port, with a path that holds url's, or none), and so,
+ * for a module worker, does each that names one for its worker's loads
+ * (worker-src, else child-src, else script-src, else default-src: an
+ * engine may read a module's imports by it); for a
+ * classic worker, whose importScripts takes a string, no policy requires
+ * Trusted Types for scripts; and no policy upgrades an http url to https
+ * (upgrade-insecure-requests), but in Chromium for a loopback host, which
+ * Chromium never upgrades. A source keploy does not read so (a wildcard
+ * host aside: *.example.com), counts as one that refuses: keploy then
+ * puts the seeding in the script itself (workerAnswer inline), which no
+ * policy refuses.
+ */
+export function cspAllowsOwn(headers: Record<string, string>, url: string, classic: boolean, engine = ''): boolean {
+  const v = headers['content-security-policy'];
+  if (v === undefined) return true;
+  let u: URL;
+  try { u = new URL(url); } catch { return false; }
+  const scheme = u.protocol.slice(0, -1).toLowerCase();
+  const host = u.hostname.toLowerCase();
+  const loopback = host === 'localhost' || host.endsWith('.localhost') || /^127\.\d+\.\d+\.\d+$/.test(host) || host === '[::1]';
+  const port = u.port !== '' ? u.port : scheme === 'https' ? '443' : scheme === 'http' ? '80' : '';
+  const source = (x: string): boolean => {
+    const t = x.toLowerCase();
+    if (t === "'self'" || t === "'strict-dynamic'") return true;
+    if (t === '*') return scheme === 'http' || scheme === 'https';
+    if (/^[a-z][a-z0-9+.-]*:$/.test(t)) return t === `${scheme}:` || (t === 'http:' && scheme === 'https');
+    const h = /^(?:([a-z][a-z0-9+.-]*):\/\/)?(\*|(?:\*\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*)(?::(\d+|\*))?(\/[^?#]*)?$/.exec(t);
+    if (h === null) return false;
+    if (h[1] !== undefined && h[1] !== scheme && !(h[1] === 'http' && scheme === 'https')) return false;
+    if (h[1] === undefined && scheme !== 'http' && scheme !== 'https') return false;
+    if (h[2] !== '*' && !(h[2].startsWith('*.') ? host.endsWith(h[2].slice(1)) : host === h[2])) return false;
+    if (h[3] === undefined ? u.port !== '' : h[3] !== '*' && h[3] !== port) return false;
+    // A path: what x says, with its letters' case, read as url's path is
+    // written (one with an escape keploy does not read).
+    const p = h[4] === undefined ? '' : /^(?:[a-z][a-z0-9+.-]*:\/\/)?[^/]*(\/[^?#]*)$/i.exec(x)?.[1] ?? '';
+    if (p === '' || p === '/') return true;
+    if (p.includes('%') || u.pathname.includes('%')) return false;
+    return p.endsWith('/') ? u.pathname.startsWith(p) : u.pathname === p;
+  };
+  for (const policy of v.split(/[,\n]/)) {
+    const ds = new Map<string, string[]>();
+    for (const d of policy.split(';')) {
+      const t = d.trim().split(/\s+/).filter((x) => x !== '');
+      if (t.length > 0 && !ds.has(t[0].toLowerCase())) ds.set(t[0].toLowerCase(), t.slice(1));
+    }
+    if (ds.has('sandbox')) return false;
+    if (classic && (ds.get('require-trusted-types-for') ?? []).some((x) => x.toLowerCase() === "'script'")) return false;
+    if (ds.has('upgrade-insecure-requests') && scheme === 'http' && !(loopback && engine === 'chromium')) return false;
+    const first = (...names: string[]): string[] | undefined => names.map((x) => ds.get(x)).find((x) => x !== undefined);
+    for (const list of [first('script-src-elem', 'script-src', 'default-src'), classic ? undefined : first('worker-src', 'child-src', 'script-src', 'default-src')]) {
+      if (list !== undefined && !list.some(source)) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * The encoding a script's bytes name with a byte order mark (which
+ * Chromium reads a worker's script by, whatever its charset says; Firefox
+ * and WebKit refuse a UTF-16 one, seeded or not), and the
  * mark's length: UTF-16 of either byte order, else UTF-8 (0 when it has
  * none).
  */
@@ -1951,8 +2022,8 @@ export function useStrict(source: string): boolean {
  * worker's seeding from a URL keploy marked ('q' for a classic worker, by
  * importScripts; 'p' for a module one, by an import ahead of every import
  * of the app's, so it runs before any of them), or, inline (the script's
- * response carries a Content-Security-Policy, which could refuse that
- * load), is the seeding itself on one line (oneLine), which in a module
+ * response carries a Content-Security-Policy that could refuse that
+ * load: cspAllowsOwn), is the seeding itself on one line (oneLine), which in a module
  * runs after the modules the app's script imports; a classic worker's
  * starts with a 'use strict' of keploy's when the app's script has one in
  * its directive prologue, so it stays strict. It goes on the app's first
@@ -1967,7 +2038,11 @@ export function useStrict(source: string): boolean {
  * app's script (source undefined), the worker gets its seeding, then loads
  * the app's script itself, from own, as below.
  *
- * A Shared Worker's ('s', 'x') is the worker's seeding, then the app's own
+ * A Shared Worker's ('s', 'x'), inline (its script's policy could refuse
+ * its load of the app's script, below: cspAllowsOwn), is so too: the app's
+ * script, source, with the seeding on its first line, run at the worker's
+ * marked URL; in a module one after the modules the app's script imports.
+ * Else it is the worker's seeding, then the app's own
  * script, loaded from own, the URL the app asked for, with no mark. The app's
  * script so runs at its own URL: its import.meta.url, the URLs its imports
  * resolve against and a stack trace through it show no mark, and the
@@ -1996,12 +2071,12 @@ export function workerAnswer(token: string, n: number, kind: 'w' | 'm' | 's' | '
 export function workerAnswer(token: string, n: number, kind: 'w' | 'm' | 's' | 'x', own: string, dataOk: boolean, source: Uint8Array, inline?: boolean, reach?: boolean): Buffer;
 export function workerAnswer(token: string, n: number, kind: 'w' | 'm' | 's' | 'x', own: string, dataOk = true, source?: string | Uint8Array, inline = false, reach = false): string | Buffer {
   const url = JSON.stringify(own);
-  if ((kind === 'w' || kind === 'm') && source !== undefined) {
+  if ((kind === 'w' || kind === 'm' || inline) && source !== undefined) {
     const bytes = typeof source === 'string' ? Buffer.from(source) : source;
     const text = scriptText(bytes);
-    const first = kind === 'w'
-      ? `${useStrict(text) ? '"use strict";' : ''}${inline ? oneLine(workerScript(token, n, kind, reach)) : `importScripts(${JSON.stringify(markWorker(own, 'q', token, n))});`}`
-      : inline ? oneLine(workerScript(token, n, kind, reach)) : `import ${JSON.stringify(markWorker(own, 'p', token, n))};`;
+    const first = kind === 'w' || kind === 's'
+      ? `${useStrict(text) ? '"use strict";' : ''}${inline ? oneLine(workerScript(token, n, kind, reach, true)) : `importScripts(${JSON.stringify(markWorker(own, 'q', token, n))});`}`
+      : inline ? oneLine(workerScript(token, n, kind, reach, true)) : `import ${JSON.stringify(markWorker(own, 'p', token, n))};`;
     const named = /(?:\/\/|\/\*)[#@][ \t]*sourceURL[ \t]*=/.test(text);
     const answer = withBytes(bytes, first, named ? '' : `\n//# sourceURL=${noFragment(own)}\n`);
     return typeof source === 'string' ? answer.toString() : answer;
@@ -2058,11 +2133,12 @@ export type WorkerHooks = {
    */
   unmarked?: (at: string, why: 'worker' | 'nested') => void;
   /**
-   * keploy put the seeding of the module Web Worker at at (its origin and
-   * path) on its script's first line, as the script's response carries a
-   * Content-Security-Policy: it runs after the modules the script imports.
+   * keploy put the seeding of the module worker at at (its origin and
+   * path; shared: a Shared Worker) on its script's first line, as the
+   * script's Content-Security-Policy could refuse its load (cspAllowsOwn):
+   * it runs after the modules the script imports.
    */
-  late?: (at: string) => void;
+  late?: (at: string, shared: boolean) => void;
   /**
    * The server redirected the script of the worker at at (its origin and
    * path). 'followed' (Firefox): it runs unseeded at the URL the redirect
@@ -2077,15 +2153,15 @@ export type WorkerHooks = {
 export type Redirected = 'followed' | 'twice' | 'stopped';
 
 /**
- * The line a test shows, once for each address, for a module Web Worker
- * whose seeding started after the modules its script imports (WorkerHooks
- * late).
+ * The line a test shows, once for each address, for a module worker
+ * (shared: a Shared Worker) whose seeding started after the modules its
+ * script imports (WorkerHooks late).
  */
-export function lateLine(name: string, at: string): string {
-  return `keploy: in ${name}, the module Web Worker at ${at} is served with a Content-Security-Policy, which could refuse keploy's load of its seeding, ` +
+export function lateLine(name: string, at: string, shared = false): string {
+  return `keploy: in ${name}, the module ${shared ? 'Shared' : 'Web'} Worker at ${at} is served with a Content-Security-Policy that could refuse keploy's load of a script from the worker's own origin, ` +
     'so keploy put its seeding on the first line of the worker\'s script, and it runs after the modules the script imports: ' +
     'a random number one of those modules draws as it loads is the browser\'s own, so it may differ at replay; ' +
-    'if one does, serve the worker\'s script with no Content-Security-Policy where the tests run, and keploy loads its seeding ahead of those modules.';
+    'if one does, have the policy allow scripts from the worker\'s own origin (\'self\' in script-src) where the tests run, or serve the worker\'s script with no Content-Security-Policy there, and keploy loads its seeding ahead of those modules.';
 }
 
 /**
@@ -2399,6 +2475,7 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
     let status = 200;
     let headers: Record<string, string> = { 'content-type': 'text/javascript' };
     let source: Uint8Array | undefined;
+    let inline = false;
     let moved: Awaited<ReturnType<Route['fetch']>> | undefined;
     try {
       // keploy follows no redirect: the browser does (below).
@@ -2415,9 +2492,18 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
       } else {
         status = got.status();
         headers = headersOf(got.headers());
-        // A Web Worker's answer holds the app's script's bytes as the server
-        // sent them, whatever their charset (withBytes).
-        if (m.kind === 'w' || m.kind === 'm') source = await got.body();
+        // The script's Content-Security-Policy is the worker's own: one
+        // keploy cannot tell allows a script from the worker's origin
+        // (cspAllowsOwn) could refuse the load of keploy's seeding at the
+        // script's own URL (a Web Worker's importScripts or import), or the
+        // seeding's load of the app's script there (a Shared Worker's), so
+        // the seeding goes on the app's first line instead (inline), which
+        // no policy refuses. A Web Worker's answer holds the app's script's
+        // bytes as the server sent them, whatever their charset (withBytes),
+        // and so does an inline Shared Worker's.
+        const refuses = !cspAllowsOwn(headers, m.url, m.kind === 'w' || m.kind === 's', engine);
+        if (m.kind === 'w' || m.kind === 'm' || refuses) source = await got.body();
+        inline = refuses;
       }
     } catch {
       // The worker loads the app's script itself, and fails as it would.
@@ -2450,18 +2536,13 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
       }
       return;
     }
-    // A Content-Security-Policy on the script's response is the worker's
-    // own: it could refuse the load of keploy's seeding at its own URL
-    // (importScripts or import), so the seeding goes on the app's first
-    // line instead, which no policy refuses. A module's static imports run
-    // before its first line, so such a module Web Worker's seeding starts
-    // after them, and the test says so.
-    const inline = source !== undefined && headers['content-security-policy'] !== undefined;
-    if (inline && m.kind === 'm') {
+    // A module's static imports run before its first line, so an inline
+    // module worker's seeding starts after them, and the test says so.
+    if (inline && (m.kind === 'm' || m.kind === 'x')) {
       const u = new URL(m.url);
-      hooks.late?.(u.origin + u.pathname);
+      hooks.late?.(u.origin + u.pathname, m.kind === 'x');
     }
-    await fulfill({ status, headers, body: source === undefined ? workerAnswer(m.token, n, m.kind as 'w' | 'm' | 's' | 'x', m.url, cspAllowsData(headers)) : workerAnswer(m.token, n, m.kind as 'w' | 'm', m.url, true, source, inline, reach) });
+    await fulfill({ status, headers, body: source === undefined ? workerAnswer(m.token, n, m.kind as 'w' | 'm' | 's' | 'x', m.url, cspAllowsData(headers)) : workerAnswer(m.token, n, m.kind as 'w' | 'm' | 's' | 'x', m.url, true, source, inline, reach) });
   };
   const first = async (route: Route): Promise<void> => {
     const r = route.request();

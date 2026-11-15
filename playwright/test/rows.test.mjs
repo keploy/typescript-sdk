@@ -699,6 +699,22 @@ async function drawsServer() {
     if (u.pathname === '/sv/l1.js') { res.writeHead(200, { 'content-type': 'text/javascript; charset=iso-8859-1' }); res.end(Buffer.from(told('l1', ", s: 'h\u00e9'"), 'latin1')); return; }
     const csp = { '/sv/cn.js': "default-src 'none'", '/sv/csn.js': "script-src 'none'", '/sv/ctt.js': "require-trusted-types-for 'script'" }[u.pathname];
     if (csp !== undefined) { res.writeHead(200, { 'content-type': 'text/javascript', 'content-security-policy': csp }); res.end(told(u.pathname.slice(4, -3))); return; }
+    // /mc/s.js and /mc/h.js, module Web Workers that import /mc/dep.mjs,
+    // which draws as it loads, under default-src 'self' and under helmet's
+    // default policy; /mc/sd.js (a module) and /mc/sdc.js (a classic one)
+    // under a nonce and 'strict-dynamic'; /sv/sn.js and /sv/snm.js, a
+    // classic and a module Shared Worker, under default-src 'none'.
+    const helmetCsp = "default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests";
+    const ownCsp = {
+      '/mc/s.js': ["default-src 'self'", `import { D } from './dep.mjs'; ${told('s', ', dep: D')}`],
+      '/mc/h.js': [helmetCsp, `import { D } from './dep.mjs'; ${told('h', ', dep: D')}`],
+      '/mc/sd.js': ["script-src 'nonce-k' 'strict-dynamic'", told('sd')],
+      '/mc/sdc.js': ["script-src 'nonce-k' 'strict-dynamic'", told('sdc')],
+      '/sv/sn.js': ["default-src 'none'", `onconnect = (e) => e.ports[0].${told('sn')}`],
+      '/sv/snm.js': ["default-src 'none'", `onconnect = (e) => e.ports[0].${told('snm')}`],
+    }[u.pathname];
+    if (ownCsp !== undefined) { res.writeHead(200, { 'content-type': 'text/javascript', 'content-security-policy': ownCsp[0] }); res.end(ownCsp[1]); return; }
+    if (u.pathname === '/mc/dep.mjs') { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end('export const D = [Math.random()];'); return; }
     const moved = { '/rd/w.js': '/rd/v2/w.js', '/rdm/m.js': '/rdm/v2/m.js', '/rds/s.js': 'v2/s.js' }[u.pathname];
     if (moved !== undefined) { res.writeHead(302, { location: moved }); res.end(); return; }
     const v2 = {
@@ -1792,7 +1808,9 @@ for (const engine of ENGINES) {
       const said = (r, re) => r.lines.filter((l) => re.test(l));
       for (const r of [s1, s2]) {
         assert.equal(said(r, /^keploy: in .*csp.*, the module Web Worker at http:\/\/127\.0\.0\.1:\d+\/sv\/cn\.js is served with a Content-Security-Policy/).length, 1);
-        assert.equal(said(r, /Content-Security-Policy/).length, 1);
+        // served.spec.ts's 'own' test runs too: its lines name /mc/ and /sv/sn*.js (its own row).
+        assert.equal(said(r, /\/sv\/c[a-z]+\.js is served with a Content-Security-Policy/).length, 1);
+        assert.equal(said(r, /Content-Security-Policy/).filter((l) => !/\/mc\/|\/sv\/snm?\.js/.test(l)).length, 1);
         // Firefox routes no Shared Worker's script: its redirected one is named as one keploy cannot reach.
         const moved = engine === 'firefox' ? ['/rd/w.js', '/rdm/m.js'] : ['/rd/w.js', '/rdm/m.js', '/rds/s.js'];
         for (const p of moved) {
@@ -1806,6 +1824,47 @@ for (const engine of ENGINES) {
         assert.equal(said(r, /^keploy: in .*redirect.*, the Shared Worker at http:\/\/127\.0\.0\.1:\d+\/rds\/s\.js draws the browser's own random numbers, .*: it is a Shared Worker, and Firefox does not let keploy reach/).length, engine === 'firefox' ? 1 : 0);
       }
       for (const r of [o1, o2]) assert.deepEqual(said(r, /redirects its script|Content-Security-Policy/), []);
+    } finally { await a.close(); }
+  });
+}
+
+for (const engine of ENGINES) {
+  test(`served, in ${engine}: a worker's script whose Content-Security-Policy allows a script from the worker's own origin keeps its seeding ahead of the modules it imports (default-src 'self'; a nonce and 'strict-dynamic', module and classic; helmet's default${engine === 'chromium' ? '' : ', which upgrades http, as one keploy cannot tell allows it here: seeded late and named, as it runs off'}), draws the seed's numbers there, its imports' too, and is named as late by no line; a Shared Worker under default-src 'none', classic and module, starts, as off, ${engine === 'firefox' ? 'unseeded (Firefox routes no Shared Worker\'s script)' : 'seeded, the module one named as seeded late once'}; the server never sees keploy's mark`, async () => {
+    const j = journal();
+    const a = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' ? { body: { v: 1, status: 'ok', seed: 'ce'.repeat(16) } } : undefined));
+    try {
+      const run = (off) => drawRun(j, { ...keployEnv(a.url), PW_BROWSER: engine, ...(off ? { KEPLOY_SEED_RANDOM: 'off' } : {}) }, ['served.spec.ts'], ['own']);
+      const s1 = await run(false);
+      const s2 = await run(false);
+      const o1 = await run(true);
+      const o2 = await run(true);
+      const names = ['s', 'h', 'sd', 'sdc', 'sn', 'snm'];
+      const kinds = (r) => r.drew.own.map((w) => (typeof w === 'string' ? w : w.k));
+      for (const [mode, r] of [['seeded', s1], ['seeded again', s2], ['off', o1], ['off again', o2]]) {
+        // Each starts as it does off; all but helmet's in every engine.
+        assert.deepEqual(kinds(r), kinds(o1), mode);
+        assert.deepEqual(kinds(r).filter((k, i) => i !== 1), names.filter((k, i) => i !== 1), mode);
+        assert.deepEqual(r.seen.filter((u) => u.includes('__keploy_worker')), [], mode);
+        // Each script loaded once by the browser, as off (a Shared Worker's twice seeded in Chromium and WebKit: keploy asks it too).
+        for (const p of ['/mc/s.js', '/mc/sd.js', '/mc/sdc.js']) assert.equal(r.seen.filter((u) => u === p).length, 1, `${mode} ${p}`);
+      }
+      if (engine === 'chromium') assert.equal(kinds(s1)[1], 'h');
+      const at = (r, i) => r.drew.own[i];
+      // Seeded: the seed's draws, the same in each run, an import's too; off, the browser's own.
+      const seededAt = engine === 'chromium' ? [0, 1, 2, 3, 4, 5] : engine === 'webkit' ? [0, 2, 3, 4, 5] : [0, 2, 3];
+      for (const i of seededAt) {
+        assert.deepEqual(at(s1, i).draws, at(s2, i).draws, names[i]);
+        if (at(s1, i).dep !== undefined) assert.deepEqual(at(s1, i).dep, at(s2, i).dep, `${names[i]} dep`);
+      }
+      assert.notDeepEqual(at(o1, 0).draws, at(o2, 0).draws);
+      assert.notDeepEqual(at(o1, 0).dep, at(o2, 0).dep);
+      if (engine === 'firefox') for (const i of [4, 5]) assert.notDeepEqual(at(s1, i).draws, at(s2, i).draws, names[i]);
+      // The lines: a module worker seeded after its imports, once each.
+      // served.spec.ts's other tests run too: only this test's addresses (/mc/, /sv/sn.js, /sv/snm.js).
+      const late = (r) => r.lines.filter((l) => /is served with a Content-Security-Policy/.test(l) && /\/mc\/|\/sv\/snm?\.js/.test(l)).map((l) => /the (module (?:Web|Shared) Worker) at http:\/\/127\.0\.0\.1:\d+(\S+) is served/.exec(l)?.slice(1).join(' ')).sort();
+      const want = { chromium: ['module Shared Worker /sv/snm.js'], firefox: ['module Web Worker /mc/h.js'], webkit: ['module Shared Worker /sv/snm.js', 'module Web Worker /mc/h.js'] }[engine];
+      for (const r of [s1, s2]) assert.deepEqual(late(r), want);
+      for (const r of [o1, o2]) assert.deepEqual(late(r), []);
     } finally { await a.close(); }
   });
 }

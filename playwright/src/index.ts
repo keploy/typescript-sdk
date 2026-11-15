@@ -259,14 +259,15 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
           told.add(k);
           process.stdout.write(`${unplacedLine(name, a, why)}\n`);
         },
-        // A module Web Worker whose seeding runs after its imports (its
-        // script carries a Content-Security-Policy): once for each address.
-        late: (at) => {
+        // A module worker whose seeding runs after its imports (its
+        // script's Content-Security-Policy could refuse keploy's load):
+        // once for each address.
+        late: (at, shared) => {
           const a = pageAddress(at);
           const k = `late\n${a}`;
           if (told.has(k)) return;
           told.add(k);
-          process.stdout.write(`${lateLine(name, a)}\n`);
+          process.stdout.write(`${lateLine(name, a, shared)}\n`);
         },
         // A worker whose script the server redirects, which so runs
         // unseeded, or in Chromium does not start: once for each address.
