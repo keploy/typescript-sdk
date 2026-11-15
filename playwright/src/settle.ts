@@ -169,12 +169,13 @@ export class Inflight {
    * script load (the k-th script request the document's frame reported at
    * that URL while the document was its own), now or when it is reported,
    * if keploy's route does not answer it (a URL keploy marked: answered
-   * ends it). A load that ended, or a URL the document started no Web
-   * Worker at, drops nothing.
+   * ends it). A load that ended, a URL the document started no Web Worker
+   * at, or a place that is no whole number from 1 (no load is there),
+   * drops nothing.
    */
   webWorkerStopped(doc: number, url: string, k: number): void {
     const d = this.numbered.get(doc);
-    if (d === undefined || !Number.isInteger(k) || k < 1) return;
+    if (d === undefined) return;
     const u = noFragment(url);
     const at = loadsAt(d, u);
     at.stopped.add(k);

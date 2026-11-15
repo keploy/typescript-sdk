@@ -506,6 +506,28 @@ test('settle (Chromium): the script load of a Web Worker its document terminated
   assert.equal(off.size, 1);
 });
 
+test('settle (Chromium): a commit with no answer (a route change inside the page) keeps the document, so its word still drops the load of a Web Worker it terminated; a load at a URL keploy marked for its own route is waited for though its place was terminated before it was reported (keploy\'s route ends it)', async () => {
+  const ctx = fakeContext();
+  const inflight = new Inflight(ctx, true);
+  const page = new EventEmitter();
+  ctx.emit('page', page);
+  const f = { page: () => page };
+  const load = (url) => ({ frame: () => f, isNavigationRequest: () => false, method: () => 'GET', url: () => url, resourceType: () => 'script' });
+  const doc = inflight.webWorkerDocument(f);
+  ctx.emit('request', load('http://h/a.js'));
+  page.emit('framenavigated', f);
+  ctx.emit('request', load('http://h/w.js'));
+  assert.equal(inflight.size, 2);
+  inflight.webWorkerStopped(doc, 'http://h/w.js', 1);
+  assert.equal(inflight.size, 1);
+  // Its place terminated first, then the load, at a URL keploy marked.
+  inflight.webWorkerStopped(doc, 'http://h/m.js', 1);
+  ctx.emit('request', load(markWorker('http://h/m.js', 'w', 'cd'.repeat(16))));
+  assert.equal(inflight.size, 2);
+  ctx.emit('request', load('http://h/m.js'));
+  assert.equal(inflight.size, 3);
+});
+
 test('settle: a cancel that comes while settle already waits wakes it (its page closes; then, for a service worker\'s call, the test closes its context)', async () => {
   for (const worker of [false, true]) {
     const c = worker ? 'a page\'s call and a service worker\'s' : 'a page\'s call';

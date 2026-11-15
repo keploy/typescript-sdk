@@ -481,6 +481,15 @@ for (const engine of ['chromium', 'firefox', 'webkit']) {
           const order = j.events.map((e) => (e.page ? e.page : e.agent.path));
           // The surviving worker's load is answered before the test ends.
           if (title.startsWith('two')) assert.ok(order.indexOf('heldw answered') >= 0 && order.indexOf('heldw answered') < order.indexOf('/agent/scope/end'), order.join(', '));
+          // Firefox and WebKit, seeded or off, go on loading a terminated
+          // worker's script and settle waits for it: every load the server
+          // got is answered before the test ends. Chromium ends the load
+          // at once (seeded, keploy's fetch of it is cut too).
+          if (engine !== 'chromium') {
+            const before = order.slice(0, order.indexOf('/agent/scope/end'));
+            const n = (e) => before.filter((x) => x === e).length;
+            assert.ok(n('heldw sent') > 0 && n('heldw answered') === n('heldw sent'), `${title}: ${order.join(', ')}`);
+          }
           t.diagnostic(`${title}: ${order.filter((e) => e.startsWith('heldw') || e === '/agent/scope/end').join(', ')}; steps: ${r.steps.filter((x) => x.startsWith('keploy: wait for')).join(' | ')}`);
         } finally { await p.close(); await a.close(); }
       }
