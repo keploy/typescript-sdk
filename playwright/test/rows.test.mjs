@@ -562,12 +562,13 @@ for (const engine of ['chromium', 'firefox', 'webkit']) {
 // A request the test's route sends on (continue) is waited for, though a
 // fulfill of the route failed: in every engine, one the route had sent on
 // before, whose handler then throws Playwright's "already handled" (which
-// fails the test); in WebKit, one whose redirect the browser refused before
-// the route sent it on. The server answers it once settle's step has begun
-// (waitedFor).
+// fails the test; Playwright's own check refuses that fulfill before it
+// makes any API call, so its error names no API, as with no keploy); in
+// WebKit, one whose redirect the browser refused before the route sent it
+// on. The server answers it once settle's step has begun (waitedFor).
 for (const engine of ['chromium', 'firefox', 'webkit']) {
   test(`settle, in ${engine}: a call the test's own route sends on is waited for, though the route's fulfill failed (after it was sent on, its handler throwing${engine === 'webkit' ? '; or refused before, as WebKit refuses a redirect' : ''})`, async () => {
-    await waitedFor("a call the test's route sends on and then tries to answer", 'GET', '/slow', engine, /route\.fulfill: Route is already handled!/);
+    await waitedFor("a call the test's route sends on and then tries to answer", 'GET', '/slow', engine, /^Error: Route is already handled!\n/);
     if (engine === 'webkit') await waitedFor("a call the test's route sends on after the browser refused its answer", 'GET', '/slow', engine);
   });
 }
