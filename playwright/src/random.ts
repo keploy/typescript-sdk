@@ -1985,18 +1985,57 @@ type Routes = Pick<BrowserContext, 'route' | 'unroute' | 'unrouteAll'>;
  * replaces is taken off, so no request finds neither. After the test's
  * unrouteAll, again comes first, then keploy's. Playwright runs a page's
  * routes before its context's, and the last added first.
+ *
+ * Playwright's unrouteAll takes keploy's route off too, and while target
+ * has no route Playwright sends each request it gets, and each one a route
+ * still held, on as the browser asked for it: a worker's, with keploy's
+ * mark. So where Playwright shows its list of target's routes and its own
+ * way to take some of them off, the test's unrouteAll takes off the test's
+ * routes alone (with the behavior it gives), and keploy's stay. Elsewhere
+ * keploy's are added again after it (again, then keploy's).
+ *
+ * When the test's unroute or unrouteAll leaves target no route of its own,
+ * Playwright stops intercepting target's requests and sends on each one a
+ * route it took off still held. keploy's route stays, so left does that,
+ * given the test's routes it took off.
  */
-function keepFirst(target: Routes, url: (u: URL) => boolean, handler: (route: Route) => Promise<void>, again: () => Promise<unknown> = async () => {}): Promise<void> {
+function keepFirst(target: Routes, url: (u: URL) => boolean, handler: (route: Route) => Promise<void>, o: { again?: () => Promise<unknown>; left?: (removed: Held[]) => Promise<void>; also?: unknown } = {}): Promise<void> {
   const route = target.route;
+  const unroute = target.unroute;
   const unrouteAll = target.unrouteAll;
+  const inner = target as unknown as Inner;
   let now: ((route: Route) => Promise<void>) | null = null;
+  // keploy's handlers on target: each one keepFirst added, and also.
+  const mine = new WeakSet<object>();
+  if (typeof o.also === 'function') mine.add(o.also);
   const add = async (): Promise<void> => {
     const h = (r: Route): Promise<void> => handler(r);
     const was = now;
     now = h;
+    mine.add(h);
     await route.call(target, url, h);
-    if (was !== null) await target.unroute(url, was);
+    if (was !== null) await unroute.call(target, url, was);
   };
+  const ours = (x: Held | null): boolean => typeof x?.handler === 'function' && mine.has(x.handler);
+  // Playwright's list of target's routes, or null where it shows none.
+  const list = (): Held[] | null => (Array.isArray(inner._routes) ? (inner._routes as Held[]) : null);
+  // Whether the test has a route of its own on target (true where
+  // Playwright shows no list).
+  const theirs = (): boolean => {
+    const rs = list();
+    return rs === null || rs.some((x) => !ours(x));
+  };
+  theirsOf.set(target, theirs);
+  const after = async (before: Held[] | null): Promise<void> => {
+    if (o.left === undefined || before === null || theirs()) return;
+    const rs = list() ?? [];
+    await o.left(before.filter((x) => !rs.includes(x) && !ours(x)));
+  };
+  target.unroute = async function (this: Routes, ...args: Parameters<Routes['unroute']>) {
+    const before = list()?.slice() ?? null;
+    await unroute.apply(this, args);
+    await after(before);
+  } as Routes['unroute'];
   target.route = async function (this: Routes, ...args: Parameters<Routes['route']>) {
     const added = route.apply(this, args);
     const ahead = add();
@@ -2007,12 +2046,39 @@ function keepFirst(target: Routes, url: (u: URL) => boolean, handler: (route: Ro
     }
   } as Routes['route'];
   target.unrouteAll = async function (this: Routes, ...args: Parameters<Routes['unrouteAll']>) {
-    await unrouteAll.apply(this, args);
-    await again();
-    await add();
+    const rs = list();
+    const before = rs?.slice() ?? null;
+    if (rs !== null && typeof inner._unrouteInternal === 'function') {
+      const kept = rs.filter(ours);
+      await inner._unrouteInternal.call(target, rs.filter((x) => !kept.includes(x)), kept, args[0]?.behavior);
+      if (typeof inner._disposeHarRouters === 'function') inner._disposeHarRouters.call(target);
+    } else {
+      await unrouteAll.apply(this, args);
+      await (o.again ?? (async () => {}))();
+      await add();
+    }
+    await after(before);
   } as Routes['unrouteAll'];
   return add();
 }
+
+/**
+ * Playwright's own, past its API (none of it there in some versions): a
+ * page's or context's list of its routes (_routes), its way to take some
+ * of them off, keeping the rest (_unrouteInternal, which unrouteAll calls
+ * with all of them), and the routes from HARs it lets go of with them.
+ */
+type Inner = {
+  _routes?: unknown;
+  _unrouteInternal?: (removed: Held[], remaining: Held[], behavior?: string) => Promise<void>;
+  _disposeHarRouters?: () => void;
+};
+
+/** A route in Playwright's list: its handler, and the requests it is handling. */
+type Held = { handler?: unknown; _activeInvocations?: Iterable<{ route?: Route }> };
+
+/** Whether the test has a route of its own on a page or context keploy routes. */
+const theirsOf = new WeakMap<object, () => boolean>();
 
 /** What a test's route.continue or route.fallback asks a request be sent with. */
 type Asked = NonNullable<Parameters<Route['continue']>[0]>;
@@ -2116,11 +2182,14 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
     return out;
   };
   // The worker script loads handed on to the test's routes: each one's mark,
-  // the route's own fulfill, the headers the browser sent it with, and what
-  // the test's routes asked of it (their continue's and fallbacks' options);
-  // and the URLs it may reach the last route at (the app's, or one a
-  // fallback of the test's gave it).
-  type Handed = { m: WorkerMark; at: string; fulfill: Route['fulfill']; sent: Record<string, string>; method: string; asked: Asked };
+  // the route's own methods, the headers the browser sent it with, what the
+  // test's routes asked of it (their continue's and fallbacks' options),
+  // whether keploy or the test began to answer it (started; end once that
+  // ended), and whether keploy answered it as a route of the test's that
+  // held it was taken off (gone: release); and the URLs it may reach the
+  // last route at (the app's, or one a fallback of the test's gave it).
+  type Own = { continue: Route['continue']; fallback: Route['fallback']; fulfill: Route['fulfill']; abort: Route['abort'] };
+  type Handed = { m: WorkerMark; own: Own; sent: Record<string, string>; method: string; asked: Asked; started: boolean; gone: boolean; ended: () => void; end: Promise<void> };
   const handed = new WeakMap<Request, Handed>();
   const urls = new Set<string>();
   const ask = (h: Handed, o: Asked | undefined): void => {
@@ -2147,8 +2216,10 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
         await own(o);
       } finally {
         hooks.answered?.(route.request());
+        h?.ended();
       }
     };
+    if (h !== undefined) h.started = true;
     if (m.kind === 'p' || m.kind === 'q') {
       await fulfill({ status: 200, contentType: 'text/javascript', body: workerScript(m.token, m.n, m.kind === 'p' ? 'm' : 'w', reach) });
       return;
@@ -2200,24 +2271,48 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
       hooks.answered?.(r);
       return;
     }
-    const own = route.fulfill.bind(route);
     if (m.kind === 'p' || m.kind === 'q' ? !preludeLoad(r, m.kind) : !workerScriptLoad(r)) {
       await route.fallback({ url: m.url });
       return;
     }
     if (m.kind === 'p' || m.kind === 'q') {
-      await answer(route, m, own);
+      await answer(route, m, route.fulfill.bind(route));
       return;
     }
-    const h: Handed = { m, at: r.url(), fulfill: own, sent: r.headers(), method: r.method(), asked: {} };
-    handed.set(r, h);
+    const h = hand(route, m, r.headers(), r.method(), {});
+    await h.own.fallback({ url: m.url });
+  };
+  // Keeps route, a worker script's load handed on to the test's routes, as
+  // keploy's: its continue has keploy answer it (answer), its fallback goes
+  // on (at the URL it gives, which the context's routes then match), its
+  // fulfill answers it unseeded and the test hears of it (routed), its abort
+  // aborts it. Once keploy or the test began to answer it, each of the four
+  // waits until that ended, then does what Playwright's own does: continue,
+  // fulfill and abort, and a fallback after the test's own answer, fail
+  // with the error of a route already handled; a fallback after keploy
+  // answered it as its route was taken off (gone) goes on, as Playwright's
+  // does after it sent the request on.
+  const hand = (route: Route, m: WorkerMark, sent: Record<string, string>, method: string, asked: Asked): Handed => {
+    let ended = (): void => {};
+    const end = new Promise<void>((resolve) => { ended = resolve; });
+    const own: Own = { continue: route.continue.bind(route), fallback: route.fallback.bind(route), fulfill: route.fulfill.bind(route), abort: route.abort.bind(route) };
+    const h: Handed = { m, own, sent, method, asked, started: false, gone: false, ended, end };
+    handed.set(route.request(), h);
     urls.add(new URL(m.url).href);
-    const fallback = route.fallback.bind(route);
     route.continue = async (o) => {
+      if (h.started) {
+        await h.end;
+        return own.continue(o);
+      }
       ask(h, o);
-      await answer(route, m, own, h, o);
+      await answer(route, m, own.fulfill, h, o);
     };
     route.fallback = async (o) => {
+      if (h.gone) return own.fallback(o).catch(() => {});
+      if (h.started) {
+        await h.end;
+        return own.fallback(o);
+      }
       ask(h, o);
       if (o?.url !== undefined) {
         try {
@@ -2226,14 +2321,35 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
           // Not a URL: Playwright refuses it.
         }
       }
-      await fallback(o);
+      await own.fallback(o);
     };
     route.fulfill = async (o) => {
+      if (h.started) {
+        await h.end;
+        return own.fulfill(o);
+      }
+      h.started = true;
       const u = new URL(m.url);
       hooks.routed?.(u.origin + u.pathname, 'routed');
-      await own(o);
+      try {
+        await own.fulfill(o);
+      } finally {
+        h.ended();
+      }
     };
-    await fallback({ url: m.url });
+    route.abort = async (e) => {
+      if (h.started) {
+        await h.end;
+        return own.abort(e);
+      }
+      h.started = true;
+      try {
+        await own.abort(e);
+      } finally {
+        h.ended();
+      }
+    };
+    return h;
   };
   const last = async (route: Route): Promise<void> => {
     const h = handed.get(route.request());
@@ -2241,7 +2357,62 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
       await route.fallback();
       return;
     }
-    await answer(route, h.m, h.fulfill, h);
+    // One a route of the test's answered already (it ignored the error of
+    // its own answer after: unrouteAll's 'ignoreErrors') goes on, as it
+    // goes on with no keploy.
+    if (h.started) {
+      await h.end;
+      await h.own.fallback();
+      return;
+    }
+    await answer(route, h.m, h.own.fulfill, h);
+  };
+  // What Playwright does with the requests a route of the test's still held
+  // when the test took the last route of a page, or of its context, off:
+  // it sends each one on as the browser asked for it, so the route's own
+  // continue, fulfill or abort after that fails (a route already handled).
+  // keploy's route stays there, so keploy does it, and the test's unroute
+  // or unrouteAll returns once each is answered: a worker script's load
+  // keploy handed on that no one began to answer gets keploy's answer
+  // (seeded, at the app's URL, gone), one that keploy or the test began to
+  // answer is waited for, and any other request is continued. Of the
+  // context's, only one from no page or from a page with no route of the
+  // test's: Playwright sent the rest through their page. Where Playwright
+  // has them, keploy answers through its own answers past its API, which,
+  // as Playwright's own sending on, leave the request to the route that
+  // holds it: that route's continue, fulfill or abort then fails at the
+  // browser's end, with the error it gets with no keploy, and its fallback
+  // goes on to the next route.
+  type Quiet = { _innerFulfill?: Route['fulfill']; _innerContinue?: (fallback: boolean) => Promise<unknown> };
+  const release = async (removed: Held[], sent: (r: Request) => boolean = () => true): Promise<void> => {
+    const ends: Promise<unknown>[] = [];
+    for (const x of removed) {
+      for (const { route } of x?._activeInvocations ?? []) {
+        if (route === undefined || !sent(route.request())) continue;
+        const h = handed.get(route.request());
+        const q = route as unknown as Quiet;
+        if (h === undefined) {
+          const sendOn = q._innerContinue;
+          ends.push((typeof sendOn === 'function' ? sendOn.call(route, true) : route.continue()).catch(() => {}));
+        } else if (!h.started) {
+          h.gone = true;
+          const fulfill = q._innerFulfill;
+          ends.push(answer(route, h.m, typeof fulfill === 'function' ? (o) => fulfill.call(route, o) : h.own.fulfill, h).catch(() => {}));
+        } else {
+          ends.push(h.end);
+        }
+      }
+    }
+    await Promise.all(ends);
+  };
+  const noPageRoute = (r: Request): boolean => {
+    let p: Page | null = null;
+    try {
+      p = r.frame().page();
+    } catch {
+      // A Service Worker's request, or one whose frame is gone: no page.
+    }
+    return p === null || !(theirsOf.get(p)?.() ?? false);
   };
   const marked = (u: URL): boolean => u.searchParams.has(WORKER_PARAM);
   const lastUrl = (u: URL): boolean => urls.has(u.href);
@@ -2250,9 +2421,9 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
     await route.call(context, lastUrl, last);
   };
   await addLast();
-  await keepFirst(context, marked, first, addLast);
+  await keepFirst(context, marked, first, { again: addLast, left: (removed) => release(removed, noPageRoute), also: last });
   const onPage = (p: Page): void => {
-    keepFirst(p, marked, first).catch(() => {
+    keepFirst(p, marked, first, { left: (removed) => release(removed) }).catch(() => {
       // A page that closed as it opened: none of its requests is left.
     });
   };

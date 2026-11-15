@@ -2492,3 +2492,56 @@ test('seeded: after a test that throws, and after one that times out, the worker
     assert.deepEqual(begins.map((b) => [b.name, b.random, /^[0-9a-f]{32}$/.test(b.seed)]), [['throws', 'seeded', true], ['times out', 'seeded', true]]);
   } finally { await rec.close(); }
 });
+
+// A route of the test's own page that takes itself off as it gets a Web
+// Worker's script load (unroute, unrouteAll with each behavior), then
+// answers it (Playwright sent it on already: the page has no route left),
+// and unrouteAll's 'wait' from the test while the route holds the load
+// (unroute.spec.ts): seeded, each test fails with Playwright's own error,
+// or passes, as with seeding off; the app's server is asked for each
+// worker's script once, never with keploy's mark; seeded, the worker of each
+// test that passes draws its seeding's numbers.
+for (const engine of ENGINES) {
+  test(`seeded, in ${engine}: a page route that takes itself off (unroute, unrouteAll with each behavior), then continues, fulfills or aborts a Web Worker's script load, fails the test with Playwright's own error, as with seeding off (after 'ignoreErrors' it passes), one that falls back passes, and unrouteAll's 'wait' waits for the route's continue; the app's server is asked for each script once, never with the mark, and each worker runs, seeded`, async () => {
+    // The tests that pass, whose worker's message is kept.
+    const passing = ['unroute then fallback', 'unrouteAll ignoreErrors then abort', 'unrouteAll wait then continue'];
+    const j = journal();
+    const rec = await fakeAgent(j);
+    try {
+      const runs = {};
+      for (const mode of ['seeded', 'off']) {
+        const d = await drawsServer();
+        const from = j.events.length;
+        try {
+          const { tests, tmp, out } = await playwright(['unroute.spec.ts'], { ...keployEnv(rec.url), PW_BROWSER: engine, DRAWS_BASE: d.url, ...(mode === 'off' ? { KEPLOY_SEED_RANDOM: 'off' } : {}) });
+          const begins = j.events.slice(from).filter((e) => e.agent && e.agent.path === '/agent/scope/begin').map((e) => e.agent.body);
+          runs[mode] = { tests, tmp, out, seen: d.seen.slice(), seeds: Object.fromEntries(begins.map((b) => [b.name, b.seed])) };
+        } finally { await d.close(); }
+      }
+      for (const mode of ['seeded', 'off']) {
+        const { tests, tmp, out, seen } = runs[mode];
+        const c = tests['unroute then continue'];
+        assert.equal(c.status, 'failed', `${mode}\n${out}`);
+        assert.match(c.error, /route\.continue: Route is already handled!/, `${mode}: ${c.error}`);
+        const u = tests['unrouteAll default then fulfill'];
+        assert.equal(u.status, 'failed', `${mode}\n${out}`);
+        assert.match(u.error, /route\.fulfill: Route is already handled!/, `${mode}: ${u.error}`);
+        for (const title of passing) {
+          assert.equal(tests[title].status, 'passed', `${mode} ${title}: ${tests[title].error}\n${out}`);
+        }
+        for (const title of passing) {
+          const got = JSON.parse(fs.readFileSync(path.join(tmp, `${title}.json`), 'utf8'));
+          assert.equal(got.kind, 'pw', `${mode} ${title}`);
+          assert.match(got.href, /^http:\/\/127\.0\.0\.1:\d+\/ov\/pw\.js$/, `${mode} ${title}`);
+        }
+        assert.deepEqual(seen.filter((u) => u.startsWith('/ov/')), Array(5).fill('/ov/pw.js'), mode);
+        assert.deepEqual(seen.filter((u) => u.includes('__keploy_worker')), [], mode);
+      }
+      for (const title of passing) {
+        const [mark] = onceMarks(runs.seeded.seeds[title], [['/ov/pw.js', 'w']]);
+        const got = JSON.parse(fs.readFileSync(path.join(runs.seeded.tmp, `${title}.json`), 'utf8'));
+        assert.deepEqual(got.draws, workerAt('http://h/ov/pw.js', workerScript(mark.token, 0, 'w')).draws(), title);
+      }
+    } finally { await rec.close(); }
+  });
+}
