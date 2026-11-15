@@ -3108,6 +3108,9 @@ test('workerAnswer keeps the app\'s script\'s bytes: another charset\'s bytes, a
   assert.deepEqual([...be.subarray(0, 2)], [0xfe, 0xff]);
   assert.equal(new TextDecoder('utf-16be').decode(be), `#!/x\n${q}a()${tail}`);
   assert.equal(new TextDecoder('utf-16le').decode(at(Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('#!/x\r\na()', 'utf16le')]))), `#!/x\r\n${q}a()${tail}`);
+  // In UTF-16, U+2028 and U+2029 are one code unit each, and end the hashbang line too.
+  assert.equal(new TextDecoder('utf-16le').decode(at(Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('#!/x\u2028a()', 'utf16le')]))), `#!/x\u2028${q}a()${tail}`);
+  assert.equal(new TextDecoder('utf-16be').decode(at(Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from('#!/x\u2029a()', 'utf16le').swap16()]))), `#!/x\u2029${q}a()${tail}`);
   for (const [src, head] of [['#!/x\r\na\u00e9', '#!/x\r\n'], ['#!/x\ra', '#!/x\r'], ['#!/x\na', '#!/x\n'], ['#!/x\u2028a', '#!/x\u2028'], ['#!/x\u2029a', '#!/x\u2029'], ['\ufeff#!/x\na', '\ufeff#!/x\n']]) {
     assert.deepEqual(at(Buffer.from(src)), Buffer.concat([Buffer.from(head), a(q), Buffer.from(src.slice(head.length)), a(tail)]), JSON.stringify(src));
   }

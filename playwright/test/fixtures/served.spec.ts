@@ -34,5 +34,5 @@ const start = async (page: Page, list: Start[]): Promise<void> => {
 };
 
 test('latin1', async ({ page }) => start(page, [{ url: '/sv/l1.js' }, { url: '/sv/l1.js', type: 'module' }]));
-test('csp', async ({ page }) => start(page, [{ url: '/sv/cn.js' }, { url: '/sv/csn.js' }, { url: '/sv/ctt.js' }, { url: '/sv/cn.js', type: 'module' }]));
-test('redirect', async ({ page }) => start(page, [{ url: '/rd/w.js' }, { url: '/rdm/m.js', type: 'module' }, { url: '/rds/s.js', shared: true }]));
+test('csp', async ({ page }) => start(page, [{ url: '/sv/cn.js' }, { url: '/sv/csn.js' }, { url: '/sv/ctt.js' }, { url: '/sv/cn.js', type: 'module' }, { url: '/sv/cn.js', type: 'module' }]));
+test('redirect', async ({ page }) => start(page, [{ url: '/rd/w.js' }, { url: '/rdm/m.js', type: 'module' }, { url: '/rds/s.js', shared: true }, { url: '/rd/w.js' }]));
