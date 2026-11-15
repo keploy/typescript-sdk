@@ -2522,6 +2522,10 @@ test('workerAnswer: a Web Worker\'s is the app\'s script with its seeding\'s loa
     ['#!/usr/bin/env node\n\'use strict\';', true], ['"use strict" /* c\n */ a()', true],
     ['"use strict" + a', false], ['a(); "use strict";', false], ['"use\\x20strict";', false], ['"a" + b; "use strict";', false],
     ['', false], ['"use strict', false], ['"use\nstrict"', false], ['#!/x', false], ['`use strict`;', false], ['// "use strict"', false], ['"x\\"y"; "use strict"', true],
+    // U+2028 and U+2029 may stand in a string; a directive after one still counts.
+    ['"a b"; "use strict"', true], ['\'a b\'\n\'use strict\'', true],
+    // A line comment that ends the source ends the directive's statement.
+    ['"use strict" // c', true],
   ]) assert.equal(useStrict(src), strict, JSON.stringify(src));
   assert.equal(withPrefix('a', 'P;'), 'P;a');
   assert.equal(withPrefix('#!x\u2028a', 'P;'), '#!x\u2028P;a');
@@ -2538,7 +2542,7 @@ test('a Web Worker\'s seeding: an ErrorEvent\'s filename at the worker\'s own ma
     const read = (f) => w.run(`(() => { const e = new ErrorEvent(); e.f = ${JSON.stringify(f)}; return e.filename; })()`);
     assert.equal(read(href), kind === 's' ? href : 'http://h/w.js?a=1', kind);
     assert.equal(read(`${href}#h`), kind === 's' ? `${href}#h` : 'http://h/w.js?a=1#h', kind);
-    for (const f of ['http://h/o.js', markWorker('http://h/w.js?a=1', kind === 'w' ? 'm' : 'w', t), markWorker('http://h/w.js', kind, 'cd'.repeat(16)), 7]) assert.equal(read(f), f, `${kind} ${f}`);
+    for (const f of ['http://h/o.js', 'http://h/null.js', markWorker('http://h/w.js?a=1', kind === 'w' ? 'm' : 'w', t), markWorker('http://h/w.js', kind, 'cd'.repeat(16)), 7]) assert.equal(read(f), f, `${kind} ${f}`);
     assert.equal(w.run('(() => { try { return Object.getOwnPropertyDescriptor(ErrorEvent.prototype, \'filename\').get.call({}); } catch (e) { return e.message; } })()'), 'Illegal invocation', kind);
   }
 });
@@ -2684,6 +2688,15 @@ test('workerRoutes keeps its route on a page and on the context through the test
   await q.route('**/w.js', h);
   await q.unrouteAll();
   assert.equal(q.routes.length, 1);
+  // A page that shows no list of its routes: its own unrouteAll takes them
+  // off, whatever else it shows, and keploy's is added again.
+  const bare = r.page();
+  bare._unrouteInternal = async () => { throw new Error('not this way'); };
+  await turn();
+  await bare.route('**/w.js', h);
+  await bare.unrouteAll();
+  assert.equal(bare.routes.length, 1);
+  assert.equal(bare.routes[0].match(new URL(markWorker('http://h/w.js', 'w', 'f1'.repeat(16)))), true);
   assert.equal(q.routes[0].match(new URL(markWorker('http://h/w.js', 'w', 'f1'.repeat(16)))), true);
   const n = c2.routes.length;
   await c2.unrouteAll();
@@ -2701,7 +2714,8 @@ test('workerRoutes keeps its route on a page and on the context through the test
 // error; with inner, Playwright's own answers past its API (_innerFulfill,
 // _innerContinue: sent on) answer it and leave it to the route that holds
 // it, whose continue, fulfill or abort then fails at the browser's end
-// (route.<call>: ...). What the request saw is in did: keploy's fetch, its seeded answer,
+// (route.<call>: ...). After drop (the browser dropped the request: a
+// worker terminated as its script loads) every answer throws. What the request saw is in did: keploy's fetch, its seeded answer,
 // another answer, an error a handler threw ('threw', or 'dropped' after
 // 'ignoreErrors'), a handler that returned with no answer ('unanswered'),
 // or the URL the browser sent it to when no route answered it ('sent').
@@ -2744,9 +2758,11 @@ function played(inner = true) {
     let handling = false;
     let here = false;
     let answered = false;
+    let dropped = false;
     const request = { url: () => at, resourceType: () => 'script', headers: () => ({}), method: () => 'GET', postData: () => null, frame: () => { if (p === null) throw new Error('no frame'); return { page: () => p }; } };
     const kind = (o) => (String(o.body).startsWith('importScripts(') ? 'seeded' : 'fulfill');
     const serve = (call, what) => {
+      if (dropped) throw new Error(`route.${call}: Request context disposed.`);
       if (answered) throw new Error(`route.${call}: Route is already handled!`);
       answered = true;
       did.push(what);
@@ -2801,7 +2817,7 @@ function played(inner = true) {
       }
       if (!answered) did.push(['sent', at]);
     })();
-    return { did, end };
+    return { did, end, drop: () => { dropped = true; } };
   };
   return { context, page, send, log };
 }
@@ -2898,11 +2914,41 @@ test('workerRoutes, when the test takes a route off that began to answer a worke
   assert.deepEqual(x.did, ['fetch', 'seeded']);
 });
 
-test('workerRoutes, when the test takes its context\'s last route off while it holds a worker script\'s load: keploy answers one from a page with no route of the test\'s, or from no page (Playwright sends those on), and leaves one from a page that has one (Playwright sent it through that page) to the route', async () => {
-  for (const [from, sent] of [['bare', true], ['routed', false], ['none', true]]) {
+test('workerRoutes: a route of the test\'s that calls fulfill, abort, fallback or continue while keploy still answers its continue gets Playwright\'s error once that answer ended, and the load is answered once; one the browser dropped while keploy fetched its script (a worker terminated as it loads) is still counted answered, and the route\'s next call waits no more', async () => {
+  for (const [how, drop] of [['fulfill', false], ['abort', false], ['fallback', false], ['continue', false], ['abort', true]]) {
+    const label = `${how}${drop ? ' dropped' : ''}`;
+    const answered = [];
+    const { context, page, send } = played();
+    await workerRoutes(context, { answered: (q) => answered.push(q.url()) });
+    const p = page();
+    await turn();
+    let release = () => {};
+    const held = new Promise((res) => { release = res; });
+    let first = null;
+    let second = null;
+    await p.route(uwAt, async (route) => {
+      first = route.continue().then(() => 'ok', (e) => e.message);
+      second = (how === 'fulfill' ? route.fulfill({ body: 'own' }) : route[how]()).then(() => 'ok', (e) => e.message);
+      await turn();
+      if (drop) x.drop();
+      release();
+      await first;
+    });
+    const x = send(markWorker('http://h/uw.js', 'w', 'e4'.repeat(16)), p, held);
+    await x.end;
+    // Before the second call is awaited: it waits on the first's end.
+    assert.deepEqual(answered, ['http://h/uw.js'], label);
+    assert.deepEqual(x.did, drop ? ['fetch', 'unanswered'] : ['fetch', 'seeded'], label);
+    assert.equal(await first, drop ? 'route.fulfill: Request context disposed.' : 'ok', label);
+    assert.equal(await second, drop ? 'route.abort: Request context disposed.' : 'Route is already handled!', label);
+  }
+});
+
+test('workerRoutes, when the test takes its context\'s last route off while it holds a worker script\'s load: keploy answers one from a page with no route of the test\'s (one keploy has not seen yet too), or from no page (Playwright sends those on), and leaves one from a page that has one (Playwright sent it through that page) to the route', async () => {
+  for (const [from, sent] of [['bare', true], ['routed', false], ['none', true], ['unseen', true]]) {
     const { context, page, send } = played();
     await workerRoutes(context);
-    const p = page();
+    const p = from === 'unseen' ? { _routes: [] } : page();
     await turn();
     if (from === 'routed') await p.route(() => true, (route) => route.fallback());
     let early = null;

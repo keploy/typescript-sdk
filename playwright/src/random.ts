@@ -1854,9 +1854,11 @@ export function useStrict(source: string): boolean {
     const q = source[s.at];
     if (q !== '"' && q !== '\'') return false;
     let j = s.at + 1;
+    // A string may hold U+2028 and U+2029; a line feed or carriage return
+    // in one, unescaped, makes the script a syntax error, which the browser
+    // refuses whatever comes ahead of it.
     while (j < n && source[j] !== q) {
       if (source[j] === '\\') j++;
-      else if (eol.test(source[j])) return false;
       j++;
     }
     if (j >= n) return false;

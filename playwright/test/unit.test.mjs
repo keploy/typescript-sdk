@@ -504,6 +504,23 @@ test('settle (Chromium): the script load of a Web Worker its document terminated
   ctx2.emit('request', load(f, 'http://h/w.js'));
   off.webWorkerStopped(d2, 'http://h/w.js', 1);
   assert.equal(off.size, 1);
+  // A fetch at a Web Worker's URL is no worker's load: the second worker's
+  // load is the one dropped, and the fetch is still waited for.
+  const ctx3 = fakeContext();
+  const on = new Inflight(ctx3, true);
+  const p3 = new EventEmitter();
+  ctx3.emit('page', p3);
+  const h = { page: () => p3 };
+  const d3 = on.webWorkerDocument(h);
+  const a1 = load(h, 'http://h/w.js');
+  const viaFetch = load(h, 'http://h/w.js', 'fetch');
+  const a2 = load(h, 'http://h/w.js');
+  for (const r of [a1, viaFetch, a2]) ctx3.emit('request', r);
+  on.webWorkerStopped(d3, 'http://h/w.js', 2);
+  assert.equal(on.size, 2);
+  ctx3.emit('requestfinished', viaFetch);
+  ctx3.emit('requestfinished', a1);
+  assert.equal(on.size, 0);
 });
 
 test('settle (Chromium): a commit with no answer (a route change inside the page) keeps the document, so its word still drops the load of a Web Worker it terminated; a load at a URL keploy marked for its own route is waited for though its place was terminated before it was reported (keploy\'s route ends it)', async () => {
