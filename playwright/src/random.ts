@@ -1532,6 +1532,20 @@ ${DRAW_JS}
     const n = typeof o === 'string' ? o : o !== null && typeof o === 'object' && o.name !== undefined ? String(o.name) : '';
     return hex(seed + '\\nshared worker\\n' + u.pathname + '\\n' + n);
   });
+  // An error a Web Worker's script lets out reaches its Worker here naming
+  // the script it was thrown in (an ErrorEvent's filename): Firefox and
+  // WebKit name the worker's marked URL (workerAnswer), shown here with no
+  // mark, as Chromium names it.
+  try {
+    const E = g.ErrorEvent;
+    const d = typeof E === 'function' ? Object.getOwnPropertyDescriptor(E.prototype, 'filename') : undefined;
+    if (d && typeof d.get === 'function') {
+      const get = d.get;
+      const mark = new RegExp(${JSON.stringify(`[?&]${WORKER_PARAM}=[wm]\\.[0-9a-f]{32}(?![.0-9a-f])`)}, 'g');
+      const v = { get filename() { const f = get.call(this); return typeof f === 'string' ? f.replace(mark, '') : f; } };
+      Object.defineProperty(E.prototype, 'filename', { get: Object.getOwnPropertyDescriptor(v, 'filename').get, set: d.set, enumerable: d.enumerable, configurable: true });
+    }
+  } catch (e) {}
 })();
 `;
 }
@@ -1540,21 +1554,22 @@ ${DRAW_JS}
  * A worker's script URL, marked (initScript), read back: its kind ('w' a
  * classic Web Worker's script, 'm' a module Web Worker's, 's' a classic
  * Shared Worker's, 'x' a module Shared Worker's, 'p' the seeding that the
- * answer to 'm' imports, 't' a seeded Web Worker telling keploy the address
+ * answer to 'm' imports, 'q' the seeding that the answer to 'w' loads
+ * (importScripts), 't' a seeded Web Worker telling keploy the address
  * of a worker it started that keploy cannot mark: NESTED_JS), its token,
- * the instance n of a token ('p'; -1 for the others), and
+ * the instance n of a token ('p' and 'q'; -1 for the others), and
  * the URL with no mark, as the app asked for it. null for a URL with no
  * mark keploy made.
  */
-export type WorkerMark = { kind: 'w' | 'm' | 's' | 'x' | 'p' | 't'; token: string; n: number; url: string };
+export type WorkerMark = { kind: 'w' | 'm' | 's' | 'x' | 'p' | 'q' | 't'; token: string; n: number; url: string };
 
 export function workerMark(href: string): WorkerMark | null {
   const i = href.indexOf('#');
   const b = i < 0 ? href : href.slice(0, i);
-  const m = /[?&]__keploy_worker=([wmsxpt])\.([0-9a-f]{32})(?:\.(\d{1,9}))?$/.exec(b);
+  const m = /[?&]__keploy_worker=([wmsxpqt])\.([0-9a-f]{32})(?:\.(\d{1,9}))?$/.exec(b);
   if (m === null) return null;
   const kind = m[1] as WorkerMark['kind'];
-  const numbered = kind === 'p';
+  const numbered = kind === 'p' || kind === 'q';
   if (numbered !== (m[3] !== undefined)) return null;
   return { kind, token: m[2], n: numbered ? Number(m[3]) : -1, url: b.slice(0, m.index) + (i < 0 ? '' : href.slice(i)) };
 }
@@ -1594,9 +1609,14 @@ ${STREAM_JS}
   // browser's own call throws in a seeded function or getter keeps, in V8
   // and WebKit, a stack of its own, made as it was thrown, with the seeding's
   // frames: they are left out of it before it reaches the caller, and a
-  // stack with none, or that is no string, stays as it was.
+  // stack with none, or that is no string, stays as it was. A Web Worker's
+  // app's script runs at the worker's own marked URL, after its seeding
+  // (workerAnswer): a frame there is the app's, kept, with the mark taken
+  // off (each engine names the app's URL there already: the answer's
+  // sourceURL).
   const marked = new RegExp(${JSON.stringify(`[?&;]${WORKER_PARAM}=`)});
-  const unmark = (s) => s.split('\\n').filter((l) => !marked.test(l)).join('\\n');
+  const main = ${kind === 'w' || kind === 'm' ? `new RegExp(${JSON.stringify(`[?&]${WORKER_PARAM}=${kind}\\.${token}(?![.0-9a-f])`)}, 'g')` : 'null'};
+  const unmark = (s) => s.split('\\n').map((l) => (main === null ? l : l.replace(main, ''))).filter((l) => !marked.test(l)).join('\\n');
   const thrown = (e) => {
     try {
       const d = Object.getOwnPropertyDescriptor(e, 'stack');
@@ -1676,6 +1696,20 @@ ${DRAW_JS}
       if (typeof get !== 'function') continue;
       const v = { get stack() { const s = get.call(this); return typeof s === 'string' ? unmark(s) : s; } };
       Object.defineProperty(C.prototype, 'stack', { get: Object.getOwnPropertyDescriptor(v, 'stack').get, set: d.set, enumerable: d.enumerable, configurable: true });
+    } catch (e) {}
+  }
+  // An error the app's script lets out names the script it was thrown in
+  // (an ErrorEvent's filename): Firefox and WebKit name a Web Worker's
+  // marked URL, shown here with no mark, as Chromium names it.
+  if (main !== null) {
+    try {
+      const E = g.ErrorEvent;
+      const d = typeof E === 'function' ? Object.getOwnPropertyDescriptor(E.prototype, 'filename') : undefined;
+      if (d && typeof d.get === 'function') {
+        const get = d.get;
+        const v = { get filename() { let f; try { f = get.call(this); } catch (e) { throw thrown(e); } return typeof f === 'string' ? f.replace(main, '') : f; } };
+        Object.defineProperty(E.prototype, 'filename', { get: Object.getOwnPropertyDescriptor(v, 'filename').get, set: d.set, enumerable: d.enumerable, configurable: true });
+      }
     } catch (e) {}
   }
 ${kind === 'w' || kind === 'm' ? NESTED_JS(token, reach) : ''}})();
@@ -1769,9 +1803,93 @@ export function cspAllowsData(headers: Record<string, string>): boolean {
 }
 
 /**
+ * Where keploy's first statement goes in a script's source: ahead of it, or
+ * after its hashbang line (#!, which only a source's very start may hold),
+ * so every line of the app's keeps its number.
+ */
+export function withPrefix(source: string, prefix: string): string {
+  if (!source.startsWith('#!')) return prefix + source;
+  const m = /\r\n|[\n\r\u2028\u2029]/.exec(source);
+  if (m === null) return `${source}\n${prefix}`;
+  const i = m.index + m[0].length;
+  return source.slice(0, i) + prefix + source.slice(i);
+}
+
+/**
+ * Whether a classic script's directive prologue (the string statements it
+ * starts with, after a hashbang line, white space and comments, each ended
+ * by a semicolon, a line's end or the source's) holds 'use strict' written
+ * with no escape, which makes the whole script strict.
+ */
+export function useStrict(source: string): boolean {
+  const n = source.length;
+  const eol = /[\n\r\u2028\u2029]/;
+  // From at, past white space and comments; nl: whether a line ended there.
+  const skip = (at: number): { at: number; nl: boolean } => {
+    let nl = false;
+    for (;;) {
+      const c = source[at];
+      if (c === undefined) return { at, nl };
+      if (eol.test(c)) { nl = true; at++; } else if (/\s/.test(c)) at++;
+      else if (source.startsWith('//', at)) {
+        const e = source.slice(at).search(eol);
+        if (e < 0) return { at: n, nl };
+        at += e;
+      } else if (source.startsWith('/*', at)) {
+        const e = source.indexOf('*/', at + 2);
+        if (e < 0) return { at: n, nl };
+        if (eol.test(source.slice(at, e))) nl = true;
+        at = e + 2;
+      } else return { at, nl };
+    }
+  };
+  let i = 0;
+  if (source.startsWith('#!')) {
+    const m = eol.exec(source);
+    if (m === null) return false;
+    i = m.index;
+  }
+  for (;;) {
+    const s = skip(i);
+    const q = source[s.at];
+    if (q !== '"' && q !== '\'') return false;
+    let j = s.at + 1;
+    while (j < n && source[j] !== q) {
+      if (source[j] === '\\') j++;
+      else if (eol.test(source[j])) return false;
+      j++;
+    }
+    if (j >= n) return false;
+    const raw = source.slice(s.at + 1, j);
+    const after = skip(j + 1);
+    if (source[after.at] === ';') i = after.at + 1;
+    else if (after.nl || after.at >= n) i = after.at;
+    else return false;
+    if (raw === 'use strict') return true;
+  }
+}
+
+/**
  * keploy's answer to a marked worker script ('w', 'm', 's' or 'x', for the
- * instance n of token): the worker's seeding, then the app's own script,
- * loaded from own, the URL the app asked for, with no mark. The app's
+ * instance n of token). A Web Worker's ('w', 'm') is the app's own script,
+ * source, as keploy fetched it, whose first statement loads the worker's
+ * seeding from a URL keploy marked ('q' for a classic worker, by
+ * importScripts, after a 'use strict' of the app's script's own when it has
+ * one, so it stays strict; 'p' for a module one, by an import ahead of every
+ * import of the app's, so it runs before any of them), on the app's first
+ * line, so each line keeps its number; then, unless the app's script names
+ * itself, a sourceURL of the URL the app asked for. The app's script is so
+ * loaded once, and runs at the worker's marked URL, after its seeding: a
+ * stack trace through it names the app's URL with no mark (each engine
+ * names a script by its sourceURL), and the worker's location and an
+ * ErrorEvent's filename hide the mark (workerScript); a module Web Worker's
+ * import.meta.url shows it, and the URLs its imports resolve against are
+ * the app's but for a fragment alone. When keploy could not fetch the
+ * app's script (source undefined), the worker gets its seeding, then loads
+ * the app's script itself, from own, as below.
+ *
+ * A Shared Worker's ('s', 'x') is the worker's seeding, then the app's own
+ * script, loaded from own, the URL the app asked for, with no mark. The app's
  * script so runs at its own URL: its import.meta.url, the URLs its imports
  * resolve against and a stack trace through it show no mark, and the
  * worker's location hides the one its script URL carries (workerScript).
@@ -1781,9 +1899,9 @@ export function cspAllowsData(headers: Record<string, string>): boolean {
  * before the worker takes any message or connection, and reports what the
  * app's script throws as the worker's own error, as an uncaught one at its
  * top level is (a Firefox stack, which goes on through the code that queued
- * it, leaves the answer's frames out: workerScript). A module Web Worker
- * imports its seeding (the route answers
- * that import, marked 'p') and then the app's script. Chromium and WebKit
+ * it, leaves the answer's frames out: workerScript); so does a Web Worker
+ * whose script keploy could not fetch, and such a module Web Worker
+ * imports its seeding (marked 'p') and then the app's script. Chromium and WebKit
  * let the route reach none of what a Shared Worker loads after its script,
  * so a module Shared Worker imports its seeding as a data: module (its
  * media type carries keploy's mark as a parameter, so a stack leaves the
@@ -1795,9 +1913,17 @@ export function cspAllowsData(headers: Record<string, string>): boolean {
  * order, each in a microtask of its own, to the handlers the app's script
  * sets.
  */
-export function workerAnswer(token: string, n: number, kind: 'w' | 'm' | 's' | 'x', own: string, dataOk = true, reach = false): string {
+export function workerAnswer(token: string, n: number, kind: 'w' | 'm' | 's' | 'x', own: string, dataOk = true, source?: string): string {
   const url = JSON.stringify(own);
-  if (kind === 'w' || kind === 's') return `${workerScript(token, n, kind, reach)}queueMicrotask(importScripts.bind(globalThis, ${url}));\n`;
+  if ((kind === 'w' || kind === 'm') && source !== undefined) {
+    const first = kind === 'w'
+      ? `${useStrict(source) ? '"use strict";' : ''}importScripts(${JSON.stringify(markWorker(own, 'q', token, n))});`
+      : `import ${JSON.stringify(markWorker(own, 'p', token, n))};`;
+    const named = /(?:\/\/|\/\*)[#@][ \t]*sourceURL[ \t]*=/.test(source);
+    return withPrefix(source, first) + (named ? '' : `\n//# sourceURL=${noFragment(own)}\n`);
+  }
+  if (kind === 'w') return `importScripts(${JSON.stringify(markWorker(own, 'q', token, n))});queueMicrotask(importScripts.bind(globalThis, ${url}));\n`;
+  if (kind === 's') return `${workerScript(token, n, kind)}queueMicrotask(importScripts.bind(globalThis, ${url}));\n`;
   if (kind === 'm') return `import ${JSON.stringify(markWorker(own, 'p', token, n))};\nimport ${url};\n`;
   const seeding = workerScript(token, n, 'x');
   if (dataOk) return `import ${JSON.stringify(`data:text/javascript;${WORKER_PARAM}=x.${token};base64,${Buffer.from(seeding).toString('base64')}`)};\nimport ${url};\n`;
@@ -1917,49 +2043,31 @@ function noFragment(url: string): string {
   return i < 0 ? url : url.slice(0, i);
 }
 
-const POLICIES = new Set(['no-referrer', 'no-referrer-when-downgrade', 'same-origin', 'origin', 'strict-origin', 'origin-when-cross-origin', 'strict-origin-when-cross-origin', 'unsafe-url']);
-
 /**
- * The Referer a worker whose script is at at sends with a request to its
- * own origin, under policy, the Referrer-Policy its script was answered
- * with (the last token it names that is a policy, in any case): none ('')
- * under no-referrer, its origin under origin and strict-origin, else its
- * URL with no fragment or user info.
+ * Whether the browser asks for r, at a URL keploy marked 'p' or 'q', as the
+ * seeding a Web Worker's answer loads (workerAnswer): a module worker's
+ * import of it ('p': as a worker's script, workerScriptLoad), a classic
+ * worker's importScripts of it ('q': sec-fetch-dest script where the route
+ * sees it; Chromium types it other), not as a request the worker's code
+ * makes there.
  */
-export function ownReferer(at: string, policy = ''): string {
-  let p = '';
-  for (const t of policy.split(',')) {
-    const v = t.trim().toLowerCase();
-    if (POLICIES.has(v)) p = v;
-  }
-  const u = new URL(noFragment(at));
-  if (p === 'no-referrer') return '';
-  if (p === 'origin' || p === 'strict-origin') return `${u.origin}/`;
-  u.username = '';
-  u.password = '';
-  return u.href;
-}
-
-/**
- * Whether r is a load of the kind a Web Worker's seeding makes of the app's
- * script (workerAnswer): importScripts for a classic one (sec-fetch-dest
- * script where the route sees it; Chromium types it other), a static import
- * for a module one (sec-fetch-dest worker; Chromium types it script).
- */
-function seedingLoad(r: Request, kind: 'w' | 'm'): boolean {
+function preludeLoad(r: Request, kind: 'p' | 'q'): boolean {
+  if (kind === 'p') return workerScriptLoad(r);
   const dest = r.headers()['sec-fetch-dest'];
-  if (dest !== undefined) return dest === (kind === 'w' ? 'script' : 'worker');
-  return r.resourceType() === (kind === 'w' ? 'other' : 'script');
+  if (dest !== undefined) return dest === 'script';
+  return r.resourceType() === 'other';
 }
 
 /**
  * Answers each marked worker script the test's context asks for with
  * workerAnswer, under the status and headers the app's server answered for
  * the script with no mark (a worker's policy comes from its script's
- * answer), and a module Web Worker's seeding (marked 'p') with
- * workerScript. A Web Worker's seeding's load of the app's script is
- * answered with what keploy's fetch for that answer got (kept), so the app's
- * server is asked for a Web Worker's script once, here; Chromium and WebKit
+ * answer), and a Web Worker's seeding (marked 'p' for a module one, 'q' for
+ * a classic one) with workerScript. A Web Worker's answer is the app's
+ * script keploy fetched for it, with the seeding's load ahead of it: the
+ * worker never loads the app's script again, so the test's routes and the
+ * app's server see a Web Worker's script loaded once, as with seeding off,
+ * under any referrer policy. Chromium and WebKit
  * route nothing a Shared Worker loads after its script, so it is asked for a
  * Shared Worker's twice: here, and by the worker, for the app's script. An answer
  * that is not ok goes to the worker as the server gave it; when keploy
@@ -1989,10 +2097,9 @@ function seedingLoad(r: Request, kind: 'w' | 'm'): boolean {
  * context's first, which answers it as above, at the URL a fallback gave it
  * too. What the test's continue and fallbacks ask (a URL, method, headers or
  * post data of their own) is what keploy's fetch of the script sends, and a
- * Web Worker's seeding's load of the app's script gets what that fetch got,
- * ahead of the test's routes, which so see the script once: a route that
- * answers once (times), counts its loads or picks the worker's script by its
- * destination sees what it sees with seeding off. A Shared Worker's seeding
+ * Web Worker runs what that fetch got: a route that answers once (times),
+ * counts its loads or picks the worker's script by its destination sees what
+ * it sees with seeding off. A Shared Worker's seeding
  * loads the app's script past every route (Chromium and WebKit route none
  * of its loads): one whose script the
  * test's routes asked for otherwise than the browser sent it gets the answer
@@ -2028,44 +2135,6 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
     if (k === 'method') return v !== h.method;
     return true;
   });
-  // The app's script a seeded Web Worker's seeding loads next (workerAnswer),
-  // kept from keploy's fetch for the worker's own load until the browser
-  // asks for it, and answered so ahead of the test's routes: the test's
-  // routes and the app's server see a Web Worker's script loaded once, as
-  // with seeding off. A seeding's load is told by its URL, the app's, and
-  // its Referer: the worker's marked URL, or, under a Referrer-Policy that
-  // sends less to the worker's own origin, what that policy sends (Chromium
-  // sends that for both kinds, Firefox and WebKit for a module worker), and
-  // by its kind (seedingLoad). Each is kept at each such Referer, with how
-  // many are kept at each URL. Chromium and WebKit route nothing a Shared
-  // Worker loads after its script, so none is kept for one.
-  type Kept = { kind: 'w' | 'm'; keys: string[]; answer: { status: number; headers: Record<string, string>; body: Buffer } };
-  const kept = new Map<string, Kept[]>();
-  const keptAt = new Map<string, number>();
-  const keyOf = (referer: string, url: string): string => `${referer}\n${noFragment(url)}`;
-  const keep = (h: Handed, kind: 'w' | 'm', answer: Kept['answer']): void => {
-    const policy = answer.headers['referrer-policy'];
-    const keys = [...new Set([keyOf(ownReferer(h.at), h.m.url), keyOf(ownReferer(h.at, policy), h.m.url)])];
-    const k: Kept = { kind, keys, answer };
-    for (const key of keys) kept.set(key, [...(kept.get(key) ?? []), k]);
-    const u = noFragment(h.m.url);
-    keptAt.set(u, (keptAt.get(u) ?? 0) + 1);
-  };
-  // The kept script r is the seeding's load of, taken, or null.
-  const take = (r: Request): Kept['answer'] | null => {
-    const k = kept.get(keyOf(r.headers().referer ?? '', r.url()))?.find((x) => seedingLoad(r, x.kind));
-    if (k === undefined) return null;
-    for (const key of k.keys) {
-      const rest = (kept.get(key) ?? []).filter((x) => x !== k);
-      if (rest.length > 0) kept.set(key, rest);
-      else kept.delete(key);
-    }
-    const u = noFragment(r.url());
-    const n = (keptAt.get(u) ?? 1) - 1;
-    if (n > 0) keptAt.set(u, n);
-    else keptAt.delete(u);
-    return k.answer;
-  };
   // A route's fetch with o is the request the test's routes asked for: o's
   // URL, method, headers and post data, or the request's (the URL the app
   // asked for, or one a fallback gave, and what fallbacks gave it).
@@ -2074,8 +2143,8 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
       await own(o);
       hooks.answered?.(route.request());
     };
-    if (m.kind === 'p') {
-      await fulfill({ status: 200, contentType: 'text/javascript', body: workerScript(m.token, m.n, 'm', reach) });
+    if (m.kind === 'p' || m.kind === 'q') {
+      await fulfill({ status: 200, contentType: 'text/javascript', body: workerScript(m.token, m.n, m.kind === 'p' ? 'm' : 'w', reach) });
       return;
     }
     const n = counts.get(m.token) ?? 0;
@@ -2087,6 +2156,7 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
     const whole = (m.kind === 's' || m.kind === 'x') && h !== undefined && otherwise(h);
     let status = 200;
     let headers: Record<string, string> = { 'content-type': 'text/javascript' };
+    let source: string | undefined;
     try {
       const got = await route.fetch(o);
       if (whole || !got.ok()) {
@@ -2099,25 +2169,19 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
       }
       status = got.status();
       headers = headersOf(got.headers());
-      if (h !== undefined && (m.kind === 'w' || m.kind === 'm')) keep(h, m.kind, { status, headers, body: await got.body() });
+      // A worker's script is read as UTF-8 whatever its charset says, as
+      // the browser reads it; keploy's answer is UTF-8 too.
+      if (m.kind === 'w' || m.kind === 'm') source = new TextDecoder().decode(await got.body());
     } catch {
       // The worker loads the app's script itself, and fails as it would.
     }
-    await fulfill({ status, headers, body: workerAnswer(m.token, n, m.kind as 'w' | 'm' | 's' | 'x', m.url, cspAllowsData(headers), reach) });
+    await fulfill({ status, headers, body: workerAnswer(m.token, n, m.kind as 'w' | 'm' | 's' | 'x', m.url, cspAllowsData(headers), source) });
   };
   const first = async (route: Route): Promise<void> => {
     const r = route.request();
     const m = workerMark(r.url());
     if (m === null) {
-      // A seeded Web Worker's seeding's load of the app's script: answered
-      // with what keploy fetched for the worker's own load. A worker's
-      // script load keploy handed on is none.
-      const k = handed.has(r) ? null : take(r);
-      if (k === null) await route.fallback();
-      else {
-        await route.fulfill(k);
-        hooks.answered?.(r);
-      }
+      await route.fallback();
       return;
     }
     // A seeded Web Worker's word of a worker keploy cannot mark: heard, then
@@ -2130,12 +2194,12 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
       hooks.answered?.(r);
       return;
     }
-    if (!workerScriptLoad(r)) {
+    const own = route.fulfill.bind(route);
+    if (m.kind === 'p' || m.kind === 'q' ? !preludeLoad(r, m.kind) : !workerScriptLoad(r)) {
       await route.fallback({ url: m.url });
       return;
     }
-    const own = route.fulfill.bind(route);
-    if (m.kind === 'p') {
+    if (m.kind === 'p' || m.kind === 'q') {
       await answer(route, m, own);
       return;
     }
@@ -2173,7 +2237,7 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
     }
     await answer(route, h.m, h.fulfill, h);
   };
-  const marked = (u: URL): boolean => u.searchParams.has(WORKER_PARAM) || keptAt.has(noFragment(u.href));
+  const marked = (u: URL): boolean => u.searchParams.has(WORKER_PARAM);
   const lastUrl = (u: URL): boolean => urls.has(u.href);
   const route = context.route;
   const addLast = async (): Promise<void> => {

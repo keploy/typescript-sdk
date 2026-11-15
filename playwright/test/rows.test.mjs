@@ -1536,9 +1536,11 @@ for (const engine of ENGINES) {
       assert.match(w.shared.href, /^http:\/\/127\.0\.0\.1:\d+\/wk\/shared\.js$/);
       assert.match(w.mshared.href, /^http:\/\/127\.0\.0\.1:\d+\/wk\/mshared\.js$/);
       for (const c of [w.c1, w.c2, w['c1+2']]) assert.match(c.href, /^http:\/\/127\.0\.0\.1:\d+\/wk\/cshared\.js$/);
-      // The app's script runs at its own URL: its import.meta.url and a
-      // stack through it show no mark.
-      assert.match(w.mod.meta, /^http:\/\/127\.0\.0\.1:\d+\/wk\/mod\.js$/);
+      // A Shared Worker's app's script runs at its own URL: its
+      // import.meta.url shows no mark; a module Web Worker's runs at its
+      // marked URL, which its import.meta.url shows (workerAnswer). A stack
+      // through either shows no mark.
+      assert.equal(w.mod.meta, markWorker(w.mod.href, 'm', mod.token));
       assert.match(w.mshared.meta, /^http:\/\/127\.0\.0\.1:\d+\/wk\/mshared\.js$/);
       for (const c of [w.c1, w.c2, w['c1+2']]) assert.match(c.meta, /^http:\/\/127\.0\.0\.1:\d+\/wk\/cshared\.js$/);
       // No code of keploy's is on a stack through the app's script, at its
@@ -1818,7 +1820,9 @@ for (const engine of ENGINES) {
         if (seeds || k === 'a' || k === 'am') assert.deepEqual(w[k].draws, model, `${k} ${facts}`);
         else assert.notDeepEqual(w[k].draws, model, `${k} ${facts}`);
       }
-      for (const k of ['am', 'bm']) assert.equal(w[k].meta, w[k].href);
+      // A seeded module Web Worker runs the app's script at its marked URL:
+      // its import.meta.url shows the mark (workerAnswer).
+      for (const k of ['am', 'bm']) assert.equal(w[k].meta, seeds || k === 'am' ? markWorker(w[k].href, 'm', m[k].token) : w[k].href, k);
       const said = r.tests.nested.stdout.split('\n').filter((l) => l.startsWith('keploy: in nested, ')).map((l) => l.replace(/:\d+\//, ':<port>/'));
       const at = (p) => `http://127.0.0.1:<port>/nw/${p}`;
       assert.deepEqual(said.sort(), [unplacedLine('nested', 'blob:', 'worker'), sharedWorkerLine('nested', at('s.js')),
