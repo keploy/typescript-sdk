@@ -1742,7 +1742,7 @@ for (const engine of ENGINES) {
 }
 
 for (const engine of ENGINES) {
-  test(`served, in ${engine}: a worker's script in Latin-1 reads the same seeded as off (Chromium: as Latin-1); one served with a Content-Security-Policy (default-src 'none', script-src 'none', require-trusted-types-for 'script', and a module one under default-src 'none') runs seeded, its draws the seed's, the module one named as seeded late; one the server redirects (classic, module, and a Shared Worker) runs at the URL the redirect gives, loading what sits beside it there, as off, unseeded and named, the server asked for its first URL ${engine === 'firefox' ? 'once' : 'twice'}; the server never sees keploy's mark`, async () => {
+  test(`served, in ${engine}: a worker's script in Latin-1 reads the same seeded as off (Chromium: as Latin-1); one served with a Content-Security-Policy (default-src 'none', script-src 'none', require-trusted-types-for 'script', and a module one under default-src 'none') runs seeded, its draws the seed's, the module one named as seeded late; one the server redirects (classic, module, and a Shared Worker) ${engine === 'chromium' ? 'does not start seeded (keploy stops its load, which Chromium would send round the redirect again and again) and is named, the server asked for its first URL once and never for the next, and off it ' : ''}runs at the URL the redirect gives, loading what sits beside it there, as off${engine === 'chromium' ? '' : ', unseeded and named, the server asked for its first URL ' + (engine === 'webkit' ? 'twice' : 'once')}; the server never sees keploy's mark`, async () => {
     const j = journal();
     const a = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' ? { body: { v: 1, status: 'ok', seed: 'cd'.repeat(16) } } : undefined));
     try {
@@ -1756,19 +1756,25 @@ for (const engine of ENGINES) {
         assert.deepEqual(r.drew.latin1.map((w) => w.k), ['l1', 'l1'], mode);
         assert.deepEqual(r.drew.csp.map((w) => w.k), ['cn', 'csn', 'ctt', 'cn'], mode);
         for (const [w, p] of [...r.drew.latin1.map((w) => [w, '/sv/l1.js']), ...r.drew.csp.map((w) => [w, `/sv/${w.k}.js`])]) assert.match(w.href, at(p), mode);
-        const [rd, rdm, rds] = r.drew.redirect;
-        assert.deepEqual([rd.k, rd.H, rdm.k, rdm.H, rds.k, rds.H], ['rd', 'v2', 'rdm', 'v2', 'rds', 'v2'], mode);
-        assert.match(rd.href, at('/rd/v2/w.js'), mode);
-        assert.match(rdm.href, at('/rdm/v2/m.js'), mode);
-        assert.match(rdm.meta, at('/rdm/v2/m.js'), mode);
-        assert.match(rds.href, at('/rds/v2/s.js'), mode);
+        // Chromium, seeded: keploy stopped each redirected load, so none starts.
+        const stops = engine === 'chromium' && (r === s1 || r === s2);
+        if (stops) {
+          assert.deepEqual(r.drew.redirect, ['error', 'error', 'error'], mode);
+        } else {
+          const [rd, rdm, rds] = r.drew.redirect;
+          assert.deepEqual([rd.k, rd.H, rdm.k, rdm.H, rds.k, rds.H], ['rd', 'v2', 'rdm', 'v2', 'rds', 'v2'], mode);
+          assert.match(rd.href, at('/rd/v2/w.js'), mode);
+          assert.match(rdm.href, at('/rdm/v2/m.js'), mode);
+          assert.match(rdm.meta, at('/rdm/v2/m.js'), mode);
+          assert.match(rds.href, at('/rds/v2/s.js'), mode);
+        }
         assert.deepEqual(r.seen.filter((u) => u.includes('__keploy_worker')), [], mode);
         // Each Web Worker's script loaded once (two start at each of /sv/l1.js and /sv/cn.js).
         assert.deepEqual(['/sv/l1.js', '/sv/cn.js', '/sv/csn.js', '/sv/ctt.js'].map((p) => r.seen.filter((u) => u === p).length), [2, 2, 1, 1], mode);
-        // A redirect's next URL, once; its first: once off and in Firefox, twice seeded in Chromium and WebKit.
+        // A redirect's next URL, once (never where keploy stopped the load); its first: once, but twice seeded in WebKit.
         for (const p of ['/rd/w.js', '/rdm/m.js', '/rds/s.js']) {
-          assert.equal(r.seen.filter((u) => u === p.replace(/\/([^/]+)$/, '/v2/$1')).length, 1, `${mode} ${p}`);
-          assert.equal(r.seen.filter((u) => u === p).length, r === s1 || r === s2 ? (engine === 'firefox' ? 1 : 2) : 1, `${mode} ${p}`);
+          assert.equal(r.seen.filter((u) => u === p.replace(/\/([^/]+)$/, '/v2/$1')).length, stops ? 0 : 1, `${mode} ${p}`);
+          assert.equal(r.seen.filter((u) => u === p).length, (r === s1 || r === s2) && engine === 'webkit' ? 2 : 1, `${mode} ${p}`);
         }
       }
       // The Latin-1 text reads as off: Chromium decodes a worker's script by its charset, Firefox and WebKit as UTF-8.
@@ -1780,8 +1786,8 @@ for (const engine of ENGINES) {
       assert.deepEqual(draws(s1, 'csp'), draws(s2, 'csp'));
       assert.notDeepEqual(draws(o1, 'latin1'), draws(o2, 'latin1'));
       assert.notDeepEqual(draws(o1, 'csp'), draws(o2, 'csp'));
-      for (const i of [0, 1, 2]) assert.notDeepEqual(s1.drew.redirect[i].draws, s2.drew.redirect[i].draws, `redirect ${i}`);
-      // The lines: the module one under a policy, seeded late; each redirected one, once, saying the second ask off Firefox.
+      if (engine !== 'chromium') for (const i of [0, 1, 2]) assert.notDeepEqual(s1.drew.redirect[i].draws, s2.drew.redirect[i].draws, `redirect ${i}`);
+      // The lines: the module one under a policy, seeded late; each redirected one, once: in WebKit saying the second ask, in Chromium that it does not start.
       const said = (r, re) => r.lines.filter((l) => re.test(l));
       for (const r of [s1, s2]) {
         assert.equal(said(r, /^keploy: in .*csp.*, the module Web Worker at http:\/\/127\.0\.0\.1:\d+\/sv\/cn\.js is served with a Content-Security-Policy/).length, 1);
@@ -1789,9 +1795,11 @@ for (const engine of ENGINES) {
         // Firefox routes no Shared Worker's script: its redirected one is named as one keploy cannot reach.
         const moved = engine === 'firefox' ? ['/rd/w.js', '/rdm/m.js'] : ['/rd/w.js', '/rdm/m.js', '/rds/s.js'];
         for (const p of moved) {
-          const l = said(r, new RegExp(`^keploy: in .*redirect.*, the worker at http://127\\.0\\.0\\.1:\\d+${p.replace(/\./g, '\\.')} draws the browser's own random numbers, .*: the server redirects its script, `));
+          const how = engine === 'chromium' ? 'does not start' : "draws the browser's own random numbers, .*";
+          const l = said(r, new RegExp(`^keploy: in .*redirect.*, the worker at http://127\\.0\\.0\\.1:\\d+${p.replace(/\./g, '\\.')} ${how}: the server redirects its script, `));
           assert.equal(l.length, 1, p);
-          assert.equal(/once more than with seeding off/.test(l[0]), engine !== 'firefox', p);
+          assert.equal(/once more than with seeding off/.test(l[0]), engine === 'webkit', p);
+          assert.equal(/stopped the load after asking the server for the script once/.test(l[0]), engine === 'chromium', p);
         }
         assert.equal(said(r, /redirects its script/).length, moved.length);
         assert.equal(said(r, /^keploy: in .*redirect.*, the Shared Worker at http:\/\/127\.0\.0\.1:\d+\/rds\/s\.js draws the browser's own random numbers, .*: it is a Shared Worker, and Firefox does not let keploy reach/).length, engine === 'firefox' ? 1 : 0);

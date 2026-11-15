@@ -269,15 +269,15 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
           process.stdout.write(`${lateLine(name, a)}\n`);
         },
         // A worker whose script the server redirects, which so runs
-        // unseeded: once for each address.
-        redirected: (at, twice) => {
+        // unseeded, or in Chromium does not start: once for each address.
+        redirected: (at, how) => {
           const a = pageAddress(at);
           const k = `redirected\n${a}`;
           if (told.has(k)) return;
           told.add(k);
-          process.stdout.write(`${redirectLine(name, a, twice)}\n`);
+          process.stdout.write(`${redirectLine(name, a, how)}\n`);
         },
-      }, browserName === 'webkit', browserName === 'firefox');
+      }, browserName);
       await context.addInitScript({ content: initScript(s.seed, report, mark, browserName !== 'firefox', drawnReport) });
       const placing = placePages(context, mark);
       restore = placing.restore;
