@@ -14,6 +14,7 @@ import { LOADS_KEY, OFF_LINE, SEEDED_LINE, fakerLine, initScript, processRandom,
 import { busyWorkerLine, sharedWorkerLine } from '../dist/settle.js';
 import { NO_NOTE_LINE, readNote, unreadNoteLine } from '../dist/note.js';
 import { BLANK_DRAWS, DRAWS, documentAt, workerAt } from './draws.mjs';
+import { webkitDroppedLine, webkitDroppedSharedWorker } from './webkit.mjs';
 
 const PKG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(PKG, 'node_modules', '@playwright', 'test', 'cli.js');
@@ -1860,7 +1861,7 @@ for (const engine of ENGINES) {
 }
 
 for (const engine of ENGINES) {
-  test(`served, in ${engine}: a worker's script in Latin-1 reads the same seeded as off (Chromium: as Latin-1); one served with a Content-Security-Policy (default-src 'none', script-src 'none', require-trusted-types-for 'script', and two module ones under default-src 'none') runs seeded, its draws the seed's, the module ones named as seeded late once; one the server redirects (classic, module, a Shared Worker, and the classic one again) ${engine === 'chromium' ? 'does not start seeded (keploy stops its load, which Chromium would send round the redirect again and again) and is named once for each address, the server asked for its first URL once for each start and never for the next, and off it ' : ''}runs at the URL the redirect gives, loading what sits beside it there, as off${engine === 'chromium' ? '' : ', unseeded and named, the server asked for its first URL ' + (engine === 'webkit' ? 'twice' : 'once')}; the server never sees keploy's mark`, async () => {
+  test(`served, in ${engine}: a worker's script in Latin-1 reads the same seeded as off (Chromium: as Latin-1); one served with a Content-Security-Policy (default-src 'none', script-src 'none', require-trusted-types-for 'script', and two module ones under default-src 'none') runs seeded, its draws the seed's, the module ones named as seeded late once; one the server redirects (classic, module, a Shared Worker, and the classic one again) ${engine === 'chromium' ? 'does not start seeded (keploy stops its load, which Chromium would send round the redirect again and again) and is named once for each address, the server asked for its first URL once for each start and never for the next, and off it ' : ''}runs at the URL the redirect gives, loading what sits beside it there, as off${engine === 'chromium' ? '' : ', unseeded and named, the server asked for its first URL ' + (engine === 'webkit' ? 'twice' : 'once')}${engine === 'webkit' ? " (a run where WebKit itself dropped the Shared Worker, as it sometimes does with no keploy, is taken only on exactly that record, and said)" : ''}; the server never sees keploy's mark`, async (t) => {
     const j = journal();
     const a = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' ? { body: { v: 1, status: 'ok', seed: 'cd'.repeat(16) } } : undefined));
     try {
@@ -1880,12 +1881,17 @@ for (const engine of ENGINES) {
           assert.deepEqual(r.drew.redirect, ['error', 'error', 'error', 'error'], mode);
         } else {
           const [rd, rdm, rds, rd2] = r.drew.redirect;
-          assert.deepEqual([rd.k, rd.H, rdm.k, rdm.H, rds.k, rds.H, rd2.k, rd2.H], ['rd', 'v2', 'rdm', 'v2', 'rds', 'v2', 'rd', 'v2'], mode);
+          // WebKit sometimes never runs this Shared Worker, with no keploy too (test/webkit.mjs): only that record is
+          // taken in place of its answer, and the row says so.
+          const dropped = webkitDroppedSharedWorker(engine, rds, r.seen);
+          if (dropped) t.diagnostic(webkitDroppedLine(mode));
+          assert.deepEqual([rd.k, rd.H, rdm.k, rdm.H, rd2.k, rd2.H], ['rd', 'v2', 'rdm', 'v2', 'rd', 'v2'], mode);
+          if (!dropped) assert.deepEqual([rds.k, rds.H], ['rds', 'v2'], mode);
           assert.match(rd.href, at('/rd/v2/w.js'), mode);
           assert.match(rd2.href, at('/rd/v2/w.js'), mode);
           assert.match(rdm.href, at('/rdm/v2/m.js'), mode);
           assert.match(rdm.meta, at('/rdm/v2/m.js'), mode);
-          assert.match(rds.href, at('/rds/v2/s.js'), mode);
+          if (!dropped) assert.match(rds.href, at('/rds/v2/s.js'), mode);
         }
         assert.deepEqual(r.seen.filter((u) => u.includes('__keploy_worker')), [], mode);
         // Each Web Worker's script loaded once (two start at /sv/l1.js, three at /sv/cn.js).
