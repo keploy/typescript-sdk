@@ -1888,19 +1888,6 @@ export function oneLine(seeding: string): string {
 }
 
 /**
- * Where keploy's first statement goes in a script's source: ahead of it, or
- * after its hashbang line (#!, which only a source's very start may hold),
- * so every line of the app's keeps its number.
- */
-export function withPrefix(source: string, prefix: string): string {
-  if (!source.startsWith('#!')) return prefix + source;
-  const m = /\r\n|[\n\r\u2028\u2029]/.exec(source);
-  if (m === null) return `${source}\n${prefix}`;
-  const i = m.index + m[0].length;
-  return source.slice(0, i) + prefix + source.slice(i);
-}
-
-/**
  * Whether a classic script's directive prologue (the string statements it
  * starts with, after a hashbang line, white space and comments, each ended
  * by a semicolon, a line's end or the source's) holds 'use strict' written

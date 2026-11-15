@@ -3,7 +3,7 @@
 // a page. No browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DOC_KEY, ENV_SEED_RANDOM, FAKER, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, esmFile, exportOf, fakerLine, fakersIn, fakersOf, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatFaker, seatRandom, seedFaker, seedingFromEnv, setAside, unplacedLine, unseededLine, WORKER_PARAM, SW_CHANNEL, SW_LOCK, markWorker, useStrict, withPrefix, withBytes, oneLine, lateLine, redirectLine, STOPPED, workerMark, workerScript, workerRoutes, workerAnswer, cspAllowsData } from '../dist/random.js';
+import { DOC_KEY, ENV_SEED_RANDOM, FAKER, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, esmFile, exportOf, fakerLine, fakersIn, fakersOf, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatFaker, seatRandom, seedFaker, seedingFromEnv, setAside, unplacedLine, unseededLine, WORKER_PARAM, SW_CHANNEL, SW_LOCK, markWorker, useStrict, withBytes, oneLine, lateLine, redirectLine, STOPPED, workerMark, workerScript, workerRoutes, workerAnswer, cspAllowsData } from '../dist/random.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -2623,8 +2623,6 @@ test('workerAnswer: a Web Worker\'s is the app\'s script with its seeding\'s loa
     // U+2028 and U+2029 end a line as a line feed does, so the directive after one is a statement of its own.
     ['"a"\u2028"use strict"', true], ['"a"\u2029"use strict"', true], ['"a" "use strict"', false],
   ]) assert.equal(useStrict(src), strict, JSON.stringify(src));
-  assert.equal(withPrefix('a', 'P;'), 'P;a');
-  assert.equal(withPrefix('#!x\u2028a', 'P;'), '#!x\u2028P;a');
 });
 
 test('a Web Worker\'s seeding: an ErrorEvent\'s filename at the worker\'s own marked URL shows it with no mark; another, one that is no string and the getter\'s own error stay as they were; a Shared Worker\'s seeding leaves it as it is', () => {
