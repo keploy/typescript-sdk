@@ -645,6 +645,9 @@ export const DOC_KEY = '__keploy_random_doc';
 // off before the request leaves the browser.
 export const WORKER_PARAM = '__keploy_worker';
 
+/** The statuses a browser follows to the URL their Location gives. */
+const REDIRECTS = new Set([301, 302, 303, 307, 308]);
+
 // The BroadcastChannel, by the context's mark, on which the documents of a
 // context say the scopes of the Service Worker registrations they make and
 // find (initScript).
@@ -2064,6 +2067,12 @@ export type WorkerHooks = {
    * Content-Security-Policy: it runs after the modules the script imports.
    */
   late?: (at: string) => void;
+  /**
+   * The server redirected the script of the worker at at (its origin and
+   * path), which so runs unseeded at the URL the redirect gives; twice: the
+   * server was asked for the script's first URL twice (Chromium, WebKit).
+   */
+  redirected?: (at: string, twice: boolean) => void;
 };
 
 /**
@@ -2076,6 +2085,18 @@ export function lateLine(name: string, at: string): string {
     'so keploy put its seeding on the first line of the worker\'s script, and it runs after the modules the script imports: ' +
     'a random number one of those modules draws as it loads is the browser\'s own, so it may differ at replay; ' +
     'if one does, serve the worker\'s script with no Content-Security-Policy where the tests run, and keploy loads its seeding ahead of those modules.';
+}
+
+/**
+ * The line a test shows, once for each address, for a worker whose script
+ * the server redirects (WorkerHooks redirected).
+ */
+export function redirectLine(name: string, at: string, twice: boolean): string {
+  return `keploy: in ${name}, the worker at ${at} draws the browser's own random numbers, ${KIDS}: the server redirects its script, ` +
+    'and no route reaches the URL a redirect gives (Playwright routes only its first request), so keploy cannot put its seeding ahead of the script; ' +
+    'the worker runs at the URL the redirect gives, as with seeding off' +
+    (twice ? ', and the server was asked for the script\'s first URL once more than with seeding off (keploy asked it, to see the redirect)' : '') +
+    '; serve the worker\'s script where the tests run at the URL the app starts the worker at, with no redirect, to seed it.';
 }
 
 /** What keploy's routes go on: the test's context, or one of its pages. */
@@ -2275,7 +2296,7 @@ function preludeLoad(r: Request, kind: 'p' | 'q'): boolean {
  * to what they asked for, whole, unseeded, and the test hears of it
  * (routed, 'continued').
  */
-export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks = {}, reach = false): Promise<void> {
+export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks = {}, reach = false, follows = false): Promise<void> {
   const counts = new Map<string, number>();
   // The answer's headers, but its encoding and length: the body given is
   // keploy's, of another length.
@@ -2310,7 +2331,9 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
   // A route's fetch with o is the request the test's routes asked for: o's
   // URL, method, headers and post data, or the request's (the URL the app
   // asked for, or one a fallback gave, and what fallbacks gave it).
-  const answer = async (route: Route, m: WorkerMark, own: Route['fulfill'], h?: Handed, o: Asked = {}): Promise<void> => {
+  // send sends the request on to the app's server as the test's routes
+  // asked for it, for the browser to load and follow (a redirect).
+  const answer = async (route: Route, m: WorkerMark, own: Route['fulfill'], h?: Handed, o: Asked = {}, send: () => Promise<unknown> = () => route.continue()): Promise<void> => {
     // Once keploy's fulfill has run, nothing of the request is in flight:
     // one that throws (the worker was terminated while keploy fetched its
     // script, and the browser dropped the request) ends it too.
@@ -2319,6 +2342,20 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
         await own(o);
       } finally {
         hooks.answered?.(route.request());
+        h?.ended();
+      }
+    };
+    // A Web Worker's request sent on is the browser's, in flight until the
+    // browser says it ended, unless sending it on throws (the browser
+    // dropped it). A Shared Worker's is answered once sent on: Chromium
+    // reports no end for it, as for one keploy fulfills.
+    const sendOn = async (): Promise<void> => {
+      let sent = false;
+      try {
+        await send();
+        sent = true;
+      } finally {
+        if (!sent || m.kind === 's' || m.kind === 'x') hooks.answered?.(route.request());
         h?.ended();
       }
     };
@@ -2337,23 +2374,48 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
     let status = 200;
     let headers: Record<string, string> = { 'content-type': 'text/javascript' };
     let source: Uint8Array | undefined;
+    let moved: Awaited<ReturnType<Route['fetch']>> | undefined;
     try {
-      const got = await route.fetch(o);
-      if (whole || !got.ok()) {
+      // keploy follows no redirect: the browser does (below).
+      const got = await route.fetch({ ...o, maxRedirects: 0 });
+      if (REDIRECTS.has(got.status()) && got.headers().location !== undefined) {
+        moved = got;
+      } else if (whole || !got.ok()) {
         await fulfill({ status: got.status(), headers: headersOf(got.headers()), body: await got.body() });
         if (whole) {
           const u = new URL(m.url);
           hooks.routed?.(u.origin + u.pathname, 'continued');
         }
         return;
+      } else {
+        status = got.status();
+        headers = headersOf(got.headers());
+        // A Web Worker's answer holds the app's script's bytes as the server
+        // sent them, whatever their charset (withBytes).
+        if (m.kind === 'w' || m.kind === 'm') source = await got.body();
       }
-      status = got.status();
-      headers = headersOf(got.headers());
-      // A Web Worker's answer holds the app's script's bytes as the server
-      // sent them, whatever their charset (withBytes).
-      if (m.kind === 'w' || m.kind === 'm') source = await got.body();
     } catch {
       // The worker loads the app's script itself, and fails as it would.
+    }
+    // A worker whose script the server redirects runs at the URL the
+    // redirect gives, as with seeding off, where no route reaches its
+    // script (Playwright routes no redirect's next request), so keploy
+    // cannot put its seeding there: it runs unseeded, and the test says so.
+    // Firefox follows a redirect keploy answers with: it gets the server's,
+    // its Location whole, at the URL keploy asked for, so it never holds
+    // keploy's mark. Chromium and WebKit do not (WebKit refuses one, and
+    // Chromium never ends a worker's load of one): the request goes on to
+    // the server, which so is asked for the script's first URL twice.
+    if (moved !== undefined) {
+      const u = new URL(m.url);
+      hooks.redirected?.(u.origin + u.pathname, !follows);
+      if (follows) {
+        const to = new URL(moved.headers().location ?? '', moved.url()).href;
+        await fulfill({ status: moved.status(), headers: { ...headersOf(moved.headers()), location: to }, body: await moved.body() });
+      } else {
+        await sendOn();
+      }
+      return;
     }
     // A Content-Security-Policy on the script's response is the worker's
     // own: it could refuse the load of keploy's seeding at its own URL
@@ -2419,7 +2481,7 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
         return own.continue(o);
       }
       ask(h, o);
-      await answer(route, m, own.fulfill, h, o);
+      await answer(route, m, own.fulfill, h, o, () => own.continue(o));
     };
     route.fallback = async (o) => {
       if (h.gone) return own.fallback(o).catch(() => {});
@@ -2479,7 +2541,7 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
       await h.own.fallback();
       return;
     }
-    await answer(route, h.m, h.own.fulfill, h);
+    await answer(route, h.m, h.own.fulfill, h, {}, () => h.own.continue());
   };
   // What Playwright does with the requests a route of the test's still held
   // when the test took the last route of a page, or of its context, off:
@@ -2511,7 +2573,9 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
         } else if (!h.started) {
           h.gone = true;
           const fulfill = q._innerFulfill;
-          ends.push(answer(route, h.m, typeof fulfill === 'function' ? (o) => fulfill.call(route, o) : h.own.fulfill, h).catch(() => {}));
+          const sendOn = q._innerContinue;
+          ends.push(answer(route, h.m, typeof fulfill === 'function' ? (o) => fulfill.call(route, o) : h.own.fulfill, h, {},
+            typeof sendOn === 'function' ? () => sendOn.call(route, false) : () => h.own.continue()).catch(() => {}));
         } else {
           ends.push(h.end);
         }

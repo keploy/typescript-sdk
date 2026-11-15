@@ -66,7 +66,7 @@ import type { Outcome, Random, TestRef } from './agent';
 import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
 import { NO_NOTE_LINE, differences, docLog, keepDocDraws, noteText, readNote, unreadNoteLine, type DocLog } from './note';
-import { OFF_LINE, SEEDED_LINE, besideOf, fakerLine, fakersOf, freshSeed, initScript, lateLine, othersNow, pageAddress, placePages, processRandom, seatFaker, seatRandom, seedingFromEnv, setAside, tally, unplacedLine, unseededLine, workerRoutes, type Fakers, type Unplaced } from './random';
+import { OFF_LINE, SEEDED_LINE, besideOf, fakerLine, fakersOf, freshSeed, initScript, lateLine, othersNow, pageAddress, placePages, processRandom, redirectLine, seatFaker, seatRandom, seedingFromEnv, setAside, tally, unplacedLine, unseededLine, workerRoutes, type Fakers, type Unplaced } from './random';
 import { Inflight, sharedWorkerLine, workersScript } from './settle';
 
 export { expect, KeployError };
@@ -268,7 +268,16 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
           told.add(k);
           process.stdout.write(`${lateLine(name, a)}\n`);
         },
-      }, browserName === 'webkit');
+        // A worker whose script the server redirects, which so runs
+        // unseeded: once for each address.
+        redirected: (at, twice) => {
+          const a = pageAddress(at);
+          const k = `redirected\n${a}`;
+          if (told.has(k)) return;
+          told.add(k);
+          process.stdout.write(`${redirectLine(name, a, twice)}\n`);
+        },
+      }, browserName === 'webkit', browserName === 'firefox');
       await context.addInitScript({ content: initScript(s.seed, report, mark, browserName !== 'firefox', drawnReport) });
       const placing = placePages(context, mark);
       restore = placing.restore;

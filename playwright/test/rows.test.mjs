@@ -688,6 +688,28 @@ async function drawsServer() {
     if (u.pathname === '/csp') { res.writeHead(200, { 'content-type': 'text/html', 'content-security-policy': 'sandbox allow-scripts' }); res.end(page('csp')); return; }
     // /cspf: the same, with a frame of its own origin in it.
     if (u.pathname === '/cspf') { res.writeHead(200, { 'content-type': 'text/html', 'content-security-policy': 'sandbox allow-scripts' }); res.end(page('<iframe src="/frame"></iframe>')); return; }
+    // served.spec.ts's: /sv starts workers whose scripts the server serves
+    // in a way of its own: /sv/l1.js in Latin-1 (an e-acute); /sv/cn.js,
+    // /sv/csn.js and /sv/ctt.js under a Content-Security-Policy each; and
+    // /rd/w.js, /rdm/m.js (a module) and /rds/s.js (a Shared Worker, by a
+    // relative Location) redirect to v2/ beside them, where each loads h
+    // beside it, which says H = 'v2'.
+    if (u.pathname === '/sv') { res.writeHead(200, { 'content-type': 'text/html' }); res.end(page('sv')); return; }
+    const told = (k, more = '') => `postMessage({ k: '${k}'${more}, draws: [Math.random(), Math.random()], href: String(location.href) });`;
+    if (u.pathname === '/sv/l1.js') { res.writeHead(200, { 'content-type': 'text/javascript; charset=iso-8859-1' }); res.end(Buffer.from(told('l1', ", s: 'h\u00e9'"), 'latin1')); return; }
+    const csp = { '/sv/cn.js': "default-src 'none'", '/sv/csn.js': "script-src 'none'", '/sv/ctt.js': "require-trusted-types-for 'script'" }[u.pathname];
+    if (csp !== undefined) { res.writeHead(200, { 'content-type': 'text/javascript', 'content-security-policy': csp }); res.end(told(u.pathname.slice(4, -3))); return; }
+    const moved = { '/rd/w.js': '/rd/v2/w.js', '/rdm/m.js': '/rdm/v2/m.js', '/rds/s.js': 'v2/s.js' }[u.pathname];
+    if (moved !== undefined) { res.writeHead(302, { location: moved }); res.end(); return; }
+    const v2 = {
+      '/rd/v2/w.js': `importScripts('h.js'); ${told('rd', ', H: self.H')}`,
+      '/rd/v2/h.js': "self.H = 'v2';",
+      '/rdm/v2/m.js': `import { H } from './h.mjs'; ${told('rdm', ', H, meta: import.meta.url')}`,
+      '/rdm/v2/h.mjs': "export const H = 'v2';",
+      '/rds/v2/s.js': `importScripts('h.js'); onconnect = (e) => e.ports[0].${told('rds', ', H: self.H')}`,
+      '/rds/v2/h.js': "self.H = 'v2';",
+    }[u.pathname];
+    if (v2 !== undefined) { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end(v2); return; }
     if (u.pathname === '/held.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); held.script(() => res.end('')); return; }
     // parse.spec.ts's removed: /rhold.js is answered at /rrelease.
     if (u.pathname === '/rhold.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); rheld.push(res); return; }
@@ -1716,6 +1738,63 @@ for (const engine of ENGINES) {
       }
       assert.deepEqual(q.seen.filter((u) => u.includes('__keploy_worker')), []);
     } finally { await rep.close(); await rec.close(); }
+  });
+}
+
+for (const engine of ENGINES) {
+  test(`served, in ${engine}: a worker's script in Latin-1 reads the same seeded as off (Chromium: as Latin-1); one served with a Content-Security-Policy (default-src 'none', script-src 'none', require-trusted-types-for 'script', and a module one under default-src 'none') runs seeded, its draws the seed's, the module one named as seeded late; one the server redirects (classic, module, and a Shared Worker) runs at the URL the redirect gives, loading what sits beside it there, as off, unseeded and named, the server asked for its first URL ${engine === 'firefox' ? 'once' : 'twice'}; the server never sees keploy's mark`, async () => {
+    const j = journal();
+    const a = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' ? { body: { v: 1, status: 'ok', seed: 'cd'.repeat(16) } } : undefined));
+    try {
+      const run = (off) => drawRun(j, { ...keployEnv(a.url), PW_BROWSER: engine, ...(off ? { KEPLOY_SEED_RANDOM: 'off' } : {}) }, ['served.spec.ts'], ['latin1', 'csp', 'redirect']);
+      const s1 = await run(false);
+      const s2 = await run(false);
+      const o1 = await run(true);
+      const o2 = await run(true);
+      const at = (p) => new RegExp(`^http://127\\.0\\.0\\.1:\\d+${p.replace(/\./g, '\\.')}$`);
+      for (const [mode, r] of [['seeded', s1], ['seeded again', s2], ['off', o1], ['off again', o2]]) {
+        assert.deepEqual(r.drew.latin1.map((w) => w.k), ['l1', 'l1'], mode);
+        assert.deepEqual(r.drew.csp.map((w) => w.k), ['cn', 'csn', 'ctt', 'cn'], mode);
+        for (const [w, p] of [...r.drew.latin1.map((w) => [w, '/sv/l1.js']), ...r.drew.csp.map((w) => [w, `/sv/${w.k}.js`])]) assert.match(w.href, at(p), mode);
+        const [rd, rdm, rds] = r.drew.redirect;
+        assert.deepEqual([rd.k, rd.H, rdm.k, rdm.H, rds.k, rds.H], ['rd', 'v2', 'rdm', 'v2', 'rds', 'v2'], mode);
+        assert.match(rd.href, at('/rd/v2/w.js'), mode);
+        assert.match(rdm.href, at('/rdm/v2/m.js'), mode);
+        assert.match(rdm.meta, at('/rdm/v2/m.js'), mode);
+        assert.match(rds.href, at('/rds/v2/s.js'), mode);
+        assert.deepEqual(r.seen.filter((u) => u.includes('__keploy_worker')), [], mode);
+        // Each Web Worker's script loaded once (two start at each of /sv/l1.js and /sv/cn.js).
+        assert.deepEqual(['/sv/l1.js', '/sv/cn.js', '/sv/csn.js', '/sv/ctt.js'].map((p) => r.seen.filter((u) => u === p).length), [2, 2, 1, 1], mode);
+        // A redirect's next URL, once; its first: once off and in Firefox, twice seeded in Chromium and WebKit.
+        for (const p of ['/rd/w.js', '/rdm/m.js', '/rds/s.js']) {
+          assert.equal(r.seen.filter((u) => u === p.replace(/\/([^/]+)$/, '/v2/$1')).length, 1, `${mode} ${p}`);
+          assert.equal(r.seen.filter((u) => u === p).length, r === s1 || r === s2 ? (engine === 'firefox' ? 1 : 2) : 1, `${mode} ${p}`);
+        }
+      }
+      // The Latin-1 text reads as off: Chromium decodes a worker's script by its charset, Firefox and WebKit as UTF-8.
+      for (const r of [s1, s2, o2]) assert.deepEqual(r.drew.latin1.map((w) => w.s), o1.drew.latin1.map((w) => w.s));
+      if (engine === 'chromium') assert.deepEqual(s1.drew.latin1.map((w) => w.s), ['h\u00e9', 'h\u00e9']);
+      // Seeded: the seed's draws, the same in each run; off, and a redirected worker seeded, the browser's own.
+      const draws = (r, t) => r.drew[t].map((w) => w.draws);
+      assert.deepEqual(draws(s1, 'latin1'), draws(s2, 'latin1'));
+      assert.deepEqual(draws(s1, 'csp'), draws(s2, 'csp'));
+      assert.notDeepEqual(draws(o1, 'latin1'), draws(o2, 'latin1'));
+      assert.notDeepEqual(draws(o1, 'csp'), draws(o2, 'csp'));
+      for (const i of [0, 1, 2]) assert.notDeepEqual(s1.drew.redirect[i].draws, s2.drew.redirect[i].draws, `redirect ${i}`);
+      // The lines: the module one under a policy, seeded late; each redirected one, once, saying the second ask off Firefox.
+      const said = (r, re) => r.lines.filter((l) => re.test(l));
+      for (const r of [s1, s2]) {
+        assert.equal(said(r, /^keploy: in .*csp.*, the module Web Worker at http:\/\/127\.0\.0\.1:\d+\/sv\/cn\.js is served with a Content-Security-Policy/).length, 1);
+        assert.equal(said(r, /Content-Security-Policy/).length, 1);
+        for (const p of ['/rd/w.js', '/rdm/m.js', '/rds/s.js']) {
+          const l = said(r, new RegExp(`^keploy: in .*redirect.*, the worker at http://127\\.0\\.0\\.1:\\d+${p.replace(/\./g, '\\.')} draws the browser's own random numbers, .*: the server redirects its script, `));
+          assert.equal(l.length, 1, p);
+          assert.equal(/once more than with seeding off/.test(l[0]), engine !== 'firefox', p);
+        }
+        assert.equal(said(r, /redirects its script/).length, 3);
+      }
+      for (const r of [o1, o2]) assert.deepEqual(said(r, /redirects its script|Content-Security-Policy/), []);
+    } finally { await a.close(); }
   });
 }
 

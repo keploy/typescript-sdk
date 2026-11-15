@@ -3,7 +3,7 @@
 // a page. No browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DOC_KEY, ENV_SEED_RANDOM, FAKER, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, esmFile, exportOf, fakerLine, fakersIn, fakersOf, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatFaker, seatRandom, seedFaker, seedingFromEnv, setAside, unplacedLine, unseededLine, WORKER_PARAM, SW_CHANNEL, SW_LOCK, markWorker, useStrict, withPrefix, withBytes, oneLine, lateLine, workerMark, workerScript, workerRoutes, workerAnswer, cspAllowsData } from '../dist/random.js';
+import { DOC_KEY, ENV_SEED_RANDOM, FAKER, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, esmFile, exportOf, fakerLine, fakersIn, fakersOf, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatFaker, seatRandom, seedFaker, seedingFromEnv, setAside, unplacedLine, unseededLine, WORKER_PARAM, SW_CHANNEL, SW_LOCK, markWorker, useStrict, withPrefix, withBytes, oneLine, lateLine, redirectLine, workerMark, workerScript, workerRoutes, workerAnswer, cspAllowsData } from '../dist/random.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -2080,10 +2080,15 @@ function routed() {
         const h = o.headers ?? over?.headers;
         did.push(h === undefined ? ['fetch', o.url ?? at] : ['fetch', o.url ?? at, h]);
         if (answer instanceof Error) throw answer;
+        if (answer.followed !== undefined && o.maxRedirects !== 0) return answer.followed;
         return answer;
       },
       fulfill: async (o) => { ended = true; r.raw = o.body; did.push(['fulfill', { ...o, body: String(o.body) }]); },
-      continue: async (o) => { ended = true; did.push(['continue', o?.url ?? at]); },
+      continue: async (o) => {
+        if (as.dropped) throw new Error('Target closed');
+        ended = true;
+        did.push(o?.headers === undefined ? ['continue', o?.url ?? at] : ['continue', o?.url ?? at, o.headers]);
+      },
       abort: async () => { ended = true; did.push(['abort']); },
       fallback: async (o) => {
         if (o === undefined || Object.keys(o).length === 0) return;
@@ -2362,6 +2367,60 @@ test('workerRoutes keeps keploy\'s route ahead of every route the test adds to i
   assert.equal(context.routes.length, 3);
   assert.equal(context.routes[2].match(new URL('http://h/w.js?a=1')), true);
   assert.equal(context.routes[2].match(new URL('http://h/v.js')), false);
+});
+
+// A redirect answer: status with its Location at, at URL u, and what
+// a fetch that follows it gets (followed).
+const movedOf = (status, at, u, followed = answerOf(200, 'app()')) => ({ ...answerOf(status, '', { location: at, 'content-length': '0', 'x-r': '1' }), url: () => u, followed });
+
+test('workerRoutes follows no redirect of a worker\'s script: Firefox (follows) gets the server\'s redirect, its Location whole at the URL keploy asked for; Chromium and WebKit send the request on as the test\'s routes asked; each kind runs unseeded, and the test hears of it once for each load, with twice off Firefox; a 3xx that is no redirect, or one with no Location, goes to the worker as the server gave it', async () => {
+  const t = 'ab'.repeat(16);
+  for (const follows of [false, true]) {
+    const { r, context } = routed();
+    const heard = [];
+    const answered = [];
+    await workerRoutes(context, { redirected: (at, twice) => heard.push([at, twice]), answered: (q) => answered.push(q.url()) }, false, follows);
+    for (const [kind, status] of [['w', 301], ['m', 302], ['s', 303], ['x', 307], ['w', 308]]) {
+      const before = answered.length;
+      const got = await r.ask(markWorker('http://h/rd/w.js?a=1', kind, t), movedOf(status, 'v2/w.js', 'http://h/rd/w.js?a=1'));
+      assert.deepEqual(got, follows
+        ? [['fetch', 'http://h/rd/w.js?a=1'], ['fulfill', { status, headers: { location: 'http://h/rd/v2/w.js', 'x-r': '1' }, body: '' }]]
+        : [['fetch', 'http://h/rd/w.js?a=1'], ['continue', 'http://h/rd/w.js?a=1']], `${kind} ${status} ${follows}`);
+      // Answered: each one keploy fulfilled; of those sent on, a Shared Worker's (s, x) only.
+      assert.equal(answered.length - before, follows || kind === 's' || kind === 'x' ? 1 : 0, `${kind} ${status} ${follows}`);
+    }
+    assert.deepEqual(heard, Array(5).fill(['http://h/rd/w.js', !follows]));
+    // A Location that keeps only the fragment: whole, at the URL keploy asked for, never the marked one.
+    const frag = await r.ask(markWorker('http://h/rd/w.js', 'w', t), movedOf(302, '#x', 'http://h/rd/w.js'));
+    if (follows) assert.equal(frag[1][1].headers.location, 'http://h/rd/w.js#x');
+    // Not redirects: a 300 with a Location, and a 302 with none, go to the worker as the server gave them.
+    for (const [status, headers] of [[300, { location: 'v2/w.js' }], [302, {}]]) {
+      const got = await r.ask(markWorker('http://h/rd/w.js', 'w', t), { ...answerOf(status, 'x', headers), url: () => 'http://h/rd/w.js', followed: answerOf(200, 'app()') });
+      assert.deepEqual(got, [['fetch', 'http://h/rd/w.js'], ['fulfill', { status, headers, body: 'x' }]], `${status}`);
+    }
+    assert.equal(heard.length, 6);
+  }
+  // A route of the test's that continues it with headers of its own: keploy's fetch and the request sent on both carry them.
+  const { r, context } = routed();
+  await workerRoutes(context);
+  const page = r.page();
+  await page.route(() => true, (route) => route.continue({ headers: { 'x-auth': 'k' } }));
+  assert.deepEqual(await r.ask(markWorker('http://h/rd/w.js', 'm', t), movedOf(302, '/v2/w.js', 'http://h/rd/w.js'), { type: 'script', headers: {} }, page),
+    [['fetch', 'http://h/rd/w.js', { 'x-auth': 'k' }], ['continue', 'http://h/rd/w.js', { 'x-auth': 'k' }]]);
+  // A load that sending on fails for (the browser dropped it) ends: answered, and the error goes to the test's continue.
+  const ended = [];
+  const { r: r2, context: c2 } = routed();
+  await workerRoutes(c2, { answered: () => ended.push('answered') });
+  const p2 = r2.page();
+  await p2.route(() => true, (route) => route.continue({ headers: { 'x-b': '1' } }).catch((e) => { ended.push(e.message); route.abort(); }));
+  await r2.ask(markWorker('http://h/rd/w.js', 'w', t), movedOf(302, 'v2/w.js', 'http://h/rd/w.js'), { type: 'script', headers: {}, dropped: true }, p2);
+  assert.deepEqual(ended, ['answered', 'Target closed']);
+  assert.equal(redirectLine('t', 'http://h/rd/w.js', true), 'keploy: in t, the worker at http://h/rd/w.js draws the browser\'s own random numbers, and so does each worker it starts, so their draws may differ at replay: ' +
+    'the server redirects its script, and no route reaches the URL a redirect gives (Playwright routes only its first request), so keploy cannot put its seeding ahead of the script; ' +
+    'the worker runs at the URL the redirect gives, as with seeding off, and the server was asked for the script\'s first URL once more than with seeding off (keploy asked it, to see the redirect); ' +
+    'serve the worker\'s script where the tests run at the URL the app starts the worker at, with no redirect, to seed it.');
+  assert.equal(redirectLine('t', 'a', false), redirectLine('t', 'a', true).replace(', and the server was asked for the script\'s first URL once more than with seeding off (keploy asked it, to see the redirect)', ''));
+  assert.notEqual(redirectLine('t', 'a', false), redirectLine('t', 'a', true));
 });
 
 test('workerRoutes sends a worker\'s script on with what the test\'s continue and fallbacks asked (a URL or headers of their own), at a URL a fallback gave too; a Shared Worker\'s, classic or module, that they asked for otherwise than the browser sent it gets the answer to what they asked, whole, unseeded, and is heard; the browser\'s own headers in another case or with one given as undefined, an option left undefined, or none, seed it', async () => {
