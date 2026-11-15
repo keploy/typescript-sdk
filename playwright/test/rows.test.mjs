@@ -1877,7 +1877,7 @@ for (const engine of ENGINES) {
 }
 
 for (const engine of ENGINES) {
-  test(`served, in ${engine}: a worker's script whose Content-Security-Policy allows a script from the worker's own origin keeps its seeding ahead of the modules it imports (default-src 'self'; a nonce and 'strict-dynamic', module and classic; helmet's default${engine === 'chromium' ? '' : ', which upgrades http, as one keploy cannot tell allows it here: seeded late and named, as it runs off'}), draws the seed's numbers there, its imports' too, and is named as late by no line; a Shared Worker under default-src 'none', classic and module, starts, as off, ${engine === 'firefox' ? 'unseeded (Firefox routes no Shared Worker\'s script)' : 'seeded, the module one named as seeded late once'}; the server never sees keploy's mark`, async () => {
+  test(`served, in ${engine}: a worker's script whose Content-Security-Policy allows a script from the worker's own origin keeps its seeding ahead of the modules it imports (default-src 'self'; a nonce and 'strict-dynamic', module and classic; helmet's default, which upgrades http but on this loopback host), draws the seed's numbers there, its imports' too, and is named as late by no line; a Shared Worker under default-src 'none', classic and module, starts, as off, ${engine === 'firefox' ? 'unseeded (Firefox routes no Shared Worker\'s script)' : 'seeded, the module one named as seeded late once'}; the server never sees keploy's mark`, async () => {
     const j = journal();
     const a = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' ? { body: { v: 1, status: 'ok', seed: 'ce'.repeat(16) } } : undefined));
     try {
@@ -1889,28 +1889,28 @@ for (const engine of ENGINES) {
       const names = ['s', 'h', 'sd', 'sdc', 'sn', 'snm'];
       const kinds = (r) => r.drew.own.map((w) => (typeof w === 'string' ? w : w.k));
       for (const [mode, r] of [['seeded', s1], ['seeded again', s2], ['off', o1], ['off again', o2]]) {
-        // Each starts as it does off; all but helmet's in every engine.
+        // Each starts as it does off, in every engine.
         assert.deepEqual(kinds(r), kinds(o1), mode);
-        assert.deepEqual(kinds(r).filter((k, i) => i !== 1), names.filter((k, i) => i !== 1), mode);
+        assert.deepEqual(kinds(r), names, mode);
         assert.deepEqual(r.seen.filter((u) => u.includes('__keploy_worker')), [], mode);
         // Each script loaded once by the browser, as off (a Shared Worker's twice seeded in Chromium and WebKit: keploy asks it too).
         for (const p of ['/mc/s.js', '/mc/sd.js', '/mc/sdc.js']) assert.equal(r.seen.filter((u) => u === p).length, 1, `${mode} ${p}`);
       }
-      if (engine === 'chromium') assert.equal(kinds(s1)[1], 'h');
       const at = (r, i) => r.drew.own[i];
       // Seeded: the seed's draws, the same in each run, an import's too; off, the browser's own.
-      const seededAt = engine === 'chromium' ? [0, 1, 2, 3, 4, 5] : engine === 'webkit' ? [0, 2, 3, 4, 5] : [0, 2, 3];
+      const seededAt = engine === 'firefox' ? [0, 1, 2, 3] : [0, 1, 2, 3, 4, 5];
       for (const i of seededAt) {
         assert.deepEqual(at(s1, i).draws, at(s2, i).draws, names[i]);
         if (at(s1, i).dep !== undefined) assert.deepEqual(at(s1, i).dep, at(s2, i).dep, `${names[i]} dep`);
       }
       assert.notDeepEqual(at(o1, 0).draws, at(o2, 0).draws);
       assert.notDeepEqual(at(o1, 0).dep, at(o2, 0).dep);
+      assert.notDeepEqual(at(o1, 1).dep, at(o2, 1).dep);
       if (engine === 'firefox') for (const i of [4, 5]) assert.notDeepEqual(at(s1, i).draws, at(s2, i).draws, names[i]);
       // The lines: a module worker seeded after its imports, once each.
       // served.spec.ts's other tests run too: only this test's addresses (/mc/, /sv/sn.js, /sv/snm.js).
       const late = (r) => r.lines.filter((l) => /is served with a Content-Security-Policy/.test(l) && /\/mc\/|\/sv\/snm?\.js/.test(l)).map((l) => /the (module (?:Web|Shared) Worker) at http:\/\/127\.0\.0\.1:\d+(\S+) is served/.exec(l)?.slice(1).join(' ')).sort();
-      const want = { chromium: ['module Shared Worker /sv/snm.js'], firefox: ['module Web Worker /mc/h.js'], webkit: ['module Shared Worker /sv/snm.js', 'module Web Worker /mc/h.js'] }[engine];
+      const want = { chromium: ['module Shared Worker /sv/snm.js'], firefox: [], webkit: ['module Shared Worker /sv/snm.js'] }[engine];
       for (const r of [s1, s2]) assert.deepEqual(late(r), want);
       for (const r of [o1, o2]) assert.deepEqual(late(r), []);
     } finally { await a.close(); }

@@ -1834,8 +1834,11 @@ export function cspAllowsData(headers: Record<string, string>): boolean {
  * engine may read a module's imports by it); for a
  * classic worker, whose importScripts takes a string, no policy requires
  * Trusted Types for scripts; and no policy upgrades an http url to https
- * (upgrade-insecure-requests), but in Chromium for a loopback host, which
- * Chromium never upgrades. A source keploy does not read so (a wildcard
+ * (upgrade-insecure-requests), but on a loopback host: in Chromium any
+ * (localhost, a name under it, 127.0.0.0/8, [::1]), which Chromium never
+ * upgrades; in Firefox and WebKit localhost and 127.0.0.1, where each
+ * leaves a worker's http load of its own origin alone (measured; the other
+ * loopback names are not). A source keploy does not read so (a wildcard
  * host aside: *.example.com), counts as one that refuses: keploy then
  * puts the seeding in the script itself (workerAnswer inline), which no
  * policy refuses.
@@ -1848,6 +1851,8 @@ export function cspAllowsOwn(headers: Record<string, string>, url: string, class
   const scheme = u.protocol.slice(0, -1).toLowerCase();
   const host = u.hostname.toLowerCase();
   const loopback = host === 'localhost' || host.endsWith('.localhost') || /^127\.\d+\.\d+\.\d+$/.test(host) || host === '[::1]';
+  // The hosts whose http loads upgrade-insecure-requests leaves alone.
+  const kept = engine === 'chromium' ? loopback : (engine === 'firefox' || engine === 'webkit') && (host === 'localhost' || host === '127.0.0.1');
   const port = u.port !== '' ? u.port : scheme === 'https' ? '443' : scheme === 'http' ? '80' : '';
   const source = (x: string): boolean => {
     const t = x.toLowerCase();
@@ -1875,7 +1880,7 @@ export function cspAllowsOwn(headers: Record<string, string>, url: string, class
     }
     if (ds.has('sandbox')) return false;
     if (classic && (ds.get('require-trusted-types-for') ?? []).some((x) => x.toLowerCase() === "'script'")) return false;
-    if (ds.has('upgrade-insecure-requests') && scheme === 'http' && !(loopback && engine === 'chromium')) return false;
+    if (ds.has('upgrade-insecure-requests') && scheme === 'http' && !kept) return false;
     const first = (...names: string[]): string[] | undefined => names.map((x) => ds.get(x)).find((x) => x !== undefined);
     for (const list of [first('script-src-elem', 'script-src', 'default-src'), classic ? undefined : first('worker-src', 'child-src', 'script-src', 'default-src')]) {
       if (list !== undefined && !list.some(source)) return false;

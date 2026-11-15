@@ -3163,7 +3163,7 @@ test('workerRoutes answers a Web Worker whose script carries a Content-Security-
   assert.match(lateLine('a test', 'http://h/m.js'), /^keploy: in a test, the module Web Worker at http:\/\/h\/m\.js is served with a Content-Security-Policy that could refuse keploy's load of a script from the worker's own origin, .* runs after the modules the script imports: .*; if one does, have the policy allow scripts from the worker's own origin \('self' in script-src\) where the tests run, or serve the worker's script with no Content-Security-Policy there/);
 });
 
-test('cspAllowsOwn: a policy that allows a script from the worker\'s own origin lets keploy load there; one it cannot tell does (none, another host or port, a nonce, a sandbox, Trusted Types for a classic worker, an upgrade of http but in Chromium on a loopback host) refuses', () => {
+test('cspAllowsOwn: a policy that allows a script from the worker\'s own origin lets keploy load there; one it cannot tell does (none, another host or port, a nonce, a sandbox, Trusted Types for a classic worker, an upgrade of http but on a loopback host: any in Chromium, localhost and 127.0.0.1 in Firefox and WebKit) refuses', () => {
   const csp = (v) => ({ 'content-type': 'text/javascript', 'content-security-policy': v });
   const helmet = "default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests";
   assert.equal(cspAllowsOwn({}, 'http://h/w.js', true), true);
@@ -3236,9 +3236,22 @@ test('cspAllowsOwn: a policy that allows a script from the worker\'s own origin 
     [helmet, 'http://a.localhost:3000/w.js', false, 'chromium', true],
     [helmet, 'http://127.9.0.1/w.js', true, 'chromium', true],
     [helmet, 'http://[::1]:3000/w.js', false, 'chromium', true],
-    [helmet, 'http://127.0.0.1:3000/w.js', false, 'firefox', false],
-    [helmet, 'http://127.0.0.1:3000/w.js', false, 'webkit', false],
+    [helmet, 'http://127.0.0.1:3000/w.js', false, 'firefox', true],
+    [helmet, 'http://localhost:3000/w.js', true, 'firefox', true],
+    [helmet, 'http://LocalHost/w.js', false, 'firefox', true],
+    [helmet, 'http://127.0.0.1:3000/w.js', false, 'webkit', true],
+    [helmet, 'http://localhost:3000/w.js', true, 'webkit', true],
+    [helmet, 'http://a.localhost:3000/w.js', false, 'firefox', false],
+    [helmet, 'http://127.9.0.1/w.js', false, 'firefox', false],
+    [helmet, 'http://[::1]:3000/w.js', false, 'firefox', false],
+    [helmet, 'http://a.localhost:3000/w.js', false, 'webkit', false],
+    [helmet, 'http://127.0.0.2/w.js', true, 'webkit', false],
+    [helmet, 'http://[::1]:3000/w.js', false, 'webkit', false],
+    [helmet, 'http://localhost.test/w.js', false, 'webkit', false],
+    [helmet, 'http://app.test:3000/w.js', false, 'firefox', false],
     [helmet, 'http://127.0.0.1:3000/w.js', false, '', false],
+    [helmet, 'http://localhost:3000/w.js', false, '', false],
+    [helmet, 'http://localhost:3000/w.js', false, 'msedge', false],
     [helmet, 'http://app.test:3000/w.js', false, 'chromium', false],
     [helmet, 'http://128.0.0.1/w.js', false, 'chromium', false],
     [helmet, 'https://app.test/w.js', false, 'webkit', true],
@@ -3263,18 +3276,21 @@ test('workerRoutes loads a Web Worker\'s seeding at its script\'s URL under a po
   assert.equal((await r.ask(markWorker('http://h/w.js', 'w', t), answerOf(200, 'b()', tt)))[1][1].body, `${oneLine(workerScript(t, 2, 'w'))}b()\n//# sourceURL=http://h/w.js\n`);
   assert.equal((await r.ask(markWorker('http://h/m.js', 'm', t), answerOf(200, 'b()', tt)))[1][1].body, `import ${JSON.stringify(markWorker('http://h/m.js', 'p', t, 3))};b()\n//# sourceURL=http://h/m.js\n`);
   assert.deepEqual(late, []);
-  // helmet's policy upgrades http: in Chromium (the routes' engine here) not on a loopback host.
+  // helmet's policy upgrades http: in Chromium (the routes' engine here) not on any loopback host.
   const helmet = { 'content-type': 'text/javascript', 'content-security-policy': "default-src 'self';script-src 'self';upgrade-insecure-requests" };
   assert.equal((await r.ask(markWorker('http://127.0.0.1:9/m.js', 'm', t), answerOf(200, 'b()', helmet)))[1][1].body, `import ${JSON.stringify(markWorker('http://127.0.0.1:9/m.js', 'p', t, 4))};b()\n//# sourceURL=http://127.0.0.1:9/m.js\n`);
   assert.equal((await r.ask(markWorker('http://h/m.js', 'm', t), answerOf(200, 'b()', helmet)))[1][1].body, `${oneLine(workerScript(t, 5, 'm'))}b()\n//# sourceURL=http://h/m.js\n`);
   assert.deepEqual(late, [['http://h/m.js', false]]);
-  // In Firefox and WebKit, a loopback host too.
+  // In Firefox and WebKit, not on localhost or 127.0.0.1 either (measured),
+  // but on another loopback name.
   for (const engine of ['firefox', 'webkit']) {
     const e = routed();
     const said = [];
     await workerRoutes(e.context, { late: (...a) => said.push(a) }, engine);
-    assert.equal((await e.r.ask(markWorker('http://127.0.0.1:9/m.js', 'm', t), answerOf(200, 'b()', helmet)))[1][1].body, `${oneLine(workerScript(t, 0, 'm', engine === 'webkit'))}b()\n//# sourceURL=http://127.0.0.1:9/m.js\n`, engine);
-    assert.deepEqual(said, [['http://127.0.0.1:9/m.js', false]], engine);
+    assert.equal((await e.r.ask(markWorker('http://127.0.0.1:9/m.js', 'm', t), answerOf(200, 'b()', helmet)))[1][1].body, `import ${JSON.stringify(markWorker('http://127.0.0.1:9/m.js', 'p', t, 0))};b()\n//# sourceURL=http://127.0.0.1:9/m.js\n`, engine);
+    assert.equal((await e.r.ask(markWorker('http://localhost:9/m.js', 'm', t), answerOf(200, 'b()', helmet)))[1][1].body, `import ${JSON.stringify(markWorker('http://localhost:9/m.js', 'p', t, 1))};b()\n//# sourceURL=http://localhost:9/m.js\n`, engine);
+    assert.equal((await e.r.ask(markWorker('http://127.0.0.2:9/m.js', 'm', t), answerOf(200, 'b()', helmet)))[1][1].body, `${oneLine(workerScript(t, 2, 'm', engine === 'webkit'))}b()\n//# sourceURL=http://127.0.0.2:9/m.js\n`, engine);
+    assert.deepEqual(said, [['http://127.0.0.2:9/m.js', false]], engine);
   }
 });
 
