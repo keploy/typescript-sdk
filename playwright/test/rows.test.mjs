@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LOADS_KEY, OFF_LINE, SEEDED_LINE, fakerLine, initScript, processRandom, unplacedLine, unseededLine, markWorker, workerMark, workerScript } from '../dist/random.js';
-import { sharedWorkerLine } from '../dist/settle.js';
+import { offlineLine, reusedLine, sharedWorkerLine } from '../dist/settle.js';
 import { NO_NOTE_LINE, readNote, unreadNoteLine } from '../dist/note.js';
 import { BLANK_DRAWS, DRAWS, documentAt, workerAt } from './draws.mjs';
 
@@ -2541,6 +2541,119 @@ for (const engine of ENGINES) {
         const [mark] = onceMarks(runs.seeded.seeds[title], [['/ov/pw.js', 'w']]);
         const got = JSON.parse(fs.readFileSync(path.join(runs.seeded.tmp, `${title}.json`), 'utf8'));
         assert.deepEqual(got.draws, workerAt('http://h/ov/pw.js', workerScript(mark.token, 0, 'w')).draws(), title);
+      }
+    } finally { await rec.close(); }
+  });
+}
+
+// teardown.spec.ts, seeded, each test 5 times in each of four runs at once
+// (the load the race needs: before keploy took the context offline, of 32
+// runs each, the server saw the mark in up to 10 in Firefox and 8 in WebKit):
+// a test whose last step starts a Web Worker (classic, module, or from a
+// timer) or a Shared Worker and returns, and one whose page route takes
+// itself off and then fulfills a Web Worker's script load, end while what
+// keploy marked is on its way; one closes its own context as a Web Worker
+// starts. keploy takes the context offline once its end-of-test wait is
+// done, or as the test closes it, before it closes, so the app's server
+// never sees keploy's mark; each test ends as it does with seeding off.
+for (const engine of ENGINES) {
+  test(`seeded, in ${engine}: a test whose last step starts a Web Worker (classic, module, from a timer) or a Shared Worker and returns, one whose page route takes itself off and then fulfills a Web Worker's script load, and one that closes its own browser context as a Web Worker starts, end while what keploy marked is on its way; keploy takes the browser context offline before it closes, so over 20 runs of each, four runs at once, the app's server never sees keploy's mark`, async () => {
+    const j = journal();
+    const rec = await fakeAgent(j);
+    try {
+      const runs = await Promise.all([0, 1, 2, 3].map(async () => {
+        const d = await drawsServer();
+        try {
+          const r = await playwright(['teardown.spec.ts'], { ...keployEnv(rec.url), PW_BROWSER: engine, DRAWS_BASE: d.url, TEARDOWN_COPIES: '5' });
+          return { ...r, seen: d.seen.slice() };
+        } finally { await d.close(); }
+      }));
+      for (const { tests, out, seen } of runs) {
+        assert.equal(Object.keys(tests).length, 30, out);
+        for (const [title, t] of Object.entries(tests)) {
+          if (title.startsWith('unrouteAll default then fulfill ')) {
+            assert.equal(t.status, 'failed', `${title}\n${out}`);
+            assert.match(t.error, /route\.fulfill: Route is already handled!/, `${title}: ${t.error}`);
+          } else {
+            assert.equal(t.status, 'passed', `${title}: ${t.error}\n${out}`);
+          }
+        }
+        assert.deepEqual(seen.filter((u) => u.includes('__keploy_worker')), []);
+        assert.doesNotMatch(out, /could not take the test's browser context offline/);
+        assert.doesNotMatch(out, /Playwright keeps the test's browser context open/);
+      }
+    } finally { await rec.close(); }
+  });
+}
+
+// offline.spec.ts: a seeded test whose context's setOffline throws, or that
+// has none, passes, its context closes, and it says once that a request
+// started as its context closes can reach the app's server with keploy's
+// mark (the first line of what setOffline threw); with seeding off keploy
+// never takes a context offline, so neither says anything. A test that puts
+// back the context's own close, past keploy's, finds its context offline as
+// Playwright closes it (keploy took it offline after its wait), or online
+// with seeding off.
+test('seeded: a test whose browser context cannot go offline (its setOffline throws, or there is none) closes it anyway and says so once; with seeding off nothing is said; a context closed past keploy\'s close is offline as it closes, seeded, and online with seeding off', async () => {
+  const j = journal();
+  const rec = await fakeAgent(j);
+  try {
+    for (const mode of ['seeded', 'off']) {
+      const d = await drawsServer();
+      try {
+        const { tests, tmp, out } = await playwright(['offline.spec.ts', '-g', 'a context'], { ...keployEnv(rec.url), DRAWS_BASE: d.url, ...(mode === 'off' ? { KEPLOY_SEED_RANDOM: 'off' } : {}) });
+        const why = { 'a context whose setOffline throws': 'no offline here', 'a context with no setOffline': 'context.setOffline is not a function' };
+        const past = 'a context whose close keploy did not wrap';
+        assert.deepEqual(Object.keys(tests).sort(), [...Object.keys(why), past].sort(), out);
+        assert.equal(tests[past].status, 'passed', `${mode} ${past}: ${tests[past].error}\n${out}`);
+        assert.equal(JSON.parse(fs.readFileSync(path.join(tmp, 'at close.json'), 'utf8')), mode === 'seeded' ? 'offline' : 'online', mode);
+        assert.doesNotMatch(tests[past].stdout, /could not take the test's browser context offline/, mode);
+        for (const [title, w] of Object.entries(why)) {
+          const t = tests[title];
+          assert.equal(t.status, 'passed', `${mode} ${title}: ${t.error}\n${out}`);
+          const said = t.stdout.split('\n').filter((l) => l.includes('could not take the test\'s browser context offline'));
+          assert.deepEqual(said, mode === 'seeded' ? [offlineLine(title, w)] : [], `${mode} ${title}`);
+        }
+        assert.doesNotMatch(out, /Playwright keeps the test's browser context open/, mode);
+      } finally { await d.close(); }
+    }
+  } finally { await rec.close(); }
+});
+
+// offline.spec.ts's 'reused' tests under PW_TEST_REUSE_CONTEXT=1: Playwright
+// keeps one context for the tests that ask the same options and does not
+// close it between them, and resets it for the next test, which needs the
+// network (Firefox clears its storage by loading its origin). keploy never
+// takes such a context offline: three tests in one context each reach the
+// app's page online, as with seeding off, and the run says once, at its
+// first seeded test, that the context stays online and what a request after
+// a test's end can then carry (one worker runs them all).
+for (const engine of ENGINES) {
+  test(`seeded, in ${engine}: in a browser context Playwright reuses, keploy leaves the context online, so a test after a seeded one is online, as with seeding off, and the run says once that the reused context stays online`, async () => {
+    const j = journal();
+    const rec = await fakeAgent(j);
+    try {
+      for (const mode of ['seeded', 'off']) {
+        const d = await drawsServer();
+        try {
+          const { tests, tmp, out } = await playwright(['offline.spec.ts', '-g', 'reused'], { ...keployEnv(rec.url), PW_BROWSER: engine, PW_TEST_REUSE_CONTEXT: '1', DRAWS_BASE: d.url, ...(mode === 'off' ? { KEPLOY_SEED_RANDOM: 'off' } : {}) });
+          const want = { 'online one': 'online', 'online two': 'online', 'online three': 'online' };
+          const got = {};
+          for (const [title, w] of Object.entries(want)) {
+            const key = Object.keys(tests).find((k) => k.endsWith(` › ${title}`));
+            assert.ok(key !== undefined, `${mode} ${title}\n${out}`);
+            assert.equal(tests[key].status, 'passed', `${mode} ${title}: ${tests[key].error}\n${out}`);
+            got[title] = JSON.parse(fs.readFileSync(path.join(tmp, `${title}.json`), 'utf8'));
+            assert.equal(got[title][0], w, `${mode} ${title}`);
+          }
+          // The premise: they ran in one context.
+          assert.equal(got['online two'][1], got['online one'][1], mode);
+          assert.equal(got['online three'][1], got['online one'][1], mode);
+          assert.doesNotMatch(out, /could not take the test's browser context offline/);
+          const first = Object.keys(tests).find((k) => k.endsWith(' › online one'));
+          const said = Object.entries(tests).flatMap(([k, t]) => t.stdout.split('\n').filter((l) => l.includes('Playwright keeps the test\'s browser context open')).map((l) => [k, l]));
+          assert.deepEqual(said, mode === 'seeded' ? [[first, reusedLine(first)]] : [], `${mode}\n${out}`);
+        } finally { await d.close(); }
       }
     } finally { await rec.close(); }
   });

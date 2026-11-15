@@ -30,6 +30,11 @@
 //     /agent/refusal), since keploy runs each test once in a run;
 //   - before the test's browser context closes, the test waits until none of
 //     its pages' calls is in flight (settle), so its calls end inside it;
+//     a seeded test's context then goes offline before it closes, whoever
+//     closes it (offlineBeforeClose), so a request the browser starts as it
+//     closes fails instead of reaching the app's server; a context
+//     Playwright reuses for the next test is not closed and stays online
+//     (reusedContext), and the worker says so once (reusedLine);
 //   - the test ends (POST /agent/scope/end) after its last teardown, with
 //     its outcome and what its context's pages drew their random numbers
 //     from (random); when keploy saw a call with no recorded answer, or a
@@ -67,7 +72,7 @@ import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
 import { NO_NOTE_LINE, differences, docLog, keepDocDraws, noteText, readNote, unreadNoteLine, type DocLog } from './note';
 import { OFF_LINE, SEEDED_LINE, besideOf, fakerLine, fakersOf, freshSeed, initScript, othersNow, pageAddress, placePages, processRandom, seatFaker, seatRandom, seedingFromEnv, setAside, tally, unplacedLine, unseededLine, workerRoutes, type Fakers, type Unplaced } from './random';
-import { Inflight, sharedWorkerLine, workersScript } from './settle';
+import { Inflight, offlineBeforeClose, reusedContext, reusedLine, sharedWorkerLine, workersScript } from './settle';
 
 export { expect, KeployError };
 export { seedFaker } from './random';
@@ -98,6 +103,9 @@ const saidFaker = new Set<string>();
 // How many contexts this worker seeded: each one's report function has its
 // own name.
 let reports = 0;
+// Whether this worker said that a seeded test's browser context Playwright
+// reuses for the next test is not taken offline (reusedLine).
+let saidReused = false;
 // How many contexts of a keploy test this worker opened: each one's Shared
 // Worker report function has its own name.
 let sharedReports = 0;
@@ -288,19 +296,33 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
     });
     await context.addInitScript({ content: workersScript(sharedReport) });
     const seeded = s.seed !== '';
+    // Seeded: the context goes offline before it closes, whoever closes it,
+    // so nothing keploy marked reaches the app's server as it closes.
+    const offline = seeded ? offlineBeforeClose(context, name, (line) => { process.stdout.write(`${line}\n`); }) : null;
     const opened = (): void => { if (seeded) s.seededPage = true; else s.ownPage = true; };
     if (context.pages().length > 0) opened();
     context.on('page', opened);
     try {
-      await use(context);
+      try {
+        await use(context);
+      } finally {
+        restore();
+        for (const say of waiting) say();
+      }
+      if (inflight.size > 0) {
+        const calls = inflight.describe();
+        const shown = calls.slice(0, 5).join(', ') + (calls.length > 5 ? `, and ${calls.length - 5} more` : '');
+        await base.step(`keploy: wait for the test's ${calls.length} call(s) in flight before its browser context closes: ${shown}`, () => inflight.settled());
+      }
     } finally {
-      restore();
-      for (const say of waiting) say();
-    }
-    if (inflight.size > 0) {
-      const calls = inflight.describe();
-      const shown = calls.slice(0, 5).join(', ') + (calls.length > 5 ? `, and ${calls.length - 5} more` : '');
-      await base.step(`keploy: wait for the test's ${calls.length} call(s) in flight before its browser context closes: ${shown}`, () => inflight.settled());
+      // A context Playwright reuses for the next test is not closed, and its
+      // reset for that test needs the network: it stays online.
+      if (offline !== null && !reusedContext(context, process.env)) {
+        await offline();
+      } else if (offline !== null && !saidReused) {
+        saidReused = true;
+        process.stdout.write(`${reusedLine(name)}\n`);
+      }
     }
   },
 

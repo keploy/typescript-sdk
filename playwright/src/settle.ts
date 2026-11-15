@@ -368,3 +368,120 @@ export function sharedWorkerLine(name: string, at: string): string {
     '(Playwright reports none of a Shared Worker\'s calls), so a call it still has in flight when the test ends is cut there; ' +
     'have the test wait for what the worker does (a message it posts, or what the page shows from it) before it ends.';
 }
+
+/**
+ * The line a seeded test shows when keploy could not take its browser
+ * context offline before Playwright closes it (closeOffline): why says what
+ * setOffline threw.
+ */
+export function offlineLine(name: string, why: string): string {
+  return `keploy: in ${name}, keploy could not take the test's browser context offline before it closes (${why}), ` +
+    'so a request the browser starts as the context closes (a Web Worker\'s script load, or the load of its seeding) can reach the app\'s server ' +
+    'with keploy\'s __keploy_worker mark in its URL; have the test wait for what its last step starts (a message a worker posts, or what the page shows from it) before it ends.';
+}
+
+/**
+ * Takes a seeded test's browser context offline once keploy's end-of-test
+ * wait is done, before the context closes (offlineBeforeClose). Firefox and WebKit
+ * send a request that a page or a worker starts while its context closes to
+ * the network past every route, keploy's too, so a worker's script load, or
+ * the load of its seeding, that keploy marked would reach the app's server
+ * with the mark in its URL; offline, the browser fails it instead. No test
+ * step reads what such a request gets, and it is the same at record and at
+ * replay. A context that cannot go offline (setOffline throws: the context
+ * or its browser is gone, or this Playwright has none) closes anyway, and
+ * the test says so through say.
+ */
+export async function closeOffline(context: { setOffline(offline: boolean): Promise<void> }, name: string, say: (line: string) => void): Promise<void> {
+  try {
+    await context.setOffline(true);
+  } catch (e) {
+    say(offlineLine(name, (e instanceof Error ? e.message : String(e)).split('\n')[0]));
+  }
+}
+
+/** A browser as offlineBeforeClose needs it. */
+export interface ClosingBrowser {
+  close(options?: { reason?: string }): Promise<void>;
+}
+
+/** A browser context as offlineBeforeClose needs it. */
+export interface Closing {
+  setOffline(offline: boolean): Promise<void>;
+  close(options?: { reason?: string }): Promise<void>;
+  browser(): ClosingBrowser | null;
+  on(event: 'close', listener: () => void): unknown;
+}
+
+// For each browser, the seeded contexts it has open: each goes offline
+// before the browser closes.
+const openOf = new WeakMap<ClosingBrowser, Set<() => Promise<void>>>();
+
+/**
+ * Has a seeded test's browser context go offline (closeOffline) before it
+ * closes, whoever closes it: keploy's fixture once its end-of-test wait is
+ * done (the function this returns), the test's own context.close(), or its
+ * browser's close. Playwright skips a context's own teardown once the test's
+ * time is spent, so when a test's timeout cut keploy's wait short the
+ * context closes with its browser, as the worker ends. The context goes
+ * offline once; a later call or close finds that done. A context that closed
+ * (or that Playwright handed on for reuse) is no longer its browser's to
+ * take offline.
+ */
+export function offlineBeforeClose(context: Closing, name: string, say: (line: string) => void): () => Promise<void> {
+  let done: Promise<void> | null = null;
+  const now = async (): Promise<void> => {
+    done ??= closeOffline(context, name, say);
+    await done;
+  };
+  const close = context.close;
+  context.close = async (options?: { reason?: string }): Promise<void> => {
+    await now();
+    return close.call(context, options);
+  };
+  const browser = context.browser();
+  if (browser !== null) {
+    let open = openOf.get(browser);
+    if (open === undefined) {
+      const all = new Set<() => Promise<void>>();
+      open = all;
+      openOf.set(browser, all);
+      const closeBrowser = browser.close;
+      browser.close = async (options?: { reason?: string }): Promise<void> => {
+        await Promise.all([...all].map((f) => f()));
+        return closeBrowser.call(browser, options);
+      };
+    }
+    const mine = open;
+    mine.add(now);
+    context.on('close', () => { mine.delete(now); });
+  }
+  return now;
+}
+
+/**
+ * Whether Playwright keeps this browser context open for the next test
+ * instead of closing it at the test's end (its reuseContext option, or
+ * PW_TEST_REUSE_CONTEXT, which VS Code's Playwright extension sets for Show
+ * browser). Playwright marks the context it hands out for reuse
+ * (_forReuse); a Playwright without that flag is taken as reusing it when
+ * PW_TEST_REUSE_CONTEXT is set.
+ */
+export function reusedContext(context: object, env: Record<string, string | undefined>): boolean {
+  const f = (context as { _forReuse?: unknown })._forReuse;
+  if (typeof f === 'boolean') return f;
+  return (env.PW_TEST_REUSE_CONTEXT ?? '') !== '';
+}
+
+/**
+ * The line a worker shows once, at its first seeded test in a browser
+ * context Playwright reuses: keploy does not take such a context offline,
+ * since Playwright's reset of it for the next test needs the network.
+ */
+export function reusedLine(name: string): string {
+  return `keploy: in ${name}, Playwright keeps the test's browser context open for the next test (its reuseContext option, or PW_TEST_REUSE_CONTEXT, which VS Code's Show browser sets), ` +
+    'so keploy does not take it offline as the test ends (Playwright\'s reset of it for the next test needs the network), ' +
+    'and a request its pages or workers start after a test ends (a Web Worker\'s script load, or the load of its seeding) can reach the app\'s server ' +
+    'with keploy\'s __keploy_worker mark in its URL; run keploy\'s tests without reuse (reuseContext: false, PW_TEST_REUSE_CONTEXT unset), ' +
+    'or have each test wait for what its last step starts (a message a worker posts, or what the page shows from it) before it ends.';
+}

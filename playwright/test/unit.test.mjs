@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { AgentClient, KeployError } from '../dist/agent.js';
 import { decide } from '../dist/join.js';
-import { Inflight, workersScript } from '../dist/settle.js';
+import { Inflight, closeOffline, offlineBeforeClose, offlineLine, reusedContext, reusedLine, workersScript } from '../dist/settle.js';
 import { markWorker } from '../dist/random.js';
 import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
@@ -727,4 +727,112 @@ test('keployText: keploy\'s reason once prefixed, or the fallback when it gave n
   assert.equal(keployText(undefined, 'keploy: fb'), 'keploy: fb');
   // Only the whole word with its separator counts as keploy's prefix.
   assert.equal(keployText('keploy:x', 'fb'), 'keploy: keploy:x');
+});
+
+test('closeOffline takes the context offline and says nothing; when setOffline throws, or there is none, it says once why, the first line of what was thrown', async () => {
+  const said = [];
+  const say = (l) => { said.push(l); };
+  const asked = [];
+  await closeOffline({ setOffline: async (o) => { asked.push(o); } }, 't', say);
+  assert.deepEqual([asked, said], [[true], []]);
+  await closeOffline({ setOffline: async () => { throw new Error('gone\ncall log'); } }, 't', say);
+  await closeOffline({ setOffline: async () => { throw 'a string'; } }, 'u', say);
+  await closeOffline({}, 'v', say);
+  assert.deepEqual(said, [offlineLine('t', 'gone'), offlineLine('u', 'a string'), offlineLine('v', 'context.setOffline is not a function')]);
+  assert.match(said[0], /^keploy: in t, keploy could not take the test's browser context offline before it closes \(gone\), so a request .* __keploy_worker mark/);
+});
+
+test('offlineBeforeClose: the context goes offline once, before it closes, whether keploy\'s wait ends first, Playwright closes it first (a test timeout), or the test closes it; close gets its options; a setOffline that throws says so once and the context closes anyway', async () => {
+  const fake = (setOffline) => {
+    const log = [];
+    const c = { setOffline: async (o) => { log.push(`offline ${o}`); await setOffline(); }, close: async function (opts) { log.push(['close', this === c, opts]); }, browser: () => null, on: () => c };
+    return { c, log };
+  };
+  const said = [];
+  const say = (l) => { said.push(l); };
+  // keploy's wait ends first, then Playwright closes it.
+  let { c, log } = fake(async () => {});
+  let now = offlineBeforeClose(c, 't', say);
+  assert.deepEqual(log, []);
+  await now();
+  await c.close({ reason: 'Test ended.' });
+  await now();
+  assert.deepEqual(log, ['offline true', ['close', true, { reason: 'Test ended.' }]]);
+  // Playwright closes it first (keploy's wait cut short), or the test does,
+  // twice; keploy's call after finds it done.
+  ({ c, log } = fake(async () => {}));
+  now = offlineBeforeClose(c, 't', say);
+  await c.close({ reason: 'Test timeout of 30000ms exceeded.' });
+  await c.close();
+  await now();
+  assert.deepEqual(log, ['offline true', ['close', true, { reason: 'Test timeout of 30000ms exceeded.' }], ['close', true, undefined]]);
+  // A close while setOffline is under way waits for it.
+  let open;
+  ({ c, log } = fake(() => new Promise((f) => { open = f; })));
+  now = offlineBeforeClose(c, 't', say);
+  const waited = now();
+  const closing = c.close();
+  await new Promise((f) => setImmediate(f));
+  assert.deepEqual(log, ['offline true']);
+  open();
+  await Promise.all([waited, closing]);
+  assert.deepEqual(log, ['offline true', ['close', true, undefined]]);
+  assert.deepEqual(said, []);
+  // setOffline throws: one line, and the context still closes.
+  ({ c, log } = fake(async () => { throw new Error('closed\ncall log'); }));
+  now = offlineBeforeClose(c, 'u', say);
+  await now();
+  await c.close();
+  assert.deepEqual([log, said], [['offline true', ['close', true, undefined]], [offlineLine('u', 'closed')]]);
+});
+
+test('reusedContext: Playwright\'s own _forReuse flag when the context has one; without it, whether PW_TEST_REUSE_CONTEXT is set; reusedLine names the test, why the context stays online and the next step', () => {
+  assert.equal(reusedContext({ _forReuse: true }, {}), true);
+  assert.equal(reusedContext({ _forReuse: false }, { PW_TEST_REUSE_CONTEXT: '1' }), false);
+  assert.equal(reusedContext({}, { PW_TEST_REUSE_CONTEXT: '1' }), true);
+  assert.equal(reusedContext({}, { PW_TEST_REUSE_CONTEXT: '' }), false);
+  assert.equal(reusedContext({}, {}), false);
+  assert.equal(reusedContext({ _forReuse: 'yes' }, { PW_TEST_REUSE_CONTEXT: '1' }), true);
+  assert.match(reusedLine('t'), /^keploy: in t, Playwright keeps the test's browser context open for the next test .*does not take it offline .* __keploy_worker mark in its URL; run keploy's tests without reuse \(reuseContext: false, PW_TEST_REUSE_CONTEXT unset\)/);
+});
+
+test('offlineBeforeClose: before a browser closes, each seeded context it has open goes offline (a test timeout: Playwright then closes the browser, not the context), and the browser closes once they have; a context that closed, or that Playwright handed on for reuse, is not asked; the browser\'s close is wrapped once', async () => {
+  const said = [];
+  const say = (l) => { said.push(l); };
+  const log = [];
+  const b = { close: async function (opts) { log.push(['browser close', this === b, opts]); } };
+  const fake = (n, setOffline = async () => {}) => {
+    const on = new Map();
+    const c = {
+      setOffline: async (o) => { log.push(`${n} offline ${o}`); await setOffline(); },
+      close: async () => { log.push(`${n} close`); on.get('close')?.(); },
+      browser: () => b,
+      on: (e, f) => { on.set(e, f); return c; },
+      emit: (e) => on.get(e)?.(),
+    };
+    return c;
+  };
+  let open;
+  const c1 = fake('c1', () => new Promise((f) => { open = f; }));
+  const c2 = fake('c2');
+  const c3 = fake('c3');
+  const c4 = fake('c4');
+  offlineBeforeClose(c1, 't1', say);
+  const wrapped = b.close;
+  offlineBeforeClose(c2, 't2', say);
+  offlineBeforeClose(c3, 't3', say);
+  offlineBeforeClose(c4, 't4', say);
+  assert.equal(b.close, wrapped);
+  // c3 closed through keploy (offline first); c4 was handed on for reuse
+  // (Playwright's disconnect says close, with no close call).
+  await c3.close();
+  c4.emit('close');
+  log.length = 0;
+  const closing = b.close({ reason: 'Test ended.' });
+  await new Promise((f) => setImmediate(f));
+  assert.deepEqual(log, ['c1 offline true', 'c2 offline true']);
+  open();
+  await closing;
+  assert.deepEqual(log, ['c1 offline true', 'c2 offline true', ['browser close', true, { reason: 'Test ended.' }]]);
+  assert.deepEqual(said, []);
 });
