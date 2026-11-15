@@ -552,7 +552,7 @@ for (const engine of ['chromium', 'firefox', 'webkit']) {
         } else {
           assert.equal(t.status, 'passed', out);
         }
-        const waited = t.steps.filter((x) => x.startsWith('keploy: wait for') && /\/(rw\.js|rwm\.js|rf)(\?|,|\s|$)/.test(x));
+        const waited = t.steps.filter((x) => x.startsWith('keploy: wait for') && /:\d+\/(rw\.js|rwm\.js|rf)(\?|,|\s|$)/.test(x));
         assert.deepEqual(waited, [], t.steps.join('\n'));
       } finally { await p.close(); await a.close(); }
     });
@@ -567,7 +567,7 @@ for (const engine of ['chromium', 'firefox', 'webkit']) {
 // (waitedFor).
 for (const engine of ['chromium', 'firefox', 'webkit']) {
   test(`settle, in ${engine}: a call the test's own route sends on is waited for, though the route's fulfill failed (after it was sent on, its handler throwing${engine === 'webkit' ? '; or refused before, as WebKit refuses a redirect' : ''})`, async () => {
-    await waitedFor("a call the test's route sends on and then tries to answer", 'GET', '/slow', engine, /Route is already handled/);
+    await waitedFor("a call the test's route sends on and then tries to answer", 'GET', '/slow', engine, /route\.fulfill: Route is already handled!/);
     if (engine === 'webkit') await waitedFor("a call the test's route sends on after the browser refused its answer", 'GET', '/slow', engine);
   });
 }

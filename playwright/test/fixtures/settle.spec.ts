@@ -305,9 +305,23 @@ test('a Web Worker whose top-level code runs long', async ({ page }) => {
 // test there, and the request stays with the route.
 test("requests the test's route answers with a redirect", async ({ page }) => {
   await page.goto(`${base}/page`);
-  await page.route('**/rw.js', (r) => r.fulfill({ status: 302, headers: { location: `${base}/v2/rw.js` } }));
-  await page.route('**/rwm.js', (r) => r.fulfill({ status: 307, headers: { location: `${base}/v2/rwm.js` } }));
-  await page.route('**/rf', (r) => r.fulfill({ status: 302, headers: { location: `${base}/v2/rf` } }));
+  // Each route's handler says when it has ended (its fulfill returned, or
+  // threw), and the body ends only then.
+  const ended: Promise<void>[] = [];
+  const redirect = (glob: string, status: number, to: string): Promise<void> => {
+    let end = (): void => {};
+    ended.push(new Promise<void>((resolve) => { end = resolve; }));
+    return page.route(glob, async (r) => {
+      try {
+        await r.fulfill({ status, headers: { location: to } });
+      } finally {
+        end();
+      }
+    });
+  };
+  await redirect('**/rw.js', 302, `${base}/v2/rw.js`);
+  await redirect('**/rwm.js', 307, `${base}/v2/rwm.js`);
+  await redirect('**/rf', 302, `${base}/v2/rf`);
   const sent = Promise.all([/\/rw\.js(\?|$)/, /\/rwm\.js(\?|$)/, /\/rf$/].map((u) => page.waitForRequest(u)));
   await page.evaluate(() => {
     const g = globalThis as unknown as { w: Worker[] };
@@ -315,6 +329,7 @@ test("requests the test's route answers with a redirect", async ({ page }) => {
     void fetch('/rf').catch(() => {});
   });
   await sent;
+  await Promise.all(ended);
 });
 // A route whose answer the browser refused (WebKit refuses a redirect)
 // sends the call on; the server has it before the body ends.

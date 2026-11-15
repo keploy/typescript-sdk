@@ -278,9 +278,12 @@ export class Inflight {
       if ((route as unknown as { _handlingPromise?: unknown })._handlingPromise) this.answered(r);
       return;
     }
-    const fulfill = route.fulfill;
+    // Bound, not called through Function.prototype.call: Playwright names
+    // an API call by how its caller invoked it, and its error must read as
+    // Playwright's own (route.fulfill: ...), as with no keploy.
+    const fulfill = route.fulfill.bind(route);
     route.fulfill = async (o) => {
-      await fulfill.call(route, o);
+      await fulfill(o);
       this.answered(r);
     };
   }
