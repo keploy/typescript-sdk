@@ -535,7 +535,9 @@ for (const engine of ['chromium', 'firefox', 'webkit']) {
 // too), and WebKit refuses the answer, with Playwright's own error, and the
 // request stays with the route. Settle waits on none of them, seeded or off:
 // a wait shows as settle's step naming the request (and a timeout at the
-// config's 30 s: the row sets no short timeout).
+// config's 30 s: the row sets no short timeout). The fixture's handlers end
+// together: Playwright ends a test at a handler's first throw, and a
+// handler still waiting on its fulfill then holds its request in flight.
 for (const engine of ['chromium', 'firefox', 'webkit']) {
   for (const seed of ['seeded', 'off']) {
     test(`settle, in ${engine}, ${seed}: a request the test's own route answers with a redirect (a classic Web Worker's script with a 302, a module one's with a 307, a page fetch with a 302) is not waited for, and the test ${engine === 'webkit' ? "fails with Playwright's own error (WebKit refuses the answer)" : 'passes'}`, async () => {
@@ -560,18 +562,37 @@ for (const engine of ['chromium', 'firefox', 'webkit']) {
 }
 
 // A request the test's route sends on (continue) is waited for, though a
-// fulfill of the route failed: in every engine, one the route had sent on
-// before, whose handler then throws Playwright's "already handled" (which
-// fails the test; Playwright's own check refuses that fulfill before it
-// makes any API call, so its error names no API, as with no keploy); in
-// WebKit, one whose redirect the browser refused before the route sent it
-// on. The server answers it once settle's step has begun (waitedFor).
+// fulfill of the route failed after: its handler then throws Playwright's
+// "already handled" (which fails the test; Playwright's own check refuses
+// that fulfill before it makes any API call, so its error names no API, as
+// with no keploy). The server answers it once settle's step has begun
+// (waitedFor).
 for (const engine of ['chromium', 'firefox', 'webkit']) {
-  test(`settle, in ${engine}: a call the test's own route sends on is waited for, though the route's fulfill failed (after it was sent on, its handler throwing${engine === 'webkit' ? '; or refused before, as WebKit refuses a redirect' : ''})`, async () => {
+  test(`settle, in ${engine}: a call the test's own route sends on is waited for, though the route's fulfill failed after it was sent on, its handler throwing`, async () => {
     await waitedFor("a call the test's route sends on and then tries to answer", 'GET', '/slow', engine, /^Error: Route is already handled!\n/);
-    if (engine === 'webkit') await waitedFor("a call the test's route sends on after the browser refused its answer", 'GET', '/slow', engine);
   });
 }
+
+// WebKit refuses a route's redirect (route.fulfill 302), and Playwright then
+// lets no route reach the request: a continue() of it fails with
+// Playwright's own error (route.continue: Route is already handled!), which
+// the handler throws and which fails the test. Settle does not wait on the
+// call. WebKit holds it until the test's browser context is deleted, and
+// then may send it to the server (Playwright sends nothing for it, with or
+// without keploy), so the row asserts nothing of the server.
+test("settle, in webkit: a call the test's own route tries to send on after WebKit refused its redirect fails with Playwright's own error, and is not waited for", async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  const p = await pageServer(j);
+  try {
+    const title = "a call the test's route tries to send on after the browser refused its answer";
+    const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, PW_BROWSER: 'webkit' });
+    const t = tests[title];
+    assert.equal(t.status, 'failed', out);
+    assert.match(t.error, /^Error: route\.continue: Route is already handled!\n/, out);
+    assert.deepEqual(t.steps.filter((x) => x.startsWith('keploy: wait for') && /\/slow(,|\s|$)/.test(x)), [], t.steps.join('\n'));
+  } finally { await p.close(); await a.close(); }
+});
 
 // Settle rows where a call is still waited for: the page server answers it
 // only once settle's step has begun (the rows' reporter asks /release then),

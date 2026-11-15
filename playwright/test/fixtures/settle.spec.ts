@@ -305,23 +305,38 @@ test('a Web Worker whose top-level code runs long', async ({ page }) => {
 // test there, and the request stays with the route.
 test("requests the test's route answers with a redirect", async ({ page }) => {
   await page.goto(`${base}/page`);
-  // Each route's handler says when it has ended (its fulfill returned, or
-  // threw), and the body ends only then.
-  const ended: Promise<void>[] = [];
+  // Playwright ends a test at the first error a route's handler throws,
+  // while the other handlers may still wait on their fulfill: their
+  // requests are then in flight, and settle's step names them. So each
+  // handler, once its fulfill has returned or thrown, waits until every
+  // route's first fulfill has, and then throws what its fulfill threw: in
+  // WebKit the three handlers throw together. The body ends once each
+  // route's first handler has returned (never, in WebKit).
+  const fulfilled: Promise<void>[] = [];
+  const returned: Promise<void>[] = [];
+  let together: Promise<unknown> = Promise.resolve();
   const redirect = (glob: string, status: number, to: string): Promise<void> => {
+    let done = (): void => {};
     let end = (): void => {};
-    ended.push(new Promise<void>((resolve) => { end = resolve; }));
+    fulfilled.push(new Promise<void>((resolve) => { done = resolve; }));
+    returned.push(new Promise<void>((resolve) => { end = resolve; }));
     return page.route(glob, async (r) => {
+      let refused: { error: unknown } | null = null;
       try {
         await r.fulfill({ status, headers: { location: to } });
-      } finally {
-        end();
+      } catch (error) {
+        refused = { error };
       }
+      done();
+      await together;
+      if (refused !== null) throw refused.error;
+      end();
     });
   };
   await redirect('**/rw.js', 302, `${base}/v2/rw.js`);
   await redirect('**/rwm.js', 307, `${base}/v2/rwm.js`);
   await redirect('**/rf', 302, `${base}/v2/rf`);
+  together = Promise.all(fulfilled);
   const sent = Promise.all([/\/rw\.js(\?|$)/, /\/rwm\.js(\?|$)/, /\/rf$/].map((u) => page.waitForRequest(u)));
   await page.evaluate(() => {
     const g = globalThis as unknown as { w: Worker[] };
@@ -329,20 +344,26 @@ test("requests the test's route answers with a redirect", async ({ page }) => {
     void fetch('/rf').catch(() => {});
   });
   await sent;
-  await Promise.all(ended);
+  await Promise.all(returned);
 });
-// A route whose answer the browser refused (WebKit refuses a redirect)
-// sends the call on; the server has it before the body ends.
-test("a call the test's route sends on after the browser refused its answer", async ({ page }) => {
+// WebKit refuses a redirect, and no route can then reach the request:
+// Playwright's continue() of it fails with Playwright's own error, which
+// the handler throws and which fails the test. The body ends once the
+// handler has returned (never, in WebKit). WebKit holds the request until
+// the context is deleted, and may then send it to the server.
+test("a call the test's route tries to send on after the browser refused its answer", async ({ page }) => {
   await page.goto(`${base}/page`);
+  let end = (): void => {};
+  const returned = new Promise<void>((resolve) => { end = resolve; });
   await page.route('**/slow', async (r) => {
     await r.fulfill({ status: 302, headers: { location: `${base}/page` } }).catch(() => {});
     await r.continue();
+    end();
   });
   const sent = page.waitForRequest(/\/slow$/);
-  await page.evaluate(() => { void fetch('/slow'); });
+  await page.evaluate(() => { void fetch('/slow').catch(() => {}); });
   await sent;
-  await reached();
+  await returned;
 });
 // A route sends the call on, then tries to answer it too: Playwright's
 // fulfill throws (the route is already handled), and so does the handler,
