@@ -70,6 +70,16 @@ async function pageServer(j) {
     // A Shared Worker that answers each page that connects.
     if (req.url === '/shared.js?v=1') { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end("onconnect = (e) => { e.ports[0].postMessage('up'); };"); return; }
     if (req.url === '/nocontent') { res.writeHead(204); res.end(); return; }
+    // A Web Worker's script, classic or module, answered only once /release
+    // is called.
+    if (req.url === '/heldw.js' || req.url === '/heldw.mjs') {
+      j.add({ page: 'heldw sent' });
+      saw();
+      res.on('close', () => { if (!res.writableFinished) j.add({ page: 'heldw cut' }); });
+      res.on('finish', () => j.add({ page: 'heldw answered' }));
+      void released.then(() => { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end('postMessage("up");'); });
+      return;
+    }
     if (req.url === '/resetcontent') { res.writeHead(205); res.end(); return; }
     // A disposition's type is case-insensitive (RFC 6266): the browser downloads "Attachment" too.
     if (req.url === '/download') { res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': 'Attachment; filename="d.bin"' }); res.end('bytes'); return; }
@@ -448,6 +458,36 @@ for (const engine of ['chromium', 'firefox', 'webkit']) {
   });
 }
 
+// A Web Worker the page terminates while its script loads: Chromium reports
+// no end for that load, ever (and no 'worker' event), so settle drops it on
+// the page's word of the terminate; Firefox and WebKit go on loading it and
+// report its end, which settle waits for (the server answers once settle's
+// step has begun). Of two Web Workers at one URL, the one terminated is
+// dropped and the other's load waited for. Seeded, keploy's route fetches
+// the worker's script and ends the load when its fulfill has run. A settle
+// that waits on the terminated load in Chromium ends the test by its
+// timeout (the config's 30 s): no wall-clock bound in the row.
+for (const engine of ['chromium', 'firefox', 'webkit']) {
+  for (const seed of ['seeded', 'off']) {
+    test(`settle, in ${engine}, ${seed}: a test whose page terminates a Web Worker (classic and module) while its script loads ends, and of two Web Workers at one URL the one terminated is not waited for and the other is`, async (t) => {
+      for (const title of ['a Web Worker its page terminates while its script loads', 'two Web Workers at one URL, the second terminated while their scripts load']) {
+        const j = journal();
+        const a = await fakeAgent(j);
+        const p = await pageServer(j);
+        try {
+          const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), ...(seed === 'off' ? { KEPLOY_SEED_RANDOM: 'off' } : {}), SLOW_BASE: p.url, NO_RELEASE: '1', RELEASE_AT_STEP: `${p.url}/release`, PW_BROWSER: engine });
+          const r = tests[title];
+          assert.equal(r.status, 'passed', `${title}\n${out}`);
+          const order = j.events.map((e) => (e.page ? e.page : e.agent.path));
+          // The surviving worker's load is answered before the test ends.
+          if (title.startsWith('two')) assert.ok(order.indexOf('heldw answered') >= 0 && order.indexOf('heldw answered') < order.indexOf('/agent/scope/end'), order.join(', '));
+          t.diagnostic(`${title}: ${order.filter((e) => e.startsWith('heldw') || e === '/agent/scope/end').join(', ')}; steps: ${r.steps.filter((x) => x.startsWith('keploy: wait for')).join(' | ')}`);
+        } finally { await p.close(); await a.close(); }
+      }
+    });
+  }
+}
+
 // Settle rows where a call is still waited for: the page server answers it
 // only once settle's step has begun (the rows' reporter asks /release then),
 // so the test ends by settle's own wait, with no deadline on its body. The
@@ -690,7 +730,7 @@ async function drawsServer() {
       // and sends what its own code gets at its script's URL (OWN).
       '/wk/ded.js': `importScripts('dep.js'); onmessage = (e) => postMessage({ kind: 'ded-early', data: e.data }); postMessage({ kind: 'ded', draws: ${DRAWS}, href: location.href, dep: self.dep, stack: String(new Error('at').stack), errs: ${ERRS} }); ${OWN('ded')} ${REFS}.then((v) => postMessage({ kind: 'ded-ref', ...v }));`,
       '/wk/dep.js': 'self.dep = \'dep\';',
-      '/wk/mod.js': `import { dep } from './lib.mjs'; self.onmessage = (e) => postMessage({ kind: 'mod-early', data: e.data }); postMessage({ kind: 'mod', draws: ${DRAWS}, href: location.href, dep, meta: import.meta.url, top: String(new Error('at').stack), errs: ${ERRS} }); ${OWN('mod')} ${REFS}.then((v) => postMessage({ kind: 'mod-ref', ...v }));`,
+      '/wk/mod.js': `import { dep } from './lib.mjs'; self.onmessage = (e) => postMessage({ kind: 'mod-early', data: e.data }); postMessage({ kind: 'mod', draws: ${DRAWS}, href: location.href, dep, meta: import.meta.url, rel: new URL('./lib.mjs', import.meta.url).href, up: new URL('../wk/data.json?v=2', import.meta.url).href, frag: new URL('#part', import.meta.url).href, top: String(new Error('at').stack), errs: ${ERRS} }); ${OWN('mod')} ${REFS}.then((v) => postMessage({ kind: 'mod-ref', ...v }));`,
       '/wk/lib.mjs': 'export const dep = \'lib\';',
       '/wk/shared.js': `const ref = ${REFS}; onconnect = (e) => { e.ports[0].postMessage({ kind: 'shared', draws: ${DRAWS}, href: location.href, stack: String(new Error('at').stack), errs: ${ERRS} }); ref.then((v) => e.ports[0].postMessage({ kind: 'shared-ref', ...v })); };`,
       // Module Shared Workers: one plain, one (started by two names, c1
@@ -1555,6 +1595,13 @@ for (const engine of ENGINES) {
       // marked URL, which its import.meta.url shows (workerAnswer). A stack
       // through either shows no mark.
       assert.equal(w.mod.meta, markWorker(w.mod.href, 'm', mod.token));
+      // A URL the module builds from its import.meta.url with a relative
+      // path, or a query of its own, is the app's, with no mark (the path is
+      // the app's); one with a fragment alone keeps the URL's query, mark
+      // and all, as code that compares the exact URL sees it.
+      assert.equal(w.mod.rel, w.mod.href.replace(/mod\.js$/, 'lib.mjs'));
+      assert.equal(w.mod.up, w.mod.href.replace(/mod\.js$/, 'data.json?v=2'));
+      assert.equal(w.mod.frag, `${w.mod.meta}#part`);
       assert.match(w.mshared.meta, /^http:\/\/127\.0\.0\.1:\d+\/wk\/mshared\.js$/);
       for (const c of [w.c1, w.c2, w['c1+2']]) assert.match(c.meta, /^http:\/\/127\.0\.0\.1:\d+\/wk\/cshared\.js$/);
       // No code of keploy's is on a stack through the app's script, at its

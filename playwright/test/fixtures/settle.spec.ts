@@ -262,3 +262,27 @@ test('a page that starts a Shared Worker', async ({ page }) => {
   }));
   if (said !== 'up') throw new Error(`the Shared Worker said ${said}`);
 });
+test('a Web Worker its page terminates while its script loads', async ({ page }) => {
+  await page.goto(`${base}/page`);
+  const sent = page.waitForRequest(/\/heldw\.m?js(\?|$)/);
+  await page.evaluate(() => {
+    const g = globalThis as unknown as { w: Worker[] };
+    g.w = [new Worker('/heldw.js'), new Worker('/heldw.mjs', { type: 'module' })];
+  });
+  await sent;
+  await reached();
+  await page.evaluate(() => { (globalThis as unknown as { w: Worker[] }).w.forEach((w) => w.terminate()); });
+});
+test('two Web Workers at one URL, the second terminated while their scripts load', async ({ page }) => {
+  await page.goto(`${base}/page`);
+  const sent = page.waitForRequest(/\/heldw\.js(\?|$)/);
+  await page.evaluate(() => {
+    const g = globalThis as unknown as { w: Worker[]; up: Promise<unknown> };
+    g.w = [new Worker('/heldw.js'), new Worker('/heldw.js')];
+    // The first worker's script runs once the server answers it.
+    g.up = new Promise((resolve) => { g.w[0].onmessage = (e) => resolve(e.data); });
+  });
+  await sent;
+  await reached();
+  await page.evaluate(() => { (globalThis as unknown as { w: Worker[] }).w[1].terminate(); });
+});

@@ -2139,9 +2139,15 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
   // URL, method, headers and post data, or the request's (the URL the app
   // asked for, or one a fallback gave, and what fallbacks gave it).
   const answer = async (route: Route, m: WorkerMark, own: Route['fulfill'], h?: Handed, o: Asked = {}): Promise<void> => {
+    // Once keploy's fulfill has run, nothing of the request is in flight:
+    // one that throws (the worker was terminated while keploy fetched its
+    // script, and the browser dropped the request) ends it too.
     const fulfill = async (o: Parameters<Route['fulfill']>[0]): Promise<void> => {
-      await own(o);
-      hooks.answered?.(route.request());
+      try {
+        await own(o);
+      } finally {
+        hooks.answered?.(route.request());
+      }
     };
     if (m.kind === 'p' || m.kind === 'q') {
       await fulfill({ status: 200, contentType: 'text/javascript', body: workerScript(m.token, m.n, m.kind === 'p' ? 'm' : 'w', reach) });

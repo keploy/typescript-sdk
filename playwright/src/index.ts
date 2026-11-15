@@ -67,7 +67,7 @@ import { ENV_TEST_PID, decide } from './join';
 import type { Joining } from './join';
 import { NO_NOTE_LINE, differences, docLog, keepDocDraws, noteText, readNote, unreadNoteLine, type DocLog } from './note';
 import { OFF_LINE, SEEDED_LINE, besideOf, fakerLine, fakersOf, freshSeed, initScript, othersNow, pageAddress, placePages, processRandom, seatFaker, seatRandom, seedingFromEnv, setAside, tally, unplacedLine, unseededLine, workerRoutes, type Fakers, type Unplaced } from './random';
-import { Inflight, sharedWorkerLine, sharedWorkerScript } from './settle';
+import { Inflight, sharedWorkerLine, workersScript } from './settle';
 
 export { expect, KeployError };
 export { seedFaker } from './random';
@@ -184,7 +184,9 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
     // The lines that wait for a parent's parser to end, each said at the
     // test's end if it has not.
     const waiting = new Set<() => void>();
-    const inflight = new Inflight(context);
+    // Chromium reports no end for the script load of a Web Worker
+    // terminated while it loads; its document's word drops it.
+    const inflight = new Inflight(context, browserName === 'chromium');
     if (s.seed !== '') {
       // A document the seeding cannot place draws the browser's own numbers
       // and says so here, once for each address and reason in the test.
@@ -265,18 +267,26 @@ const keployTestType = base.extend<TestFixtures, WorkerFixtures>({
     }
     // Seeded or not: each Shared Worker a page starts is one settle does not
     // wait on, and the test says so once for each script address (origin
-    // and path).
+    // and path); a Web Worker a page terminates drops its script load if
+    // the browser reports no end for it (workersScript).
     const sharedReport = `__keploy_shared_worker_${++sharedReports}`;
     const sharedTold = new Set<string>();
-    await context.exposeBinding(sharedReport, (source, url: unknown) => {
+    await context.exposeBinding(sharedReport, (source, kind: unknown, url: unknown, n: unknown, k: unknown) => {
+      if (kind === 'd') return inflight.webWorkerDocument(source.frame);
+      if (kind === 't') {
+        inflight.webWorkerStopped(Number(url), String(n), Number(k));
+        return undefined;
+      }
+      if (kind !== 's') return undefined;
       const u = String(url);
       inflight.sharedWorker(source.frame, u);
       const at = pageAddress(u.split('?')[0]);
-      if (sharedTold.has(at)) return;
+      if (sharedTold.has(at)) return undefined;
       sharedTold.add(at);
       process.stdout.write(`${sharedWorkerLine(name, at)}\n`);
+      return undefined;
     });
-    await context.addInitScript({ content: sharedWorkerScript(sharedReport) });
+    await context.addInitScript({ content: workersScript(sharedReport) });
     const seeded = s.seed !== '';
     const opened = (): void => { if (seeded) s.seededPage = true; else s.ownPage = true; };
     if (context.pages().length > 0) opened();

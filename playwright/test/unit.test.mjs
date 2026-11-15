@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { AgentClient, KeployError } from '../dist/agent.js';
 import { decide } from '../dist/join.js';
-import { Inflight, sharedWorkerScript } from '../dist/settle.js';
+import { Inflight, workersScript } from '../dist/settle.js';
 import { markWorker } from '../dist/random.js';
 import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
@@ -363,23 +363,23 @@ test('settle: a request of the frame that started a Shared Worker at its script\
   assert.deepEqual([woke, one.size], [true, 0]);
 });
 
-test('sharedWorkerScript: the page\'s SharedWorker starts each worker as asked, then reports its script URL against the document\'s base with no fragment; the binding leaves the window; a worker the browser refuses throws its own error and reports nothing; new, instanceof, constructor, name and length kept; with no binding the browser\'s own stays', () => {
+test('workersScript: the page\'s SharedWorker starts each worker as asked, then reports its script URL against the document\'s base with no fragment; the binding leaves the window; a worker the browser refuses throws its own error and reports nothing; new, instanceof, constructor, name and length kept; with no binding the browser\'s own stays', () => {
   const made = [];
   const told = [];
   class Base {}
   class SharedWorker extends Base { constructor(url, o) { super(); if (String(url) === 'http://[' || String(url).endsWith('/refused.js')) throw new SyntaxError('the browser\'s own'); made.push([url, o]); } }
-  const ctx = { URL, document: { baseURI: 'http://h/a/p' }, location: { href: 'http://h/b/p' }, __r: (u) => { told.push(u); return Promise.reject(new Error('gone')); } };
+  const ctx = { URL, document: { baseURI: 'http://h/a/p' }, location: { href: 'http://h/b/p' }, __r: (k, u) => { told.push(`${k} ${u}`); return Promise.reject(new Error('gone')); } };
   // As a window's: not enumerable; the wrapper keeps the property's flags.
   Object.defineProperty(ctx, 'SharedWorker', { value: SharedWorker, writable: true, enumerable: false, configurable: true });
   vm.createContext(ctx);
-  vm.runInContext(sharedWorkerScript('__r'), ctx);
+  vm.runInContext(workersScript('__r'), ctx);
   assert.equal(vm.runInContext('typeof __r', ctx), 'undefined');
   const o = { name: 'n', type: 'module' };
   ctx.o = o;
   vm.runInContext('globalThis.w = new SharedWorker("s.js?q=1#f", o)', ctx);
   assert.deepEqual(made, [['s.js?q=1#f', o]]);
   assert.equal(made[0][1], o);
-  assert.deepEqual(told, ['http://h/a/s.js?q=1']);
+  assert.deepEqual(told, ['s http://h/a/s.js?q=1']);
   assert.equal(vm.runInContext('w instanceof SharedWorker && SharedWorker.prototype.constructor === SharedWorker && SharedWorker.name === "SharedWorker" && SharedWorker.length === 1', ctx), true);
   assert.equal(vm.runInContext('const d = Object.getOwnPropertyDescriptor(globalThis, "SharedWorker"); JSON.stringify([d.enumerable, d.writable, d.configurable])', ctx), '[false,true,true]');
   assert.equal(Object.getPrototypeOf(ctx.SharedWorker), Base);
@@ -389,17 +389,121 @@ test('sharedWorkerScript: the page\'s SharedWorker starts each worker as asked, 
   // A window with no document yet: its location.
   delete ctx.document;
   vm.runInContext('new SharedWorker("s.js")', ctx);
-  assert.deepEqual(told, ['http://h/a/s.js?q=1', 'http://h/b/s.js']);
+  assert.deepEqual(told, ['s http://h/a/s.js?q=1', 's http://h/b/s.js']);
   // A report that throws: the worker is still the app's.
   const c2 = { URL, SharedWorker, location: { href: 'http://h/p' }, __r: () => { throw new Error('gone'); } };
   vm.createContext(c2);
-  vm.runInContext(sharedWorkerScript('__r'), c2);
+  vm.runInContext(workersScript('__r'), c2);
   assert.equal(vm.runInContext('new SharedWorker("/s.js") instanceof SharedWorker', c2), true);
   // No binding: the browser's own stays.
   const c3 = { URL, SharedWorker, location: { href: 'http://h/p' } };
   vm.createContext(c3);
-  vm.runInContext(sharedWorkerScript('__r'), c3);
+  vm.runInContext(workersScript('__r'), c3);
   assert.equal(c3.SharedWorker, SharedWorker);
+});
+
+test('workersScript: the page\'s Worker starts each Web Worker as asked and numbers it among the document\'s Web Workers at its URL (resolved, no fragment), from 1; the first asks the document\'s number; terminate() calls the browser\'s own, then reports the number, URL and place once for each worker; a refused worker is not numbered; a terminate of no worker throws the browser\'s own error; called without new, Worker throws as the browser\'s does; new, instanceof, constructor, name, length and terminate\'s name, length and flags kept', async () => {
+  const told = [];
+  const stopped = [];
+  class Base {}
+  class Worker extends Base {
+    constructor(url) { super(); if (String(url).endsWith('/refused.js')) throw new SyntaxError('the browser\'s own'); }
+  }
+  Object.defineProperty(Worker.prototype, 'terminate', { value: function terminate() { if (!(this instanceof Worker)) throw new TypeError('Illegal invocation'); stopped.push(this); }, writable: true, enumerable: true, configurable: true });
+  const ctx = { URL, document: { baseURI: 'http://h/a/p' }, location: { href: 'http://h/b/p' }, __r: (...a) => { told.push(a); return Promise.resolve(a[0] === 'd' ? 7 : undefined); } };
+  Object.defineProperty(ctx, 'Worker', { value: Worker, writable: true, enumerable: false, configurable: true });
+  vm.createContext(ctx);
+  vm.runInContext(workersScript('__r'), ctx);
+  assert.throws(() => vm.runInContext('new Worker("/refused.js")', ctx), (e) => e.message === 'the browser\'s own');
+  assert.deepEqual(told, []);
+  vm.runInContext('globalThis.a = new Worker("w.js#x"); globalThis.b = new Worker("/a/w.js"); globalThis.c = new Worker("v.js")', ctx);
+  // The document's number is asked once, at its first Web Worker.
+  assert.deepEqual(told, [['d']]);
+  vm.runInContext('b.terminate(); b.terminate(); a.terminate(); c.terminate()', ctx);
+  assert.deepEqual(stopped, [ctx.b, ctx.b, ctx.a, ctx.c]);
+  await ticks();
+  assert.deepEqual(told.slice(1), [['t', 7, 'http://h/a/w.js', 2], ['t', 7, 'http://h/a/w.js', 1], ['t', 7, 'http://h/a/v.js', 1]]);
+  assert.throws(() => vm.runInContext('Worker.prototype.terminate.call({})', ctx), (e) => e.message === 'Illegal invocation');
+  assert.throws(() => vm.runInContext('Worker("/w.js")', ctx), TypeError);
+  assert.equal(stopped.length, 4);
+  assert.equal(vm.runInContext('a instanceof Worker && Worker.prototype.constructor === Worker && Worker.name === "Worker" && Worker.length === 1 && Worker.prototype.terminate.name === "terminate" && Worker.prototype.terminate.length === 0', ctx), true);
+  assert.equal(vm.runInContext('const d = Object.getOwnPropertyDescriptor(Worker.prototype, "terminate"); JSON.stringify([d.enumerable, d.writable, d.configurable])', ctx), '[true,true,true]');
+  // A document whose number keploy could not give: its terminate reports
+  // nothing, and stops the worker.
+  const t2 = [];
+  const c2 = { URL, Worker, location: { href: 'http://h/p' }, __r: (...a) => { t2.push(a); return Promise.reject(new Error('gone')); } };
+  vm.createContext(c2);
+  vm.runInContext(workersScript('__r'), c2);
+  vm.runInContext('new Worker("/w.js").terminate()', c2);
+  await ticks();
+  assert.deepEqual(t2, [['d']]);
+  assert.equal(stopped.length, 5);
+});
+
+test('settle (Chromium): the script load of a Web Worker its document terminated is dropped, the k-th script request of its frame at that URL (fragment and keploy\'s mark aside) while the document was the frame\'s, reported before the word or after; a load that ended, another place, another frame, another document of the frame (its commit came between), a URL keploy marked for its own route (answered ends it) and another engine are waited for', async () => {
+  const ctx = fakeContext();
+  const inflight = new Inflight(ctx, true);
+  const page = new EventEmitter();
+  ctx.emit('page', page);
+  const f = { page: () => page };
+  const g = { page: () => page };
+  const load = (frame, url, type = 'script') => ({ frame: () => frame, isNavigationRequest: () => false, method: () => 'GET', url: () => url, resourceType: () => type });
+  const doc = inflight.webWorkerDocument(f);
+  const one = load(f, 'http://h/w.js#a');
+  const two = load(f, 'http://h/w.js');
+  const fetched = load(f, 'http://h/w.js', 'fetch');
+  const other = load(g, 'http://h/w.js');
+  for (const r of [one, fetched, two, other]) ctx.emit('request', r);
+  assert.equal(inflight.size, 4);
+  let settled = false;
+  inflight.settled().then(() => { settled = true; });
+  // The first ended; the second is dropped when its worker is terminated.
+  ctx.emit('requestfinished', one);
+  inflight.webWorkerStopped(doc, 'http://h/w.js', 1);
+  assert.equal(inflight.size, 3);
+  inflight.webWorkerStopped(doc, 'http://h/w.js#z', 2);
+  assert.equal(inflight.size, 2);
+  // A place the frame reported no load for yet: dropped when reported.
+  inflight.webWorkerStopped(doc, 'http://h/w.js', 3);
+  ctx.emit('request', load(f, 'http://h/w.js'));
+  assert.equal(inflight.size, 2);
+  // A word with no document, or a place that is no number: nothing.
+  inflight.webWorkerStopped(doc + 9, 'http://h/w.js', 4);
+  inflight.webWorkerStopped(doc, 'http://h/w.js', Number.NaN);
+  inflight.webWorkerStopped(doc, 'http://h/w.js', 0);
+  ctx.emit('request', load(f, 'http://h/w.js'));
+  assert.equal(inflight.size, 3);
+  // keploy's mark for a Web Worker's script counts as its URL, but keploy's
+  // route ends it; its seeding's own load counts nowhere.
+  const t = 'ab'.repeat(16);
+  const marked = load(f, markWorker('http://h/m.js', 'w', t));
+  ctx.emit('request', load(f, markWorker('http://h/m.js', 'q', t, 0)));
+  ctx.emit('request', marked);
+  ctx.emit('request', load(f, 'http://h/m.js'));
+  inflight.webWorkerStopped(doc, 'http://h/m.js', 1);
+  assert.equal(inflight.size, 6);
+  inflight.webWorkerStopped(doc, 'http://h/m.js', 2);
+  assert.equal(inflight.size, 5);
+  // The frame commits a new document: its Web Workers are numbered anew,
+  // and the old document's word names the old one's loads.
+  ctx.emit('response', { request: () => ({ isNavigationRequest: () => true, frame: () => f }), status: () => 200, headers: () => ({}) });
+  page.emit('framenavigated', f);
+  const fresh = load(f, 'http://h/w.js');
+  ctx.emit('request', fresh);
+  const now = inflight.size;
+  inflight.webWorkerStopped(doc, 'http://h/w.js', 1);
+  assert.equal(inflight.size, now);
+  const next = inflight.webWorkerDocument(f);
+  inflight.webWorkerStopped(next, 'http://h/w.js', 1);
+  assert.equal(inflight.size, now - 1);
+  assert.equal(settled, false);
+  // Another engine: no drop.
+  const ctx2 = fakeContext();
+  const off = new Inflight(ctx2);
+  const d2 = off.webWorkerDocument(f);
+  ctx2.emit('request', load(f, 'http://h/w.js'));
+  off.webWorkerStopped(d2, 'http://h/w.js', 1);
+  assert.equal(off.size, 1);
 });
 
 test('settle: a cancel that comes while settle already waits wakes it (its page closes; then, for a service worker\'s call, the test closes its context)', async () => {
