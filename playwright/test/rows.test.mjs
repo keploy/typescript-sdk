@@ -497,20 +497,68 @@ for (const engine of ['chromium', 'firefox', 'webkit']) {
   }
 }
 
+// A request the test's own route answers with a redirect (route.fulfill
+// 302 or 307): Chromium reports no end for a Web Worker's script load so
+// answered, Firefox none for the redirect's first request (a page fetch's
+// too), and WebKit refuses the answer, with Playwright's own error, and the
+// request stays with the route. Settle waits on none of them, seeded or off:
+// a wait shows as settle's step naming the request (and a timeout at the
+// config's 30 s: the row sets no short timeout).
+for (const engine of ['chromium', 'firefox', 'webkit']) {
+  for (const seed of ['seeded', 'off']) {
+    test(`settle, in ${engine}, ${seed}: a request the test's own route answers with a redirect (a classic Web Worker's script with a 302, a module one's with a 307, a page fetch with a 302) is not waited for, and the test ${engine === 'webkit' ? "fails with Playwright's own error (WebKit refuses the answer)" : 'passes'}`, async () => {
+      const j = journal();
+      const a = await fakeAgent(j);
+      const p = await pageServer(j);
+      try {
+        const title = "requests the test's route answers with a redirect";
+        const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), ...(seed === 'off' ? { KEPLOY_SEED_RANDOM: 'off' } : {}), SLOW_BASE: p.url, PW_BROWSER: engine });
+        const t = tests[title];
+        if (engine === 'webkit') {
+          assert.equal(t.status, 'failed', out);
+          assert.match(t.error, /Cannot fulfill with redirect status/, out);
+        } else {
+          assert.equal(t.status, 'passed', out);
+        }
+        const waited = t.steps.filter((x) => x.startsWith('keploy: wait for') && /\/(rw\.js|rwm\.js|rf)(\?|,|\s|$)/.test(x));
+        assert.deepEqual(waited, [], t.steps.join('\n'));
+      } finally { await p.close(); await a.close(); }
+    });
+  }
+}
+
+// A request the test's route sends on (continue) is waited for, though a
+// fulfill of the route failed: in every engine, one the route had sent on
+// before, whose handler then throws Playwright's "already handled" (which
+// fails the test); in WebKit, one whose redirect the browser refused before
+// the route sent it on. The server answers it once settle's step has begun
+// (waitedFor).
+for (const engine of ['chromium', 'firefox', 'webkit']) {
+  test(`settle, in ${engine}: a call the test's own route sends on is waited for, though the route's fulfill failed (after it was sent on, its handler throwing${engine === 'webkit' ? '; or refused before, as WebKit refuses a redirect' : ''})`, async () => {
+    await waitedFor("a call the test's route sends on and then tries to answer", 'GET', '/slow', engine, /Route is already handled/);
+    if (engine === 'webkit') await waitedFor("a call the test's route sends on after the browser refused its answer", 'GET', '/slow', engine);
+  });
+}
+
 // Settle rows where a call is still waited for: the page server answers it
 // only once settle's step has begun (the rows' reporter asks /release then),
 // so the test ends by settle's own wait, with no deadline on its body. The
 // test passes, settle's step names the call (method, URL), and the test's
 // end comes after the call's answer. A settle that did not wait for it ends
 // the test with the call unanswered.
-async function waitedFor(title, method, call) {
+async function waitedFor(title, method, call, engine = '', error = null) {
   const j = journal();
   const a = await fakeAgent(j);
   const p = await pageServer(j);
   try {
-    const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, NO_RELEASE: '1', RELEASE_AT_STEP: `${p.url}/release` });
+    const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, NO_RELEASE: '1', RELEASE_AT_STEP: `${p.url}/release`, ...(engine === '' ? {} : { PW_BROWSER: engine }) });
     const t = tests[title];
-    assert.equal(t.status, 'passed', out);
+    if (error === null) {
+      assert.equal(t.status, 'passed', out);
+    } else {
+      assert.equal(t.status, 'failed', out);
+      assert.match(t.error, error, out);
+    }
     const named = new RegExp(`^keploy: wait for the test's 1 call\\(s\\) in flight before its browser context closes: ${method} http://127\\.0\\.0\\.1:\\d+${call}$`);
     assert.ok(t.steps.some((s) => named.test(s)), t.steps.join('\n'));
     const name = call.slice(1);

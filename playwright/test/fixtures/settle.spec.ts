@@ -286,3 +286,49 @@ test('two Web Workers at one URL, the second terminated while their scripts load
   await reached();
   await page.evaluate(() => { (globalThis as unknown as { w: Worker[] }).w[1].terminate(); });
 });
+// The test's own routes answer a classic Web Worker's script with a 302, a
+// module one's with a 307 and a page fetch with a 302 (each to a URL the
+// page server does not know). Chromium reports no end for such a worker
+// load (its worker never starts), Firefox none for the redirect's first
+// request, and WebKit refuses the answer: Playwright's own error fails the
+// test there, and the request stays with the route.
+test("requests the test's route answers with a redirect", async ({ page }) => {
+  await page.goto(`${base}/page`);
+  await page.route('**/rw.js', (r) => r.fulfill({ status: 302, headers: { location: `${base}/v2/rw.js` } }));
+  await page.route('**/rwm.js', (r) => r.fulfill({ status: 307, headers: { location: `${base}/v2/rwm.js` } }));
+  await page.route('**/rf', (r) => r.fulfill({ status: 302, headers: { location: `${base}/v2/rf` } }));
+  const sent = Promise.all([/\/rw\.js(\?|$)/, /\/rwm\.js(\?|$)/, /\/rf$/].map((u) => page.waitForRequest(u)));
+  await page.evaluate(() => {
+    const g = globalThis as unknown as { w: Worker[] };
+    g.w = [new Worker('/rw.js'), new Worker('/rwm.js', { type: 'module' })];
+    void fetch('/rf').catch(() => {});
+  });
+  await sent;
+});
+// A route whose answer the browser refused (WebKit refuses a redirect)
+// sends the call on; the server has it before the body ends.
+test("a call the test's route sends on after the browser refused its answer", async ({ page }) => {
+  await page.goto(`${base}/page`);
+  await page.route('**/slow', async (r) => {
+    await r.fulfill({ status: 302, headers: { location: `${base}/page` } }).catch(() => {});
+    await r.continue();
+  });
+  const sent = page.waitForRequest(/\/slow$/);
+  await page.evaluate(() => { void fetch('/slow'); });
+  await sent;
+  await reached();
+});
+// A route sends the call on, then tries to answer it too: Playwright's
+// fulfill throws (the route is already handled), and so does the handler,
+// which fails the test.
+test("a call the test's route sends on and then tries to answer", async ({ page }) => {
+  await page.goto(`${base}/page`);
+  await page.route('**/slow', async (r) => {
+    await r.continue();
+    await r.fulfill({ status: 302, headers: { location: `${base}/page` } });
+  });
+  const sent = page.waitForRequest(/\/slow$/);
+  await page.evaluate(() => { void fetch('/slow'); });
+  await sent;
+  await reached();
+});

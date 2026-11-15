@@ -4,7 +4,7 @@
 // whole would be cut at a different byte each run). Counted by the
 // browser's own request events; no time window decides it.
 
-import type { BrowserContext, Frame, Page, Request } from '@playwright/test';
+import type { BrowserContext, Frame, Page, Request, Route } from '@playwright/test';
 import { workerMark } from './random';
 
 export class Inflight {
@@ -97,7 +97,15 @@ export class Inflight {
         this.docs.delete(f);
         this.drop((o) => o.frame === f);
       });
+      onRoute(p, (r, threw) => this.routed(r, threw));
     };
+    // Nor for a request a route answers itself with a redirect (Chromium,
+    // for a Web Worker's script: its worker never starts, with no keploy
+    // too; Firefox, for the redirect's first request), nor for one a route
+    // holds after its handler threw (WebKit refuses a redirect, and
+    // Playwright's fulfill throws): routed watches each route a page's
+    // routes, and then its context's, are handed.
+    onRoute(context, (r, threw) => this.routed(r, threw));
     context.pages().forEach(watch);
     context.on('page', watch);
     // Nor for any call when the test closes its own context, which ends its
@@ -204,6 +212,32 @@ export class Inflight {
     return ds[ds.length - 1];
   }
 
+  /**
+   * Watches route, a request's route. Once its fulfill returns, the
+   * request has the whole answer the route gave, and nothing of it is in
+   * flight, whatever the browser reports after. threw: the routes' handler
+   * threw (called again, after the first call); a request its route still
+   * holds then (no route answered it or sent it on: the browser refused
+   * its answer, as WebKit refuses a redirect, or the handler threw first)
+   * goes nowhere, as Playwright sends it on no further. A handler that
+   * returns and leaves the request held keeps it in flight, as one that
+   * still might send it on: the test's timeout ends that wait, naming it.
+   */
+  private routed(route: Route, threw: boolean): void {
+    const r = route.request();
+    if (threw) {
+      // Playwright's own, past its API: set while the handler may still
+      // answer the request, cleared once a route answered it or sent it on.
+      if ((route as unknown as { _handlingPromise?: unknown })._handlingPromise) this.answered(r);
+      return;
+    }
+    const fulfill = route.fulfill;
+    route.fulfill = async (o) => {
+      await fulfill.call(route, o);
+      this.answered(r);
+    };
+  }
+
   private done(r: Request): void {
     if (this.open.delete(r)) this.wake();
   }
@@ -222,6 +256,35 @@ export class Inflight {
     this.waiters = [];
     w.forEach((f) => f());
   }
+}
+
+// Each page's and context's route watcher: the newest Inflight's (a context
+// Playwright reuses between tests has one test's at a time).
+const routeWatch = new WeakMap<object, (route: Route, threw: boolean) => void>();
+
+/**
+ * Has watch see each route Playwright hands target (a page, or a context)
+ * before any of target's routes does, and again (threw) when one of their
+ * handlers threw: target's _onRoute, Playwright's own, past its API. Where
+ * a version has none, no route is watched, and settle waits on such a
+ * request as it waits on any other.
+ */
+function onRoute(target: object, watch: (route: Route, threw: boolean) => void): void {
+  const t = target as { _onRoute?: (route: Route) => Promise<void> };
+  const on = t._onRoute;
+  if (typeof on !== 'function') return;
+  const was = routeWatch.has(target);
+  routeWatch.set(target, watch);
+  if (was) return;
+  t._onRoute = async function (this: unknown, route: Route): Promise<void> {
+    routeWatch.get(target)?.(route, false);
+    try {
+      await on.call(this, route);
+    } catch (e) {
+      routeWatch.get(target)?.(route, true);
+      throw e;
+    }
+  };
 }
 
 type Doc = Map<string, { loads: Request[]; stopped: Set<number> }>;

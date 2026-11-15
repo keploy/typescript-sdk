@@ -277,6 +277,141 @@ async function ticks() {
   for (let i = 0; i < 5; i++) await Promise.resolve();
 }
 
+// A fake Playwright route, as far as settle reads it: _handlingPromise is
+// set while a handler may still answer it; fulfill throws as Playwright's
+// does when the browser refuses the answer (refuse: WebKit's redirect, the
+// route still the handler's) or when the route was already handled.
+function fakeRoute(req) {
+  const route = {
+    _handlingPromise: {},
+    request: () => req,
+    async fulfill(o = {}) {
+      if (!route._handlingPromise) throw new Error('Route is already handled!');
+      if (o.refuse) throw new Error('Cannot fulfill with redirect status: 302');
+      route._handlingPromise = null;
+    },
+    async continue() {
+      if (!route._handlingPromise) throw new Error('Route is already handled!');
+      route._handlingPromise = null;
+    },
+  };
+  return route;
+}
+// A page or context with Playwright's _onRoute, which keeps each route it
+// is handed (seen) and runs target.handler on it, as Playwright runs the
+// target's routes: a handler's throw rejects it; a page's handler that
+// answers 'next' hands the route on to its context's (ctx).
+function withRoutes(target, ctx = null) {
+  target.seen = [];
+  target._onRoute = async function (route) {
+    target.seen.push(route);
+    const next = target.handler ? await target.handler(route) : undefined;
+    if (next === 'next' && ctx !== null) await ctx._onRoute(route);
+  };
+  return target;
+}
+
+test('settle: a request a route of the test\'s answered (fulfill returned) has ended, though the browser reports no end; one the route still holds when its handler throws (the browser refused its answer, or nothing answered it) is not waited for; one the handler holds, or sent on, before or after a refused answer, is', async () => {
+  const ctx = withRoutes(fakeContext());
+  const inflight = new Inflight(ctx);
+  const page = withRoutes(new EventEmitter());
+  ctx.emit('page', page);
+  const sent = async (handler) => {
+    const r = fakeRequest(page);
+    ctx.emit('request', r);
+    const route = fakeRoute(r);
+    page.handler = handler;
+    const done = page._onRoute(route).then(() => 'returned', (e) => e.message);
+    return { r, route, done };
+  };
+  // Answered: fulfill returned.
+  const a = await sent((route) => route.fulfill({ status: 302 }));
+  assert.equal(await a.done, 'returned');
+  assert.deepEqual(page.seen, [a.route]);
+  await ticks();
+  assert.equal(inflight.size, 0);
+  // Refused, and the handler throws: held by the route, sent nowhere.
+  const b = await sent((route) => route.fulfill({ refuse: true }));
+  assert.match(await b.done, /Cannot fulfill/);
+  assert.equal(inflight.size, 0);
+  // A handler that throws before it answers.
+  const c = await sent(async () => { throw new Error('the handler'); });
+  assert.equal(await c.done, 'the handler');
+  assert.equal(inflight.size, 0);
+  // Refused, and the handler catches it and sends the request on.
+  const d = await sent(async (route) => { await route.fulfill({ refuse: true }).catch(() => {}); await route.continue(); });
+  assert.equal(await d.done, 'returned');
+  assert.equal(inflight.size, 1);
+  ctx.emit('requestfinished', d.r);
+  assert.equal(inflight.size, 0);
+  // Refused, and the handler returns holding it: it may still send it on.
+  const e = await sent((route) => route.fulfill({ refuse: true }).catch(() => {}));
+  assert.equal(await e.done, 'returned');
+  assert.equal(inflight.size, 1);
+  await e.route.continue();
+  ctx.emit('requestfinished', e.r);
+  assert.equal(inflight.size, 0);
+  // Sent on, then the handler throws (a fulfill Playwright refuses): in flight.
+  const f = await sent(async (route) => { await route.continue(); await route.fulfill({}); });
+  assert.match(await f.done, /already handled/);
+  assert.equal(inflight.size, 1);
+  ctx.emit('requestfinished', f.r);
+  assert.equal(inflight.size, 0);
+});
+
+test('settle: a route the page\'s routes hand on reaches its context\'s, watched there too: one the context\'s handler answers has ended; one it still holds when it throws is not waited for', async () => {
+  const ctx = withRoutes(fakeContext());
+  const inflight = new Inflight(ctx);
+  const page = withRoutes(new EventEmitter(), ctx);
+  ctx.emit('page', page);
+  page.handler = () => 'next';
+  for (const [handler, ended] of [[(route) => route.fulfill({}), 'returned'], [(route) => route.fulfill({ refuse: true }), 'Cannot fulfill with redirect status: 302']]) {
+    const r = fakeRequest(page);
+    ctx.emit('request', r);
+    const route = fakeRoute(r);
+    ctx.handler = handler;
+    assert.equal(await page._onRoute(route).then(() => 'returned', (e) => e.message), ended);
+    assert.equal(ctx.seen.at(-1), route);
+    assert.equal(inflight.size, 0, ended);
+  }
+  // The context alone (a service worker's request).
+  const r = fakeRequest(null);
+  ctx.emit('request', r);
+  ctx.handler = (route) => route.fulfill({});
+  await ctx._onRoute(fakeRoute(r));
+  assert.equal(inflight.size, 0);
+});
+
+test('settle: a page or context with no _onRoute (a Playwright without it) gets none, and its requests are waited for as before', async () => {
+  const ctx = fakeContext();
+  const inflight = new Inflight(ctx);
+  const page = new EventEmitter();
+  ctx.emit('page', page);
+  assert.equal('_onRoute' in ctx, false);
+  assert.equal('_onRoute' in page, false);
+  const r = fakeRequest(page);
+  ctx.emit('request', r);
+  assert.equal(inflight.size, 1);
+});
+
+test('settle: of two Inflights on one context (Playwright reuses it between tests), the newest watches its routes; its _onRoute is wrapped once', async () => {
+  const ctx = withRoutes(fakeContext());
+  const first = new Inflight(ctx);
+  const wrapped = ctx._onRoute;
+  const second = new Inflight(ctx);
+  assert.equal(ctx._onRoute, wrapped);
+  const r = fakeRequest(null);
+  ctx.emit('request', r);
+  assert.equal(first.size, 1);
+  assert.equal(second.size, 1);
+  const route = fakeRoute(r);
+  await ctx._onRoute(route);
+  assert.deepEqual(ctx.seen, [route]);
+  await route.fulfill({});
+  assert.equal(second.size, 0);
+  assert.equal(first.size, 1);
+});
+
 test('settle: a call keploy\'s route answered has ended, though the browser reports no end (Chromium, a Shared Worker\'s script); one reported after its answer is not waited for', async () => {
   const ctx = fakeContext();
   const inflight = new Inflight(ctx);
