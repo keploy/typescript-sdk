@@ -1803,6 +1803,79 @@ export function cspAllowsData(headers: Record<string, string>): boolean {
 }
 
 /**
+ * The encoding a script's bytes name with a byte order mark (which every
+ * engine reads a worker's script by, whatever its charset says), and the
+ * mark's length: UTF-16 of either byte order, else UTF-8 (0 when it has
+ * none).
+ */
+function byteOrder(b: Uint8Array): { enc: 'utf-16le' | 'utf-16be' | 'utf-8'; bom: number } {
+  if (b[0] === 0xff && b[1] === 0xfe) return { enc: 'utf-16le', bom: 2 };
+  if (b[0] === 0xfe && b[1] === 0xff) return { enc: 'utf-16be', bom: 2 };
+  return { enc: 'utf-8', bom: b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf ? 3 : 0 };
+}
+
+/**
+ * A script's text, for keploy to read (useStrict, a sourceURL of its own):
+ * its bytes in the encoding its byte order mark names, else UTF-8, the
+ * mark taken off. keploy's answer never holds this text: it holds the
+ * bytes (withBytes).
+ */
+export function scriptText(body: Uint8Array): string {
+  return new TextDecoder(byteOrder(body).enc).decode(body);
+}
+
+/**
+ * keploy's answer to a Web Worker's script: body, the app's script as its
+ * server sent it, with prefix ahead of it and suffix after it. The app's
+ * bytes are never decoded and encoded again, so an engine that reads a
+ * worker's script by its charset (Chromium) reads the app's text as with
+ * seeding off. prefix goes after a byte order mark and after a hashbang
+ * line (#!, which only a source's very start may hold), each kept where it
+ * is, so every line of the app's keeps its number. prefix and suffix are
+ * ASCII, which reads the same in every charset a browser reads a script in,
+ * or, for a script whose byte order mark names UTF-16, UTF-16 of its byte
+ * order.
+ */
+export function withBytes(body: Uint8Array, prefix: string, suffix: string): Buffer {
+  const b = Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+  const { enc, bom } = byteOrder(b);
+  const w = enc === 'utf-8' ? 1 : 2;
+  const unit = (i: number): number => (i + w > b.length ? -1 : enc === 'utf-16le' ? b[i] | (b[i + 1] << 8) : enc === 'utf-16be' ? (b[i] << 8) | b[i + 1] : b[i]);
+  const encode = (s: string): Buffer => {
+    if (w === 1) return Buffer.from(s, 'latin1');
+    const u = Buffer.from(s, 'utf16le');
+    return enc === 'utf-16be' ? u.swap16() : u;
+  };
+  let at = bom;
+  if (unit(at) === 0x23 && unit(at + w) === 0x21) {
+    // The hashbang line's end: a line feed, a carriage return (and the line
+    // feed after it), or U+2028 or U+2029 (three bytes in UTF-8).
+    let i = at + 2 * w;
+    let end = -1;
+    for (; i < b.length && end < 0; i += w) {
+      const c = unit(i);
+      if (c === 0x0a || c === 0x2028 || c === 0x2029) end = i + w;
+      else if (c === 0x0d) end = unit(i + w) === 0x0a ? i + 2 * w : i + w;
+      else if (w === 1 && c === 0xe2 && b[i + 1] === 0x80 && (b[i + 2] === 0xa8 || b[i + 2] === 0xa9)) end = i + 3;
+    }
+    if (end < 0) return Buffer.concat([b, encode(`\n${prefix}${suffix}`)]);
+    at = end;
+  }
+  return Buffer.concat([b.subarray(0, at), encode(prefix), b.subarray(at), encode(suffix)]);
+}
+
+/**
+ * A worker's seeding (workerScript) on one line, for keploy to put on the
+ * app's first line: each line of it that is a comment alone goes, and the
+ * rest are joined by a space. Each of its statements ends with its
+ * semicolon or block, and none of its strings, templates or regular
+ * expressions spans a line, so it means the same.
+ */
+export function oneLine(seeding: string): string {
+  return seeding.split('\n').filter((l) => !/^\s*\/\//.test(l)).map((l) => l.trim()).filter((l) => l !== '').join(' ');
+}
+
+/**
  * Where keploy's first statement goes in a script's source: ahead of it, or
  * after its hashbang line (#!, which only a source's very start may hold),
  * so every line of the app's keeps its number.
@@ -1874,11 +1947,16 @@ export function useStrict(source: string): boolean {
 /**
  * keploy's answer to a marked worker script ('w', 'm', 's' or 'x', for the
  * instance n of token). A Web Worker's ('w', 'm') is the app's own script,
- * source, as keploy fetched it, whose first statement loads the worker's
- * seeding from a URL keploy marked ('q' for a classic worker, by
- * importScripts, after a 'use strict' of the app's script's own when it has
- * one, so it stays strict; 'p' for a module one, by an import ahead of every
- * import of the app's, so it runs before any of them), on the app's first
+ * source, the bytes keploy fetched (withBytes; given as text, the answer is
+ * text too, its bytes read as UTF-8), whose first statement loads the
+ * worker's seeding from a URL keploy marked ('q' for a classic worker, by
+ * importScripts; 'p' for a module one, by an import ahead of every import
+ * of the app's, so it runs before any of them), or, inline (the script's
+ * response carries a Content-Security-Policy, which could refuse that
+ * load), is the seeding itself on one line (oneLine), which in a module
+ * runs after the modules the app's script imports; a classic worker's
+ * starts with a 'use strict' of keploy's when the app's script has one in
+ * its directive prologue, so it stays strict. It goes on the app's first
  * line, so each line keeps its number; then, unless the app's script names
  * itself, a sourceURL of the URL the app asked for. The app's script is so
  * loaded once, and runs at the worker's marked URL, after its seeding: a
@@ -1915,14 +1993,19 @@ export function useStrict(source: string): boolean {
  * order, each in a microtask of its own, to the handlers the app's script
  * sets.
  */
-export function workerAnswer(token: string, n: number, kind: 'w' | 'm' | 's' | 'x', own: string, dataOk = true, source?: string): string {
+export function workerAnswer(token: string, n: number, kind: 'w' | 'm' | 's' | 'x', own: string, dataOk?: boolean, source?: string, inline?: boolean, reach?: boolean): string;
+export function workerAnswer(token: string, n: number, kind: 'w' | 'm' | 's' | 'x', own: string, dataOk: boolean, source: Uint8Array, inline?: boolean, reach?: boolean): Buffer;
+export function workerAnswer(token: string, n: number, kind: 'w' | 'm' | 's' | 'x', own: string, dataOk = true, source?: string | Uint8Array, inline = false, reach = false): string | Buffer {
   const url = JSON.stringify(own);
   if ((kind === 'w' || kind === 'm') && source !== undefined) {
+    const bytes = typeof source === 'string' ? Buffer.from(source) : source;
+    const text = scriptText(bytes);
     const first = kind === 'w'
-      ? `${useStrict(source) ? '"use strict";' : ''}importScripts(${JSON.stringify(markWorker(own, 'q', token, n))});`
-      : `import ${JSON.stringify(markWorker(own, 'p', token, n))};`;
-    const named = /(?:\/\/|\/\*)[#@][ \t]*sourceURL[ \t]*=/.test(source);
-    return withPrefix(source, first) + (named ? '' : `\n//# sourceURL=${noFragment(own)}\n`);
+      ? `${useStrict(text) ? '"use strict";' : ''}${inline ? oneLine(workerScript(token, n, kind, reach)) : `importScripts(${JSON.stringify(markWorker(own, 'q', token, n))});`}`
+      : inline ? oneLine(workerScript(token, n, kind, reach)) : `import ${JSON.stringify(markWorker(own, 'p', token, n))};`;
+    const named = /(?:\/\/|\/\*)[#@][ \t]*sourceURL[ \t]*=/.test(text);
+    const answer = withBytes(bytes, first, named ? '' : `\n//# sourceURL=${noFragment(own)}\n`);
+    return typeof source === 'string' ? answer.toString() : answer;
   }
   if (kind === 'w') return `importScripts(${JSON.stringify(markWorker(own, 'q', token, n))});queueMicrotask(importScripts.bind(globalThis, ${url}));\n`;
   if (kind === 's') return `${workerScript(token, n, kind)}queueMicrotask(importScripts.bind(globalThis, ${url}));\n`;
@@ -1975,7 +2058,25 @@ export type WorkerHooks = {
    * the route does not reach ('nested'), which so runs unseeded.
    */
   unmarked?: (at: string, why: 'worker' | 'nested') => void;
+  /**
+   * keploy put the seeding of the module Web Worker at at (its origin and
+   * path) on its script's first line, as the script's response carries a
+   * Content-Security-Policy: it runs after the modules the script imports.
+   */
+  late?: (at: string) => void;
 };
+
+/**
+ * The line a test shows, once for each address, for a module Web Worker
+ * whose seeding started after the modules its script imports (WorkerHooks
+ * late).
+ */
+export function lateLine(name: string, at: string): string {
+  return `keploy: in ${name}, the module Web Worker at ${at} is served with a Content-Security-Policy, which could refuse keploy's load of its seeding, ` +
+    'so keploy put its seeding on the first line of the worker\'s script, and it runs after the modules the script imports: ' +
+    'a random number one of those modules draws as it loads is the browser\'s own, so it may differ at replay; ' +
+    'if one does, serve the worker\'s script with no Content-Security-Policy where the tests run, and keploy loads its seeding ahead of those modules.';
+}
 
 /** What keploy's routes go on: the test's context, or one of its pages. */
 type Routes = Pick<BrowserContext, 'route' | 'unroute' | 'unrouteAll'>;
@@ -2235,7 +2336,7 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
     const whole = (m.kind === 's' || m.kind === 'x') && h !== undefined && otherwise(h);
     let status = 200;
     let headers: Record<string, string> = { 'content-type': 'text/javascript' };
-    let source: string | undefined;
+    let source: Uint8Array | undefined;
     try {
       const got = await route.fetch(o);
       if (whole || !got.ok()) {
@@ -2248,13 +2349,24 @@ export async function workerRoutes(context: BrowserContext, hooks: WorkerHooks =
       }
       status = got.status();
       headers = headersOf(got.headers());
-      // A worker's script is read as UTF-8 whatever its charset says, as
-      // the browser reads it; keploy's answer is UTF-8 too.
-      if (m.kind === 'w' || m.kind === 'm') source = new TextDecoder().decode(await got.body());
+      // A Web Worker's answer holds the app's script's bytes as the server
+      // sent them, whatever their charset (withBytes).
+      if (m.kind === 'w' || m.kind === 'm') source = await got.body();
     } catch {
       // The worker loads the app's script itself, and fails as it would.
     }
-    await fulfill({ status, headers, body: workerAnswer(m.token, n, m.kind as 'w' | 'm' | 's' | 'x', m.url, cspAllowsData(headers), source) });
+    // A Content-Security-Policy on the script's response is the worker's
+    // own: it could refuse the load of keploy's seeding at its own URL
+    // (importScripts or import), so the seeding goes on the app's first
+    // line instead, which no policy refuses. A module's static imports run
+    // before its first line, so such a module Web Worker's seeding starts
+    // after them, and the test says so.
+    const inline = source !== undefined && headers['content-security-policy'] !== undefined;
+    if (inline && m.kind === 'm') {
+      const u = new URL(m.url);
+      hooks.late?.(u.origin + u.pathname);
+    }
+    await fulfill({ status, headers, body: source === undefined ? workerAnswer(m.token, n, m.kind as 'w' | 'm' | 's' | 'x', m.url, cspAllowsData(headers)) : workerAnswer(m.token, n, m.kind as 'w' | 'm', m.url, true, source, inline, reach) });
   };
   const first = async (route: Route): Promise<void> => {
     const r = route.request();

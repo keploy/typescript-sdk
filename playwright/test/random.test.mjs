@@ -3,7 +3,7 @@
 // a page. No browser.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DOC_KEY, ENV_SEED_RANDOM, FAKER, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, esmFile, exportOf, fakerLine, fakersIn, fakersOf, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatFaker, seatRandom, seedFaker, seedingFromEnv, setAside, unplacedLine, unseededLine, WORKER_PARAM, SW_CHANNEL, SW_LOCK, markWorker, useStrict, withPrefix, workerMark, workerScript, workerRoutes, workerAnswer, cspAllowsData } from '../dist/random.js';
+import { DOC_KEY, ENV_SEED_RANDOM, FAKER, LOADS_KEY, OFF_LINE, PAGE_KEY, SEEDED_LINE, esmFile, exportOf, fakerLine, fakersIn, fakersOf, firstScript, freshSeed, initScript, besideOf, othersNow, pageAddress, pageScript, placePages, processRandom, seatFaker, seatRandom, seedFaker, seedingFromEnv, setAside, unplacedLine, unseededLine, WORKER_PARAM, SW_CHANNEL, SW_LOCK, markWorker, useStrict, withPrefix, withBytes, oneLine, lateLine, workerMark, workerScript, workerRoutes, workerAnswer, cspAllowsData } from '../dist/random.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -2082,7 +2082,7 @@ function routed() {
         if (answer instanceof Error) throw answer;
         return answer;
       },
-      fulfill: async (o) => { ended = true; did.push(['fulfill', { ...o, body: String(o.body) }]); },
+      fulfill: async (o) => { ended = true; r.raw = o.body; did.push(['fulfill', { ...o, body: String(o.body) }]); },
       continue: async (o) => { ended = true; did.push(['continue', o?.url ?? at]); },
       abort: async () => { ended = true; did.push(['abort']); },
       fallback: async (o) => {
@@ -2117,9 +2117,13 @@ test('workerRoutes answers a marked classic worker script with its seeding then,
     ['fulfill', { status: 201, headers, body: `importScripts(${JSON.stringify(markWorker('http://h/w.js?a=1#f', 'q', t, 0))});app()\n//# sourceURL=http://h/w.js?a=1\n` }]]);
   const second = await r.ask(markWorker('http://h/w.js?a=1', 'w', t), answerOf(200, 'app()'));
   assert.equal(second[1][1].body, workerAnswer(t, 1, 'w', 'http://h/w.js?a=1', true, 'app()'));
-  // A worker's script is read as UTF-8, a BOM taken off, whatever its charset says.
-  const latin = await r.ask(markWorker('http://h/w.js', 'w', t), { ...answerOf(200, ''), body: async () => Buffer.from([0xef, 0xbb, 0xbf, 0x61, 0xc3, 0xa9]) });
-  assert.equal(latin[1][1].body, workerAnswer(t, 2, 'w', 'http://h/w.js', true, 'a\u00e9'));
+  // The app's bytes as the server sent them: a byte order mark stays first, and a Latin-1 byte stays that byte.
+  await r.ask(markWorker('http://h/w.js', 'w', t), { ...answerOf(200, ''), body: async () => Buffer.from([0xef, 0xbb, 0xbf, 0x61, 0xc3, 0xa9]) });
+  const q2 = `importScripts(${JSON.stringify(markWorker('http://h/w.js', 'q', t, 2))});`;
+  assert.deepEqual(r.raw, Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(q2), Buffer.from([0x61, 0xc3, 0xa9]), Buffer.from('\n//# sourceURL=http://h/w.js\n')]));
+  await r.ask(markWorker('http://h/w.js', 'w', t), { ...answerOf(200, '', { 'content-type': 'text/javascript; charset=iso-8859-1' }), body: async () => Buffer.from([0x68, 0xe9]) });
+  const q3 = `importScripts(${JSON.stringify(markWorker('http://h/w.js', 'q', t, 3))});`;
+  assert.deepEqual(r.raw, Buffer.concat([Buffer.from(q3), Buffer.from([0x68, 0xe9]), Buffer.from('\n//# sourceURL=http://h/w.js\n')]));
   // With no source (keploy could not fetch it), its seeding, then the app's script loaded in a microtask.
   assert.equal(workerAnswer(t, 1, 'w', 'http://h/w.js?a=1'), `importScripts(${JSON.stringify(markWorker('http://h/w.js?a=1', 'q', t, 1))});queueMicrotask(importScripts.bind(globalThis, "http://h/w.js?a=1"));\n`);
 });
@@ -2526,6 +2530,8 @@ test('workerAnswer: a Web Worker\'s is the app\'s script with its seeding\'s loa
     ['"a b"; "use strict"', true], ['\'a b\'\n\'use strict\'', true],
     // A line comment that ends the source ends the directive's statement.
     ['"use strict" // c', true],
+    // U+2028 and U+2029 end a line as a line feed does, so the directive after one is a statement of its own.
+    ['"a"\u2028"use strict"', true], ['"a"\u2029"use strict"', true], ['"a" "use strict"', false],
   ]) assert.equal(useStrict(src), strict, JSON.stringify(src));
   assert.equal(withPrefix('a', 'P;'), 'P;a');
   assert.equal(withPrefix('#!x\u2028a', 'P;'), '#!x\u2028P;a');
@@ -2974,4 +2980,74 @@ test('workerRoutes: a request at a worker script\'s URL that keploy handed nothi
   assert.deepEqual(await r.ask(markWorker('http://h/k.js', 'w', 'f2'.repeat(16)), answerOf(200, 'app()'), { type: 'script', headers: {} }, p), [['fetch', 'http://h/k.js'], ['fulfill', { status: 200, headers: { 'content-type': 'text/javascript', 'x-a': '1' }, body: `importScripts(${JSON.stringify(markWorker('http://h/k.js', 'q', 'f2'.repeat(16), 0))});app()\n//# sourceURL=http://h/k.js\n` }]]);
   // The app's own fetch at that URL, from another page with no route.
   assert.deepEqual(await r.ask('http://h/k.js', null, { type: 'fetch', headers: {} }, r.page(true)), [['fallback']]);
+});
+
+test('workerAnswer keeps the app\'s script\'s bytes: another charset\'s bytes, a byte order mark (UTF-8 or UTF-16) and a hashbang line keep their place, and keploy\'s statements are in the script\'s own encoding', () => {
+  const t = 'ab'.repeat(16);
+  const own = 'http://h/w.js';
+  const q = `importScripts(${JSON.stringify(markWorker(own, 'q', t, 0))});`;
+  const tail = `\n//# sourceURL=${own}\n`;
+  const at = (bytes) => workerAnswer(t, 0, 'w', own, true, Buffer.from(bytes));
+  const a = (x) => Buffer.from(x, 'latin1');
+  assert.deepEqual(at([0x68, 0xe9]), Buffer.concat([a(q), Buffer.from([0x68, 0xe9]), a(tail)]));
+  assert.deepEqual(at([0xef, 0xbb, 0xbf, 0x61]), Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), a(q), a('a'), a(tail)]));
+  const le = at(Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('"use strict";a\u00e9()', 'utf16le')]));
+  assert.deepEqual([...le.subarray(0, 2)], [0xff, 0xfe]);
+  assert.equal(new TextDecoder('utf-16le').decode(le), `"use strict";${q}"use strict";a\u00e9()${tail}`);
+  const be = at(Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from('#!/x\na()', 'utf16le').swap16()]));
+  assert.deepEqual([...be.subarray(0, 2)], [0xfe, 0xff]);
+  assert.equal(new TextDecoder('utf-16be').decode(be), `#!/x\n${q}a()${tail}`);
+  assert.equal(new TextDecoder('utf-16le').decode(at(Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('#!/x\r\na()', 'utf16le')]))), `#!/x\r\n${q}a()${tail}`);
+  for (const [src, head] of [['#!/x\r\na\u00e9', '#!/x\r\n'], ['#!/x\ra', '#!/x\r'], ['#!/x\na', '#!/x\n'], ['#!/x\u2028a', '#!/x\u2028'], ['#!/x\u2029a', '#!/x\u2029'], ['\ufeff#!/x\na', '\ufeff#!/x\n']]) {
+    assert.deepEqual(at(Buffer.from(src)), Buffer.concat([Buffer.from(head), a(q), Buffer.from(src.slice(head.length)), a(tail)]), JSON.stringify(src));
+  }
+  assert.deepEqual(at(Buffer.from('#!/x')), Buffer.concat([a(`#!/x\n${q}`), a(tail)]));
+  assert.deepEqual(at(Buffer.from('#')), Buffer.concat([a(q), a('#'), a(tail)]));
+  // Given text, it answers text: the same bytes read as UTF-8.
+  assert.equal(workerAnswer(t, 0, 'w', own, true, '#!/x\u2028a\u00e9'), `#!/x\u2028${q}a\u00e9${tail}`);
+  assert.deepEqual(withBytes(Buffer.from('a'), 'P;', ''), Buffer.from('P;a'));
+});
+
+test('oneLine: a worker\'s seeding on one line, ASCII, draws what it draws on its own lines, and keeps the worker\'s location free of the mark', () => {
+  const t = 'ef'.repeat(16);
+  for (const kind of ['w', 'm']) {
+    for (const reach of [false, true]) {
+      const s = workerScript(t, 3, kind, reach);
+      const one = oneLine(s);
+      assert.equal(/[\n\r\u2028\u2029]/.test(one), false);
+      assert.equal(/[^\x00-\x7f]/.test(one), false);
+      const href = markWorker('http://h/w.js?a=1', kind, t);
+      assert.deepEqual(workerAt(href, one).draws(), workerAt(href, s).draws());
+      assert.equal(workerAt(href, one).run('location.href'), 'http://h/w.js?a=1');
+      assert.equal(workerAt(href, `"use strict";${one}`).run('location.href'), 'http://h/w.js?a=1');
+    }
+  }
+  assert.equal(oneLine('a;\n  // c\n\n  b;'), 'a; b;');
+});
+
+test('workerRoutes answers a Web Worker whose script carries a Content-Security-Policy with its seeding on the script\'s first line, loading nothing of keploy\'s, and names a module one, whose seeding runs after its imports, once for each address', async () => {
+  const { r, context } = routed();
+  const late = [];
+  await workerRoutes(context, { late: (at) => late.push(at) });
+  const t = 'cd'.repeat(16);
+  const policy = { 'content-type': 'text/javascript', 'content-security-policy': "default-src 'none'" };
+  const w = await r.ask(markWorker('http://h/w.js', 'w', t), answerOf(200, '"use strict";app()', policy));
+  assert.equal(w[1][1].body, `"use strict";${oneLine(workerScript(t, 0, 'w'))}"use strict";app()\n//# sourceURL=http://h/w.js\n`);
+  assert.deepEqual(w[1][1].headers, policy);
+  const s = await r.ask(markWorker('http://h/w.js', 'w', t), answerOf(200, 'app()', policy));
+  assert.equal(s[1][1].body, `${oneLine(workerScript(t, 1, 'w'))}app()\n//# sourceURL=http://h/w.js\n`);
+  assert.deepEqual(late, []);
+  const m = await r.ask(markWorker('http://h/m.js', 'm', t), answerOf(200, 'import "./a.js";b()', policy));
+  assert.equal(m[1][1].body, `${oneLine(workerScript(t, 2, 'm'))}import "./a.js";b()\n//# sourceURL=http://h/m.js\n`);
+  assert.deepEqual(late, ['http://h/m.js']);
+  // With no policy, keploy loads the seeding ahead of the imports, and says nothing.
+  const m2 = await r.ask(markWorker('http://h/m.js', 'm', t), answerOf(200, 'b()'));
+  assert.equal(m2[1][1].body, `import ${JSON.stringify(markWorker('http://h/m.js', 'p', t, 3))};b()\n//# sourceURL=http://h/m.js\n`);
+  // A report-only policy refuses nothing.
+  await r.ask(markWorker('http://h/m.js', 'm', t), answerOf(200, 'b()', { 'content-type': 'text/javascript', 'content-security-policy-report-only': "default-src 'none'" }));
+  assert.deepEqual(late, ['http://h/m.js']);
+  // A script keploy could not fetch: its seeding's load, as before, and no line.
+  assert.equal((await r.ask(markWorker('http://h/m.js', 'm', t), new Error('net')))[1][1].body, workerAnswer(t, 5, 'm', 'http://h/m.js'));
+  assert.deepEqual(late, ['http://h/m.js']);
+  assert.match(lateLine('a test', 'http://h/m.js'), /^keploy: in a test, the module Web Worker at http:\/\/h\/m\.js is served with a Content-Security-Policy, .* runs after the modules the script imports: .*; if one does, serve the worker's script with no Content-Security-Policy where the tests run/);
 });
