@@ -282,21 +282,26 @@ async function ticks() {
 // fulfill throws as Playwright's does when the browser refuses the answer
 // (refuse: WebKit's redirect, the route still the handler's), and each
 // call throws when the route was already handled (fallback hands it to the
-// next route, as Playwright's does).
+// next route, as Playwright's does). calls: each fulfill, continue and
+// abort it got, with what it was given.
 function fakeRoute(req) {
   const route = {
     _handlingPromise: {},
+    calls: [],
     request: () => req,
     async fulfill(o = {}) {
+      route.calls.push(['fulfill', o]);
       if (!route._handlingPromise) throw new Error('Route is already handled!');
       if (o.refuse) throw new Error('Cannot fulfill with redirect status: 302');
       route._handlingPromise = null;
     },
-    async continue() {
+    async continue(o) {
+      route.calls.push(['continue', o]);
       if (!route._handlingPromise) throw new Error('Route is already handled!');
       route._handlingPromise = null;
     },
-    async abort() {
+    async abort(code) {
+      route.calls.push(['abort', code]);
       if (!route._handlingPromise) throw new Error('Route is already handled!');
       route._handlingPromise = null;
     },
@@ -407,6 +412,29 @@ test('settle: a route the page\'s routes hand on reaches its context\'s, watched
   ctx.handler = (route) => route.fulfill({});
   await ctx._onRoute(fakeRoute(r));
   assert.equal(inflight.size, 0);
+});
+
+test('settle: the watched route\'s fulfill, continue and abort reach Playwright\'s own with what the test gave them (an abort\'s error code, a continue\'s options, a fulfill\'s answer), on a page\'s route and on its context\'s', async () => {
+  const ctx = withRoutes(fakeContext());
+  const inflight = new Inflight(ctx);
+  const page = withRoutes(new EventEmitter(), ctx);
+  ctx.emit('page', page);
+  const given = [['abort', 'accessdenied'], ['abort', undefined], ['continue', { url: 'http://h/m.js', headers: { 'x-auth': 'k' } }], ['continue', undefined], ['fulfill', { status: 201, body: 'b' }]];
+  for (const on of ['page', 'context']) {
+    for (const [name, arg] of given) {
+      const r = fakeRequest(page);
+      ctx.emit('request', r);
+      const route = fakeRoute(r);
+      const handler = (rt) => rt[name](arg);
+      page.handler = on === 'page' ? handler : () => 'next';
+      ctx.handler = handler;
+      assert.equal(await page._onRoute(route).then(() => 'returned', (e) => e.message), 'returned');
+      assert.deepEqual(route.calls, [[name, arg]], `${on} ${name} ${JSON.stringify(arg)}`);
+    }
+  }
+  // Each one aborted or sent on is in flight until the browser reports its
+  // end; each fulfilled one has ended.
+  assert.equal(inflight.size, 8);
 });
 
 test('settle: a page or context with no _onRoute (a Playwright without it) gets none, and its requests are waited for as before', async () => {

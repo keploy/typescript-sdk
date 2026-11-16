@@ -2068,6 +2068,56 @@ for (const engine of ENGINES) {
   });
 }
 
+// aborts.spec.ts's tests of a route of the test's own that aborts a request,
+// and the one where keploy stops a seeded Web Worker's script load (Chromium).
+const AB = ['abort with a code on page', 'abort with a code on context', 'abort with no code on page', 'abort a worker script with a code', 'abort a worker script with blockedbyclient', 'abort a worker script with no code'];
+const AB_G = 'abort with a code|abort with no code|abort a worker script';
+const AB_STOP = 'a worker script the server redirects';
+
+// Settle wraps each route's abort (and keploy's worker routes the abort of
+// a worker script's load they hand to the test's routes), so the error code
+// the test gives reaches the browser: the page's requestfailed text is what
+// it is with no keploy. keploy's own stop of a seeded Web Worker's script
+// the server redirects (Chromium) fails the load with blockedbyclient, as a
+// route's abort('blockedbyclient') does with no keploy. Not every engine
+// names codes apart (measured): WebKit gives every abort one text (Blocked by
+// Web Inspector); Firefox gives blockedbyclient the text of no code
+// (NS_ERROR_FAILURE), and accessdenied its own; Chromium names a fetch's code
+// (net::ERR_ACCESS_DENIED, net::ERR_FAILED) but reports every failed Web
+// Worker script load to the page as net::ERR_ABORTED, whatever the code. So a
+// code dropped on the way shows in a fetch's text in Chromium and Firefox,
+// and in a worker script's in Firefox, for accessdenied: the row checks that
+// it would there.
+for (const engine of ENGINES) {
+  test(`aborts, in ${engine}: a route of the test's own that aborts a fetch (with an error code, on its page or its context, or with none) or a Web Worker's script (with an error code, with blockedbyclient or with none) fails it with the requestfailed text it has with no keploy, seeded and with seeding off, and the server never sees it${engine === 'chromium' ? "; keploy's stop of a seeded Web Worker's script the server redirects fails it as a route's abort('blockedbyclient') does with no keploy" : ''}`, async (t) => {
+    const j = journal();
+    const a = await fakeAgent(j);
+    try {
+      const only = ['aborts.spec.ts', '-g', AB_G];
+      const plain = await drawRun(j, { KEPLOY_MOCK_AGENT: undefined, KEPLOY_TEST_PID: undefined, PW_BROWSER: engine }, only, AB);
+      const off = await drawRun(j, { ...keployEnv(a.url), PW_BROWSER: engine, PW_NOSEED: '1' }, only, AB);
+      const on = await drawRun(j, { ...keployEnv(a.url), PW_BROWSER: engine }, engine === 'chromium' ? ['aborts.spec.ts'] : only, engine === 'chromium' ? [...AB, AB_STOP] : AB);
+      const text = (r, n) => r.drew[n][1];
+      for (const [mode, r] of [['no keploy', plain], ['seeding off', off], ['seeded', on]]) t.diagnostic(`${engine}, ${mode}: ${[...AB, AB_STOP].filter((n) => r.drew[n] !== undefined).map((n) => `${n}: ${r.drew[n].join(' ')}`).join('; ')}`);
+      // Each failed, as the page saw it, and the page's requestfailed event named it.
+      assert.deepEqual(AB.map((n) => plain.drew[n][0]), ['failed', 'failed', 'failed', 'error', 'error', 'error']);
+      for (const n of AB) assert.notEqual(text(plain, n), 'finished', n);
+      for (const n of AB) {
+        assert.deepEqual(on.drew[n], plain.drew[n], `seeded: ${n}`);
+        assert.deepEqual(off.drew[n], plain.drew[n], `seeding off: ${n}`);
+      }
+      // Where the engine names the code apart, a code dropped on the way would show.
+      if (engine !== 'webkit') assert.notEqual(text(plain, 'abort with a code on page'), text(plain, 'abort with no code on page'));
+      if (engine === 'firefox') assert.notEqual(text(plain, 'abort a worker script with a code'), text(plain, 'abort a worker script with no code'));
+      if (engine === 'chromium') assert.deepEqual(on.drew[AB_STOP], plain.drew['abort a worker script with blockedbyclient']);
+      // No request a route aborted reached the server; keploy asked it once
+      // for the redirected script (to see the redirect), never for the next.
+      for (const r of [plain, off]) assert.deepEqual(r.seen.filter((u) => u.startsWith('/ab/') || u.startsWith('/rd/')), []);
+      assert.deepEqual(on.seen.filter((u) => u.startsWith('/ab/') || u.startsWith('/rd/')), engine === 'chromium' ? ['/rd/w.js'] : []);
+    } finally { await a.close(); }
+  });
+}
+
 // once.spec.ts's tests, and the workers each one's page starts, in order
 // (each script's URL, and w a classic Web Worker, m a module one, s a
 // Shared Worker), and the doc tests' document paths (/ov for the others).
