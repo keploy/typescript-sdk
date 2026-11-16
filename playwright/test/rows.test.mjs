@@ -1,6 +1,7 @@
 // Rows: real Playwright runs of test/fixtures against a fake keploy agent,
-// which records every call and answers as each row says. The settle rows
-// need Chromium (npx playwright install chromium).
+// which records every call and answers as each row says. They need
+// Chromium, and the seeding's engine rows Firefox and WebKit too
+// (npx playwright install chromium firefox webkit).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -9,6 +10,11 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { LOADS_KEY, OFF_LINE, SEEDED_LINE, fakerLine, initScript, processRandom, unplacedLine, unseededLine, markWorker, workerMark, workerScript } from '../dist/random.js';
+import { busyWorkerLine, sharedWorkerLine } from '../dist/settle.js';
+import { NO_NOTE_LINE, readNote, unreadNoteLine } from '../dist/note.js';
+import { BLANK_DRAWS, DRAWS, documentAt, workerAt } from './draws.mjs';
+import { webkitDroppedLine, webkitDroppedSharedWorker } from './webkit.mjs';
 
 const PKG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = path.join(PKG, 'node_modules', '@playwright', 'test', 'cli.js');
@@ -21,7 +27,8 @@ function journal() {
 }
 
 // A fake keploy agent. answer(call) returns {status, body} or undefined for
-// the protocol's plain "ok".
+// the protocol's plain "ok", which answers a begin with the seed it sent, as
+// a record does.
 async function fakeAgent(j, answer = () => undefined) {
   const srv = http.createServer((req, res) => {
     let body = '';
@@ -33,7 +40,8 @@ async function fakeAgent(j, answer = () => undefined) {
       if (!a) {
         a = { body: call.path === '/agent/instance' ? { v: 1, instance: 'run', timeFile: '' }
           : call.path === '/agent/scope/given' ? { v: 1, status: 'ok', variable: `given:${call.body.name}` }
-            : { v: 1, status: 'ok' } };
+            : call.path === '/agent/scope/begin' && call.body.seed ? { v: 1, status: 'ok', seed: call.body.seed }
+              : { v: 1, status: 'ok' } };
       }
       res.writeHead(a.status ?? 200, { 'content-type': 'application/json' });
       res.end(JSON.stringify(a.body));
@@ -55,11 +63,27 @@ async function pageServer(j) {
   const seen = new Promise((r) => { saw = r; });
   const srv = http.createServer((req, res) => {
     if (req.url === '/page') { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><body>page</body></html>'); return; }
+    if (req.url === '/loads') { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html><body><img src="/slow"></body></html>'); return; }
     if (req.url === '/release') { release(); res.end('ok'); return; }
     if (req.url === '/seen') { void seen.then(() => res.end('ok')); return; }
     // A service worker that calls /slow as it installs.
     if (req.url === '/sw.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end("self.addEventListener('install', () => { void fetch('/slow'); });"); return; }
+    // A Shared Worker that answers each page that connects.
+    if (req.url === '/shared.js?v=1') { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end("onconnect = (e) => { e.ports[0].postMessage('up'); };"); return; }
     if (req.url === '/nocontent') { res.writeHead(204); res.end(); return; }
+    // A Web Worker whose top-level code runs on for 10 s after its first
+    // message.
+    if (req.url === '/busyw.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end("postMessage('busy'); const end = Date.now() + 10000; while (Date.now() < end) { /* busy */ }"); return; }
+    // A Web Worker's script, classic or module, answered only once /release
+    // is called.
+    if (req.url === '/heldw.js' || req.url === '/heldw.mjs') {
+      j.add({ page: 'heldw sent' });
+      saw();
+      res.on('close', () => { if (!res.writableFinished) j.add({ page: 'heldw cut' }); });
+      res.on('finish', () => j.add({ page: 'heldw answered' }));
+      void released.then(() => { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end('postMessage("up");'); });
+      return;
+    }
     if (req.url === '/resetcontent') { res.writeHead(205); res.end(); return; }
     // A disposition's type is case-insensitive (RFC 6266): the browser downloads "Attachment" too.
     if (req.url === '/download') { res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': 'Attachment; filename="d.bin"' }); res.end('bytes'); return; }
@@ -69,6 +93,7 @@ async function pageServer(j) {
       j.add({ page: 'slowdoc sent' });
       res.writeHead(200, { 'content-type': 'text/html' });
       res.write('<html><body>loading');
+      res.on('finish', () => j.add({ page: 'slowdoc answered' }));
       void released.then(() => res.end('</body></html>'));
       return;
     }
@@ -96,15 +121,15 @@ async function pageServer(j) {
   return { url: `http://127.0.0.1:${srv.address().port}`, close: () => new Promise((r) => { srv.closeAllConnections(); srv.close(r); }) };
 }
 
-// Runs one Playwright run of the fixture specs, from the folder cwd;
-// returns each test's result.
-async function playwright(specs, env, cwd = PKG) {
+// Runs one Playwright run of the fixture specs (or of config's), from the
+// folder cwd; returns each test's result.
+async function playwright(specs, env, cwd = PKG, config = CONFIG) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kpw-'));
   const report = path.join(tmp, 'report.json');
   const stepsFile = path.join(tmp, 'steps.jsonl');
   const childEnv = { ...process.env, PLAYWRIGHT_JSON_OUTPUT_NAME: report, PW_OUTPUT_DIR: path.join(tmp, 'out'), MARKER_DIR: tmp, STEPS_FILE: stepsFile, ...env };
   for (const k of Object.keys(childEnv)) if (childEnv[k] === undefined) delete childEnv[k];
-  const child = spawn(process.execPath, [CLI, 'test', '-c', CONFIG, ...specs], { cwd, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [CLI, 'test', '-c', config, ...specs], { cwd, env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   child.stdout.on('data', (d) => { out += d; });
   child.stderr.on('data', (d) => { out += d; });
@@ -115,14 +140,28 @@ async function playwright(specs, env, cwd = PKG) {
   const walk = (suite, titles) => {
     for (const s of suite.suites ?? []) walk(s, s.file && s.title === s.file ? titles : [...titles, s.title]);
     for (const spec of suite.specs ?? []) {
-      const t = spec.tests[0];
-      const r = t.results[t.results.length - 1] ?? {};
-      tests[[...titles, spec.title].join(' › ')] = {
-        status: r.status ?? 'none',
-        error: (r.errors ?? []).map((e) => e.message ?? '').join('\n'),
-        annotations: r.annotations ?? t.annotations ?? [],
-        steps: steps.filter((x) => x.test === spec.title).map((x) => x.step),
-      };
+      // Each run of the test (--repeat-each lists one spec for each), its
+      // last attempt.
+      const runs = spec.tests.map((t) => {
+        const r = t.results[t.results.length - 1] ?? {};
+        return {
+          status: r.status ?? 'none',
+          error: (r.errors ?? []).map((e) => e.message ?? '').join('\n'),
+          annotations: r.annotations ?? t.annotations ?? [],
+          stderr: (r.stderr ?? []).map((e) => e.text ?? '').join(''),
+          stdout: (r.stdout ?? []).map((x) => x.text ?? Buffer.from(x.buffer ?? '', 'base64').toString()).join(''),
+          attempts: t.results.length,
+        };
+      });
+      const key = [...titles, spec.title].join(' › ');
+      if (tests[key]) tests[key].runs.push(...runs);
+      else {
+        const mine = steps.filter((x) => x.test === spec.title);
+        const begun = mine.filter((x) => x.step !== undefined);
+        // order: the test's steps begun and its stdout writes, as they came.
+        const order = mine.map((x) => (x.step !== undefined ? { step: x.step } : { out: x.out }));
+        tests[key] = { ...runs[0], runs, steps: begun.map((x) => x.step), at: Object.fromEntries(begun.map((x) => [x.step, x.at])), order };
+      }
     }
   };
   for (const s of JSON.parse(fs.readFileSync(report, 'utf8')).suites) walk(s, []);
@@ -131,6 +170,19 @@ async function playwright(specs, env, cwd = PKG) {
 
 const keployEnv = (url) => ({ KEPLOY_MOCK_AGENT: url, KEPLOY_MOCK_AGENT_TOKEN: 'tok', KEPLOY_MOCK_PROJECT: PKG, KEPLOY_TEST_PID: undefined });
 const calls = (j) => j.events.filter((e) => e.agent).map((e) => e.agent);
+// Every call's path and body, each begin's seed shown as FRESH once it is
+// checked to be a fresh one: 128 bits of hex, no two begins the same; and
+// each end's note as NOTE once it is checked to be one this package reads.
+const FRESH = '<a fresh seed>';
+const NOTE = '<a note>';
+function wire(j) {
+  const seeds = calls(j).filter((c) => c.path === '/agent/scope/begin' && c.body.seed !== undefined).map((c) => c.body.seed);
+  for (const sd of seeds) assert.match(sd, /^[0-9a-f]{32}$/);
+  assert.equal(new Set(seeds).size, seeds.length, seeds.join(' '));
+  for (const c of calls(j)) if (c.path === '/agent/scope/end' && c.body.note !== undefined) assert.equal(typeof readNote(c.body.note), 'object', c.body.note);
+  return calls(j).map((c) => [c.path, c.body && c.body.seed !== undefined ? { ...c.body, seed: FRESH }
+    : c.body && c.body.note !== undefined ? { ...c.body, note: NOTE } : c.body]);
+}
 const ref = (file, name) => ({ name, file: `test/fixtures/${file}`, project: 'p1' });
 
 test('inert without keploy: no call, every test runs as written', async () => {
@@ -158,13 +210,13 @@ test('a worker claims the run, each test begins before its beforeEach and ends w
     const given = { name: 'seed', value: 'seed-value-1', source: 'test/fixtures/basic.spec.ts:7' };
     const claim = { key: 'p1', dir: fs.realpathSync(PKG) };
     // b fails, so Playwright runs c and d in a new worker, which claims again.
-    assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
+    assert.deepEqual(wire(j), [
       ['/agent/instance', claim],
-      ['/agent/scope/begin', { ...r('a'), canSkip: true }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('a'), outcome: 'passed' }],
-      ['/agent/scope/begin', { ...r('b'), canSkip: true }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('b'), outcome: 'failed' }],
+      ['/agent/scope/begin', { ...r('a'), canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('a'), outcome: 'passed', note: NOTE }],
+      ['/agent/scope/begin', { ...r('b'), canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('b'), outcome: 'failed', note: NOTE }],
       ['/agent/instance', claim],
-      ['/agent/scope/begin', { ...r('c'), canSkip: true }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('c'), outcome: 'skipped' }],
-      ['/agent/scope/begin', { ...r('d'), canSkip: true }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('d'), outcome: 'passed' }],
+      ['/agent/scope/begin', { ...r('c'), canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('c'), outcome: 'skipped', note: NOTE }],
+      ['/agent/scope/begin', { ...r('d'), canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/given', given], ['/agent/scope/end', { ...r('d'), outcome: 'passed', note: NOTE }],
     ]);
     assert.ok(calls(j).every((c) => c.auth === 'Bearer tok'));
     // KEPLOY_TEST_PID named the claiming worker (test a checks it).
@@ -184,6 +236,10 @@ test('keploy skips a set-aside test with its reason, fails a judged-red one, and
     const { tests, tmp } = await playwright(['agent-says.spec.ts'], keployEnv(a.url));
     assert.equal(tests['set aside'].status, 'skipped');
     assert.deepEqual(tests['set aside'].annotations.filter((x) => x.type === 'skip').map((x) => x.description), ['keploy: flaky/request_changed: the body changed']);
+    // Playwright's terminal reporters show a test's output, not its skip's
+    // reason: the reason is in the output.
+    assert.equal(tests['set aside'].stderr, 'keploy: flaky/request_changed: the body changed (keploy skipped set aside)\n');
+    assert.equal(tests['judged red'].stderr, '');
     assert.ok(!fs.existsSync(path.join(tmp, 'set-aside-ran')), 'the set-aside test ran');
     assert.equal(tests['judged red'].status, 'failed');
     // The agent's judging reason already starts with "keploy: "; the test shows it once (gap13 showed it twice).
@@ -194,6 +250,93 @@ test('keploy skips a set-aside test with its reason, fails a judged-red one, and
     assert.ok(!fs.existsSync(path.join(tmp, 'refused-ran')), 'the refused test ran');
     // No end for a skipped test, nor for one whose begin was refused.
     assert.deepEqual(calls(j).filter((c) => c.path === '/agent/scope/end').map((c) => c.body.name), ['judged red']);
+  } finally { await a.close(); }
+});
+
+test('keploy\'s skip reason is in the output Playwright\'s list reporter prints', async () => {
+  const j = journal();
+  const a = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.name === 'set aside'
+    ? { body: { v: 1, status: 'ok', action: 'skip', reason: 'flaky/request_changed: the body changed' } } : undefined));
+  try {
+    const { tests, out } = await playwright(['agent-says.spec.ts', '-g', 'set aside', '--reporter=list,json'], keployEnv(a.url));
+    assert.equal(tests['set aside'].status, 'skipped', out);
+    assert.match(out, /keploy: flaky\/request_changed: the body changed \(keploy skipped set aside\)/);
+  } finally { await a.close(); }
+});
+
+// retry.spec.ts's test fails its first attempt, and its group retries it
+// once whatever the command line says.
+const retried = 'retried › fails its first attempt';
+const retryRefusal = {
+  code: 'test_run_again',
+  message: `Playwright retried p1::test/fixtures/retry.spec.ts::${retried}, and keploy runs each test once in a run`,
+  remedy: 'run the suite with --retries=0, and with no retries in its config or its test.describe.configure',
+};
+
+test('a test Playwright retries is not begun again: the retry fails, saying why, and keploy is told', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  try {
+    const { tests, tmp, out } = await playwright(['retry.spec.ts'], keployEnv(a.url));
+    const t = tests[retried];
+    assert.equal(t.attempts, 2, out);
+    assert.equal(t.status, 'failed');
+    assert.equal(t.error.split('\n')[0], `KeployError: keploy: ${retryRefusal.message} (${retryRefusal.remedy})`);
+    // The retry's body did not run.
+    assert.ok(fs.existsSync(path.join(tmp, 'attempt-0')));
+    assert.ok(!fs.existsSync(path.join(tmp, 'attempt-1')), 'the retry ran');
+    const r = ref('retry.spec.ts', retried);
+    const claim = { key: 'p1', dir: fs.realpathSync(PKG) };
+    assert.deepEqual(wire(j), [
+      ['/agent/instance', claim],
+      ['/agent/scope/begin', { ...r, canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/end', { ...r, outcome: 'failed', note: NOTE }],
+      // The retry runs in a new worker, which claims the run again.
+      ['/agent/instance', claim],
+      ['/agent/refusal', retryRefusal],
+    ]);
+  } finally { await a.close(); }
+});
+
+test('a retry keploy could not be told of still fails, saying why and what the agent answered', async () => {
+  const j = journal();
+  const a = await fakeAgent(j, (c) => (c.path === '/agent/refusal' ? { status: 500, body: 'boom' } : undefined));
+  try {
+    const { tests, tmp, out } = await playwright(['retry.spec.ts'], keployEnv(a.url));
+    const t = tests[retried];
+    assert.equal(t.attempts, 2, out);
+    assert.equal(t.status, 'failed');
+    assert.equal(t.error.split('\n')[0], `KeployError: keploy: ${retryRefusal.message} (${retryRefusal.remedy}); keploy could not be told: ` +
+      'keploy: the keploy agent answered 500 Internal Server Error to /agent/refusal: "\\"boom\\""');
+    assert.ok(!fs.existsSync(path.join(tmp, 'attempt-1')), 'the retry ran');
+    assert.equal(calls(j).filter((c) => c.path === '/agent/scope/begin').length, 1);
+  } finally { await a.close(); }
+});
+
+test('without keploy a retried test is retried as written', async () => {
+  const { tests, tmp, out } = await playwright(['retry.spec.ts'], { KEPLOY_MOCK_AGENT: undefined, KEPLOY_TEST_PID: undefined });
+  assert.equal(tests[retried].attempts, 2, out);
+  assert.equal(tests[retried].status, 'passed');
+  assert.ok(fs.existsSync(path.join(tmp, 'attempt-1')));
+});
+
+test('a test --repeat-each runs again is not begun again: the repeat fails, saying why, and keploy is told', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  try {
+    const { tests, out } = await playwright(['agent-says.spec.ts', '-g', 'judged red', '--repeat-each=2'], keployEnv(a.url));
+    assert.deepEqual(tests['judged red'].runs.map((t) => t.status), ['passed', 'failed'], out);
+    const message = 'Playwright ran p1::test/fixtures/agent-says.spec.ts::judged red again for --repeat-each, and keploy runs each test once in a run';
+    const remedy = 'run the suite without --repeat-each, and with no repeatEach in its config';
+    assert.equal(tests['judged red'].runs[1].error.split('\n')[0], `KeployError: keploy: ${message} (${remedy})`);
+    const r = ref('agent-says.spec.ts', 'judged red');
+    const claim = { key: 'p1', dir: fs.realpathSync(PKG) };
+    assert.deepEqual(wire(j), [
+      ['/agent/instance', claim],
+      ['/agent/scope/begin', { ...r, canSkip: true, random: 'seeded', seed: FRESH }], ['/agent/scope/end', { ...r, outcome: 'passed', note: NOTE }],
+      // Playwright runs each repeat in a worker of its own.
+      ['/agent/instance', claim],
+      ['/agent/refusal', { code: 'test_run_again', message, remedy }],
+    ]);
   } finally { await a.close(); }
 });
 
@@ -271,28 +414,257 @@ test('settle: a call cancelled by its page loading another document is not waite
   } finally { await p.close(); await a.close(); }
 });
 
-test('settle: a route change inside the page cancels nothing, so its call in flight is waited for', async () => {
+// Firefox can report the new document's first call before the frame's
+// commit; the commit cancels only the old document's calls, so this one is
+// still waited for, in every engine. The call is answered only once settle's
+// step has begun (the rows' reporter asks /release then), so the test ends
+// by settle's wait alone: no deadline bounds its body, which on a loaded box
+// can take seconds in Firefox (a 4 s test timeout once fired while the
+// document's own request was in flight, and settle named that one).
+for (const engine of ['chromium', 'firefox', 'webkit']) {
+  test(`settle, in ${engine}: a call the new document makes as it loads is waited for, whichever the browser reports first, the call or its frame's commit`, async () => {
+    const j = journal();
+    const a = await fakeAgent(j);
+    const p = await pageServer(j);
+    try {
+      const title = 'a call its new document makes as it loads';
+      const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, NO_RELEASE: '1', RELEASE_AT_STEP: `${p.url}/release`, PW_BROWSER: engine });
+      const t = tests[title];
+      assert.equal(t.status, 'passed', out);
+      const named = /^keploy: wait for the test's 1 call\(s\) in flight before its browser context closes: GET http:\/\/127\.0\.0\.1:\d+\/slow$/;
+      assert.ok(t.steps.some((s) => named.test(s)), t.steps.join('\n'));
+      // The test ended after the call's answer: waited for, not cut.
+      const order = j.events.map((e) => (e.page ? e.page : e.agent.path));
+      assert.deepEqual(order.filter((e) => e.startsWith('slow') || e === '/agent/scope/end'), ['slow sent', 'slow answered', '/agent/scope/end']);
+    } finally { await p.close(); await a.close(); }
+  });
+}
+
+// A Shared Worker's script: Chromium reports no end for it (Playwright does
+// not follow Shared Workers), so settle never waits on it, in any engine,
+// and the test says so, seeded or not. A wait on it shows as settle's step
+// (and a timeout at the config's 30 s): the row sets no short timeout, which
+// would bound the test's body too, slow in Firefox on a loaded box.
+for (const engine of ['chromium', 'firefox', 'webkit']) {
+  test(`settle, in ${engine}: a test whose page starts a Shared Worker ends at once, its browser unseeded, and says once that the worker's script and calls are not waited for`, async () => {
+    const j = journal();
+    const a = await fakeAgent(j);
+    const p = await pageServer(j);
+    try {
+      const title = 'a page that starts a Shared Worker';
+      const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), KEPLOY_SEED_RANDOM: 'off', SLOW_BASE: p.url, PW_BROWSER: engine });
+      const t = tests[title];
+      assert.equal(t.status, 'passed', out);
+      assert.ok(!t.steps.some((s) => s.startsWith('keploy: wait for')), t.steps.join('\n'));
+      const said = t.stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${title}, `)).map((l) => l.replace(/:\d+\//, ':<port>/'));
+      assert.deepEqual(said, [sharedWorkerLine(title, 'http://127.0.0.1:<port>/shared.js')]);
+    } finally { await p.close(); await a.close(); }
+  });
+}
+
+// A Web Worker the page terminates while its script loads: Chromium reports
+// no end for that load, ever (and no 'worker' event), so settle drops it on
+// the page's word of the terminate; Firefox and WebKit go on loading it and
+// report its end, which settle waits for (the server answers once settle's
+// step has begun). Of two Web Workers at one URL, the one terminated is
+// dropped and the other's load waited for. Seeded, keploy's route fetches
+// the worker's script and ends the load when its fulfill has run. A settle
+// that waits on the terminated load in Chromium ends the test by its
+// timeout (the config's 30 s): no wall-clock bound in the row.
+for (const engine of ['chromium', 'firefox', 'webkit']) {
+  for (const seed of ['seeded', 'off']) {
+    test(`settle, in ${engine}, ${seed}: a test whose page terminates a Web Worker (classic and module) while its script loads ends, and of two Web Workers at one URL the one terminated is not waited for and the other is`, async (t) => {
+      for (const title of ['a Web Worker its page terminates while its script loads', 'two Web Workers at one URL, the second terminated while their scripts load']) {
+        const j = journal();
+        const a = await fakeAgent(j);
+        const p = await pageServer(j);
+        try {
+          const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), ...(seed === 'off' ? { KEPLOY_SEED_RANDOM: 'off' } : {}), SLOW_BASE: p.url, NO_RELEASE: '1', RELEASE_AT_STEP: `${p.url}/release`, PW_BROWSER: engine });
+          const r = tests[title];
+          assert.equal(r.status, 'passed', `${title}\n${out}`);
+          const order = j.events.map((e) => (e.page ? e.page : e.agent.path));
+          // The surviving worker's load is answered before the test ends.
+          if (title.startsWith('two')) assert.ok(order.indexOf('heldw answered') >= 0 && order.indexOf('heldw answered') < order.indexOf('/agent/scope/end'), order.join(', '));
+          // Firefox and WebKit, seeded or off, go on loading a terminated
+          // worker's script and settle waits for it: every load the server
+          // got is answered before the test ends. Chromium ends the load
+          // at once (seeded, keploy's fetch of it is cut too).
+          if (engine !== 'chromium') {
+            const before = order.slice(0, order.indexOf('/agent/scope/end'));
+            const n = (e) => before.filter((x) => x === e).length;
+            assert.ok(n('heldw sent') > 0 && n('heldw answered') === n('heldw sent'), `${title}: ${order.join(', ')}`);
+          }
+          t.diagnostic(`${title}: ${order.filter((e) => e.startsWith('heldw') || e === '/agent/scope/end').join(', ')}; steps: ${r.steps.filter((x) => x.startsWith('keploy: wait for')).join(' | ')}`);
+        } finally { await p.close(); await a.close(); }
+      }
+    });
+  }
+}
+
+// A Web Worker whose top-level code runs on (10 s) after its first message,
+// which the test's body waits for: Chromium reports its script loaded only
+// once that code returns, so with seeding off settle waits on that load and,
+// once its wait has run 3 s with only that load in flight, the test says why,
+// once, naming the worker. Firefox and WebKit report the load's end as the
+// script arrives, and seeded, keploy's route answers it whole: no wait on it,
+// and nothing said. The wait ends by the worker's own code (no wall-clock
+// bound in the row; the config's 30 s timeout would fail it).
+for (const engine of ['chromium', 'firefox', 'webkit']) {
+  for (const seed of ['seeded', 'off']) {
+    const says = engine === 'chromium' && seed === 'off';
+    test(`settle, in ${engine}, ${seed}: a test whose Web Worker's top-level code runs long after the body ends ${says ? 'waits for its script load and says once why, naming the worker and the next step' : 'does not wait for its script load, and says nothing of it'}`, async () => {
+      const j = journal();
+      const a = await fakeAgent(j);
+      const p = await pageServer(j);
+      try {
+        const title = 'a Web Worker whose top-level code runs long';
+        const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), ...(seed === 'off' ? { KEPLOY_SEED_RANDOM: 'off' } : {}), SLOW_BASE: p.url, PW_BROWSER: engine });
+        const t = tests[title];
+        assert.equal(t.status, 'passed', out);
+        const waited = t.steps.filter((x) => x.startsWith('keploy: wait for') && /\/busyw\.js/.test(x));
+        assert.equal(waited.length, says ? 1 : 0, t.steps.join('\n'));
+        const said = t.stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${title}, the test's end waits`)).map((l) => l.replace(/:\d+\//, ':<port>/'));
+        assert.deepEqual(said, says ? [busyWorkerLine(title, 'http://127.0.0.1:<port>/busyw.js')] : [], out);
+      } finally { await p.close(); await a.close(); }
+    });
+  }
+}
+
+// A request the test's own route answers with a redirect (route.fulfill
+// 302 or 307): Chromium reports no end for a Web Worker's script load so
+// answered, Firefox none for the redirect's first request (a page fetch's
+// too), and WebKit refuses the answer, with Playwright's own error, and the
+// request stays with the route. Settle waits on none of them, seeded or off:
+// a wait shows as settle's step naming the request (and a timeout at the
+// config's 30 s: the row sets no short timeout). The fixture's handlers end
+// together: Playwright ends a test at a handler's first throw, and a
+// handler still waiting on its fulfill then holds its request in flight.
+for (const engine of ['chromium', 'firefox', 'webkit']) {
+  for (const seed of ['seeded', 'off']) {
+    test(`settle, in ${engine}, ${seed}: a request the test's own route answers with a redirect (a classic Web Worker's script with a 302, a module one's with a 307, a page fetch with a 302) is not waited for, and the test ${engine === 'webkit' ? "fails with Playwright's own error (WebKit refuses the answer)" : 'passes'}`, async () => {
+      const j = journal();
+      const a = await fakeAgent(j);
+      const p = await pageServer(j);
+      try {
+        const title = "requests the test's route answers with a redirect";
+        const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), ...(seed === 'off' ? { KEPLOY_SEED_RANDOM: 'off' } : {}), SLOW_BASE: p.url, PW_BROWSER: engine });
+        const t = tests[title];
+        if (engine === 'webkit') {
+          assert.equal(t.status, 'failed', out);
+          assert.match(t.error, /Cannot fulfill with redirect status/, out);
+        } else {
+          assert.equal(t.status, 'passed', out);
+        }
+        const waited = t.steps.filter((x) => x.startsWith('keploy: wait for') && /:\d+\/(rw\.js|rwm\.js|rf)(\?|,|\s|$)/.test(x));
+        assert.deepEqual(waited, [], t.steps.join('\n'));
+      } finally { await p.close(); await a.close(); }
+    });
+  }
+}
+
+// A request the test's route sends on (continue) is waited for, though a
+// fulfill of the route failed after: its handler then throws Playwright's
+// "already handled" (which fails the test; Playwright's own check refuses
+// that fulfill before it makes any API call, so its error names no API, as
+// with no keploy). The server answers it once settle's step has begun
+// (waitedFor).
+for (const engine of ['chromium', 'firefox', 'webkit']) {
+  test(`settle, in ${engine}: a call the test's own route sends on is waited for, though the route's fulfill failed after it was sent on, its handler throwing`, async () => {
+    await waitedFor("a call the test's route sends on and then tries to answer", 'GET', '/slow', engine, /^Error: Route is already handled!\n/);
+  });
+}
+
+// WebKit refuses a route's redirect (route.fulfill 302), and Playwright then
+// lets no route reach the request: a continue() of it fails with
+// Playwright's own error (route.continue: Route is already handled!), which
+// the handler throws and which fails the test. Settle does not wait on the
+// call. WebKit holds it until the test's browser context is deleted, and
+// then may send it to the server (Playwright sends nothing for it, with or
+// without keploy), so the row asserts nothing of the server.
+test("settle, in webkit: a call the test's own route tries to send on after WebKit refused its redirect fails with Playwright's own error, and is not waited for", async () => {
   const j = journal();
   const a = await fakeAgent(j);
   const p = await pageServer(j);
   try {
-    const { tests, out } = await playwright(['settle.spec.ts', '-g', 'route change inside the page'], { ...keployEnv(a.url), SLOW_BASE: p.url, NO_RELEASE: '1', PW_TIMEOUT: '4000' });
-    const t = tests['a call in flight across a route change inside the page'];
-    assert.equal(t.status, 'timedOut', out);
-    assert.ok(t.steps.some((s) => /^keploy: wait for the test's 1 call\(s\) in flight .*\/slow$/.test(s)), t.steps.join('\n'));
+    const title = "a call the test's route tries to send on after the browser refused its answer";
+    const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, PW_BROWSER: 'webkit' });
+    const t = tests[title];
+    assert.equal(t.status, 'failed', out);
+    assert.match(t.error, /^Error: route\.continue: Route is already handled!\n/, out);
+    assert.deepEqual(t.steps.filter((x) => x.startsWith('keploy: wait for') && /\/slow(,|\s|$)/.test(x)), [], t.steps.join('\n'));
   } finally { await p.close(); await a.close(); }
 });
 
-test('settle: a navigation answered 204 replaces no document, so a call in flight is still waited for', async () => {
+// So does its abort() there: route.abort: Route is already handled!, named
+// as the test called it, and settle does not wait on the call.
+test("settle, in webkit: a call the test's own route tries to fail after WebKit refused its redirect fails with Playwright's own error, and is not waited for", async () => {
   const j = journal();
   const a = await fakeAgent(j);
   const p = await pageServer(j);
   try {
-    const { tests, out } = await playwright(['settle.spec.ts', '-g', 'navigation answered 204'], { ...keployEnv(a.url), SLOW_BASE: p.url, NO_RELEASE: '1', PW_TIMEOUT: '4000' });
-    const t = tests['a call in flight across a navigation answered 204'];
-    assert.equal(t.status, 'timedOut', out);
-    assert.ok(t.steps.some((s) => /^keploy: wait for the test's 1 call\(s\) in flight .*\/slow$/.test(s)), t.steps.join('\n'));
+    const title = "a call the test's route tries to fail after the browser refused its answer";
+    const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, PW_BROWSER: 'webkit' });
+    const t = tests[title];
+    assert.equal(t.status, 'failed', out);
+    assert.match(t.error, /^Error: route\.abort: Route is already handled!\n/, out);
+    assert.deepEqual(t.steps.filter((x) => x.startsWith('keploy: wait for') && /\/slow(,|\s|$)/.test(x)), [], t.steps.join('\n'));
   } finally { await p.close(); await a.close(); }
+});
+
+// A test's route falls back and then throws: Playwright sends the call
+// nowhere, so settle does not wait on it, and the test fails at once with
+// the handler's error, as with no keploy (0.1.1 waited on the call until
+// the test's timeout, naming it in settle's step).
+for (const engine of ['chromium', 'firefox', 'webkit']) {
+  test(`settle, in ${engine}: a call the test's own route falls back on and then throws is not waited for, and the test fails at once with the handler's error`, async () => {
+    const j = journal();
+    const a = await fakeAgent(j);
+    const p = await pageServer(j);
+    try {
+      const title = "a call the test's route falls back on and then throws";
+      const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, PW_BROWSER: engine, PW_TIMEOUT: '20000' });
+      const t = tests[title];
+      assert.equal(t.status, 'failed', out);
+      assert.match(t.error, /^Error: the test's route handler threw after its fallback(\n|$)/, out);
+      assert.doesNotMatch(t.error, /exceeded|Test timeout/, out);
+      assert.deepEqual(t.steps.filter((x) => x.startsWith('keploy: wait for') && /\/slow(,|\s|$)/.test(x)), [], t.steps.join('\n'));
+    } finally { await p.close(); await a.close(); }
+  });
+}
+
+// Settle rows where a call is still waited for: the page server answers it
+// only once settle's step has begun (the rows' reporter asks /release then),
+// so the test ends by settle's own wait, with no deadline on its body. The
+// test passes, settle's step names the call (method, URL), and the test's
+// end comes after the call's answer. A settle that did not wait for it ends
+// the test with the call unanswered.
+async function waitedFor(title, method, call, engine = '', error = null) {
+  const j = journal();
+  const a = await fakeAgent(j);
+  const p = await pageServer(j);
+  try {
+    const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, NO_RELEASE: '1', RELEASE_AT_STEP: `${p.url}/release`, ...(engine === '' ? {} : { PW_BROWSER: engine }) });
+    const t = tests[title];
+    if (error === null) {
+      assert.equal(t.status, 'passed', out);
+    } else {
+      assert.equal(t.status, 'failed', out);
+      assert.match(t.error, error, out);
+    }
+    const named = new RegExp(`^keploy: wait for the test's 1 call\\(s\\) in flight before its browser context closes: ${method} http://127\\.0\\.0\\.1:\\d+${call}$`);
+    assert.ok(t.steps.some((s) => named.test(s)), t.steps.join('\n'));
+    const name = call.slice(1);
+    const order = j.events.map((e) => (e.page ? e.page : e.agent.path));
+    assert.deepEqual(order.filter((e) => e === `${name} sent` || e === `${name} answered` || e === '/agent/scope/end'), [`${name} sent`, `${name} answered`, '/agent/scope/end'], order.join(', '));
+  } finally { await p.close(); await a.close(); }
+}
+
+test('settle: a route change inside the page cancels nothing, so its call in flight is waited for', async () => {
+  await waitedFor('a call in flight across a route change inside the page', 'GET', '/slow');
+});
+
+test('settle: a navigation answered 204 replaces no document, so a call in flight is still waited for', async () => {
+  await waitedFor('a call in flight across a navigation answered 204', 'GET', '/slow');
 });
 
 test('an unnamed Playwright project claims with the key ".", and its tests name no project', async () => {
@@ -302,10 +674,10 @@ test('an unnamed Playwright project claims with the key ".", and its tests name 
     const { tests, out } = await playwright(['agent-says.spec.ts', '-g', 'judged red'], { ...keployEnv(a.url), PW_UNNAMED: '1' });
     assert.equal(tests['judged red'].status, 'passed', out);
     const r = { name: 'judged red', file: 'test/fixtures/agent-says.spec.ts' };
-    assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
+    assert.deepEqual(wire(j), [
       ['/agent/instance', { key: '.', dir: fs.realpathSync(PKG) }],
-      ['/agent/scope/begin', { ...r, canSkip: true }],
-      ['/agent/scope/end', { ...r, outcome: 'passed' }],
+      ['/agent/scope/begin', { ...r, canSkip: true, random: 'seeded', seed: FRESH }],
+      ['/agent/scope/end', { ...r, outcome: 'passed', note: NOTE }],
     ]);
   } finally { await a.close(); }
 });
@@ -322,10 +694,10 @@ test('a worker started above keploy\'s project claims with the project\'s folder
     const { tests, out } = await playwright(['agent-says.spec.ts', '-g', 'judged red'], keployEnv(a.url), path.dirname(PKG));
     assert.equal(tests['judged red'].status, 'passed', out);
     const r = ref('agent-says.spec.ts', 'judged red');
-    assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
+    assert.deepEqual(wire(j), [
       ['/agent/instance', { key: 'p1', dir: fs.realpathSync(PKG) }],
-      ['/agent/scope/begin', { ...r, canSkip: true }],
-      ['/agent/scope/end', { ...r, outcome: 'passed' }],
+      ['/agent/scope/begin', { ...r, canSkip: true, random: 'seeded', seed: FRESH }],
+      ['/agent/scope/end', { ...r, outcome: 'passed', note: NOTE }],
     ]);
   } finally { await a.close(); }
 });
@@ -338,10 +710,10 @@ test('when keploy names no project, a worker claims with the current folder, whi
     const { tests, out } = await playwright(['agent-says.spec.ts', '-g', 'judged red'], { ...keployEnv(a.url), KEPLOY_MOCK_PROJECT: undefined }, cwd);
     assert.equal(tests['judged red'].status, 'passed', out);
     const r = { name: 'judged red', file: `${path.basename(PKG)}/test/fixtures/agent-says.spec.ts`, project: 'p1' };
-    assert.deepEqual(calls(j).map((c) => [c.path, c.body]), [
+    assert.deepEqual(wire(j), [
       ['/agent/instance', { key: 'p1', dir: fs.realpathSync(cwd) }],
-      ['/agent/scope/begin', { ...r, canSkip: true }],
-      ['/agent/scope/end', { ...r, outcome: 'passed' }],
+      ['/agent/scope/begin', { ...r, canSkip: true, random: 'seeded', seed: FRESH }],
+      ['/agent/scope/end', { ...r, outcome: 'passed', note: NOTE }],
     ]);
   } finally { await a.close(); }
 });
@@ -401,21 +773,11 @@ for (const [title, why, call] of [
 }
 
 test('settle: a beacon from a page that stays is still waited for', async () => {
-  const j = journal();
-  const a = await fakeAgent(j);
-  const p = await pageServer(j);
-  try {
-    const title = 'a beacon in flight from the page';
-    const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, NO_RELEASE: '1', PW_TIMEOUT: '4000' });
-    const t = tests[title];
-    assert.equal(t.status, 'timedOut', out);
-    const named = /^keploy: wait for the test's 1 call\(s\) in flight before its browser context closes: POST http:\/\/127\.0\.0\.1:\d+\/beacon$/;
-    assert.ok(t.steps.some((s) => named.test(s)), t.steps.join('\n'));
-  } finally { await p.close(); await a.close(); }
+  await waitedFor('a beacon in flight from the page', 'POST', '/beacon');
 });
 
-// Settle rows where nothing was cancelled: the call is still waited for, and
-// the test times out naming it.
+// Settle rows where nothing was cancelled: the call is still waited for
+// (waitedFor).
 for (const [title, why, call] of [
   ['a call in flight across a navigation answered 205', 'a navigation answered 205 replaces no document', '/slow'],
   ['a call in flight across a download', 'a navigation answered with an attachment (a download, "Attachment") replaces no document', '/slow'],
@@ -427,15 +789,2109 @@ for (const [title, why, call] of [
   ['a service worker call in flight while another page of the test closes', 'another page closing cancels nothing of a service worker', '/slow'],
 ]) {
   test(`settle: ${why}, so the call is still waited for`, async () => {
+    await waitedFor(title, 'GET', call);
+  });
+}
+
+// The seeding rows' page server: /draws draws random numbers in its first
+// script, as it loads, and holds /frame from another host (localhost against
+// 127.0.0.1: a cross-site frame), which draws the same way.
+async function drawsServer() {
+  const page = (body) => `<html><head><script>window.__draws = ${DRAWS};</script></head><body>${body}</body></html>`;
+  // /held.js's answer waits for a load of /fh (or 10 s): each load lets one
+  // /held.js through.
+  const held = (() => {
+    let loads = 0;
+    const waiting = [];
+    return {
+      loaded: () => { const w = waiting.shift(); if (w) w(); else loads++; },
+      script: (done) => {
+        if (loads > 0) { loads--; done(); return; }
+        const t = setTimeout(() => { const i = waiting.indexOf(go); if (i >= 0) waiting.splice(i, 1); done(); }, 10000);
+        t.unref();
+        const go = () => { clearTimeout(t); done(); };
+        waiting.push(go);
+      },
+    };
+  })();
+  const rheld = [];
+  // service-known.spec.ts's registering: /swh/sw.js is answered only at
+  // /swh/release; /swh/asked answers once it has been asked for.
+  const swheld = [];
+  const swasked = [];
+  // Every URL the server was asked for, as the request named it.
+  const seen = [];
+  const srv = http.createServer((req, res) => {
+    seen.push(req.url);
+    const u = new URL(req.url, 'http://x');
+    // /csp is served with a CSP sandbox: an opaque origin, no session storage.
+    if (u.pathname === '/csp') { res.writeHead(200, { 'content-type': 'text/html', 'content-security-policy': 'sandbox allow-scripts' }); res.end(page('csp')); return; }
+    // /cspf: the same, with a frame of its own origin in it.
+    if (u.pathname === '/cspf') { res.writeHead(200, { 'content-type': 'text/html', 'content-security-policy': 'sandbox allow-scripts' }); res.end(page('<iframe src="/frame"></iframe>')); return; }
+    // served.spec.ts's: /sv starts workers whose scripts the server serves
+    // in a way of its own: /sv/l1.js in Latin-1 (an e-acute); /sv/cn.js,
+    // /sv/csn.js and /sv/ctt.js under a Content-Security-Policy each; and
+    // /rd/w.js, /rdm/m.js (a module) and /rds/s.js (a Shared Worker, by a
+    // relative Location) redirect to v2/ beside them, where each loads h
+    // beside it, which says H = 'v2'.
+    if (u.pathname === '/sv') { res.writeHead(200, { 'content-type': 'text/html' }); res.end(page('sv')); return; }
+    const told = (k, more = '') => `postMessage({ k: '${k}'${more}, draws: [Math.random(), Math.random()], href: String(location.href) });`;
+    if (u.pathname === '/sv/l1.js') { res.writeHead(200, { 'content-type': 'text/javascript; charset=iso-8859-1' }); res.end(Buffer.from(told('l1', ", s: 'h\u00e9'"), 'latin1')); return; }
+    const csp = { '/sv/cn.js': "default-src 'none'", '/sv/csn.js': "script-src 'none'", '/sv/ctt.js': "require-trusted-types-for 'script'" }[u.pathname];
+    if (csp !== undefined) { res.writeHead(200, { 'content-type': 'text/javascript', 'content-security-policy': csp }); res.end(told(u.pathname.slice(4, -3))); return; }
+    // /mc/s.js and /mc/h.js, module Web Workers that import /mc/dep.mjs,
+    // which draws as it loads, under default-src 'self' and under helmet's
+    // default policy; /mc/sd.js (a module) and /mc/sdc.js (a classic one)
+    // under a nonce and 'strict-dynamic'; /sv/sn.js and /sv/snm.js, a
+    // classic and a module Shared Worker, under default-src 'none'.
+    const helmetCsp = "default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests";
+    const ownCsp = {
+      '/mc/s.js': ["default-src 'self'", `import { D } from './dep.mjs'; ${told('s', ', dep: D')}`],
+      '/mc/h.js': [helmetCsp, `import { D } from './dep.mjs'; ${told('h', ', dep: D')}`],
+      '/mc/sd.js': ["script-src 'nonce-k' 'strict-dynamic'", told('sd')],
+      '/mc/sdc.js': ["script-src 'nonce-k' 'strict-dynamic'", told('sdc')],
+      '/sv/sn.js': ["default-src 'none'", `onconnect = (e) => e.ports[0].${told('sn')}`],
+      '/sv/snm.js': ["default-src 'none'", `onconnect = (e) => e.ports[0].${told('snm')}`],
+    }[u.pathname];
+    if (ownCsp !== undefined) { res.writeHead(200, { 'content-type': 'text/javascript', 'content-security-policy': ownCsp[0] }); res.end(ownCsp[1]); return; }
+    if (u.pathname === '/mc/dep.mjs') { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end('export const D = [Math.random()];'); return; }
+    const moved = { '/rd/w.js': '/rd/v2/w.js', '/rdm/m.js': '/rdm/v2/m.js', '/rds/s.js': 'v2/s.js' }[u.pathname];
+    if (moved !== undefined) { res.writeHead(302, { location: moved }); res.end(); return; }
+    const v2 = {
+      '/rd/v2/w.js': `importScripts('h.js'); ${told('rd', ', H: self.H')}`,
+      '/rd/v2/h.js': "self.H = 'v2';",
+      '/rdm/v2/m.js': `import { H } from './h.mjs'; ${told('rdm', ', H, meta: import.meta.url')}`,
+      '/rdm/v2/h.mjs': "export const H = 'v2';",
+      '/rds/v2/s.js': `importScripts('h.js'); onconnect = (e) => e.ports[0].${told('rds', ', H: self.H')}`,
+      '/rds/v2/h.js': "self.H = 'v2';",
+    }[u.pathname];
+    if (v2 !== undefined) { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end(v2); return; }
+    if (u.pathname === '/held.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); held.script(() => res.end('')); return; }
+    // parse.spec.ts's removed: /rhold.js is answered at /rrelease.
+    if (u.pathname === '/rhold.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); rheld.push(res); return; }
+    if (u.pathname === '/rrelease') { for (const r of rheld.splice(0)) r.end(''); res.end(''); return; }
+    if (u.pathname === '/swh/sw.js') {
+      res.writeHead(200, { 'content-type': 'text/javascript' });
+      swheld.push(res);
+      for (const r of swasked.splice(0)) r.end('');
+      return;
+    }
+    if (u.pathname === '/swh/asked') { if (swheld.length > 0) res.end(''); else swasked.push(res); return; }
+    if (u.pathname === '/swh/release') { for (const r of swheld.splice(0)) r.end('self.addEventListener(\'fetch\', () => {});'); res.end(''); return; }
+    // overrides.spec.ts's: /ov/aw.js and /ov/as.js answer 401 to a request
+    // with no x-auth: k; /ov/ow.js and /ov/os.js are not there (404), and
+    // their stand-ins /ov/mw.js and /ov/ms.js are; /ov/pw.js and /ov/ps.js
+    // ask nothing; once.spec.ts's /ov/nw.js and /ov/gw.js need x-auth: k too,
+    // under Referrer-Policy no-referrer and origin, and /ov/tw.js needs it
+    // with none. Each Web Worker (w) and Shared Worker (s) sends its kind,
+    // its location and what it drew. /ovd/<how>/<policy> is /ov's document
+    // under that referrer policy, by a meta tag or a header on it alone.
+    if (u.pathname === '/ov') { res.writeHead(200, { 'content-type': 'text/html' }); res.end(page('ov')); return; }
+    const ovd = /^\/ovd\/(meta|header)\/(no-referrer|origin|strict-origin)$/.exec(u.pathname);
+    if (ovd !== null) {
+      res.writeHead(200, { 'content-type': 'text/html', ...(ovd[1] === 'header' ? { 'referrer-policy': ovd[2] } : {}) });
+      res.end(ovd[1] === 'meta' ? page('ov').replace('<head>', `<head><meta name="referrer" content="${ovd[2]}">`) : page('ov'));
+      return;
+    }
+    if (u.pathname === '/ov/ow.js' || u.pathname === '/ov/os.js') { res.writeHead(404, { 'content-type': 'text/plain' }); res.end('none'); return; }
+    // /ov/ew.js: a worker that posts what its error event names, then throws
+    // on its second line.
+    if (u.pathname === '/ov/ew.js') {
+      res.writeHead(200, { 'content-type': 'text/javascript' });
+      res.end('self.addEventListener(\'error\', (e) => postMessage({ kind: \'ew-in\', filename: e.filename, lineno: e.lineno }));\nsetTimeout(() => { throw new Error(\'boom\'); });');
+      return;
+    }
+    const ov = /^\/ov\/([ampngt])([ws])\.js$/.exec(u.pathname);
+    if (ov !== null) {
+      if (ov[1] !== 'm' && ov[1] !== 'p' && req.headers['x-auth'] !== 'k') { res.writeHead(401, { 'content-type': 'text/plain' }); res.end('no auth'); return; }
+      const sent = `{ kind: '${ov[1]}${ov[2]}', href: location.href, draws: ${DRAWS} }`;
+      res.writeHead(200, { 'content-type': 'text/javascript', ...(ov[1] === 'n' ? { 'referrer-policy': 'no-referrer' } : ov[1] === 'g' ? { 'referrer-policy': 'origin' } : {}) });
+      res.end(ov[2] === 's' ? `onconnect = (e) => e.ports[0].postMessage(${sent});` : `postMessage(${sent});`);
+      return;
+    }
+    // workers.spec.ts's workers, and the scripts they load; /wk/ref answers
+    // the Referer it was sent.
+    if (u.pathname === '/wk/ref') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end(req.headers.referer ?? 'none'); return; }
+    const wk = {
+      // Each Web Worker answers the message its page posts as it starts it,
+      // and sends what its own code gets at its script's URL (OWN).
+      '/wk/ded.js': `importScripts('dep.js'); onmessage = (e) => postMessage({ kind: 'ded-early', data: e.data }); postMessage({ kind: 'ded', draws: ${DRAWS}, href: location.href, dep: self.dep, stack: String(new Error('at').stack), errs: ${ERRS} }); ${OWN('ded')} ${REFS}.then((v) => postMessage({ kind: 'ded-ref', ...v }));`,
+      '/wk/dep.js': 'self.dep = \'dep\';',
+      '/wk/mod.js': `import { dep } from './lib.mjs'; self.onmessage = (e) => postMessage({ kind: 'mod-early', data: e.data }); postMessage({ kind: 'mod', draws: ${DRAWS}, href: location.href, dep, meta: import.meta.url, rel: new URL('./lib.mjs', import.meta.url).href, up: new URL('../wk/data.json?v=2', import.meta.url).href, frag: new URL('#part', import.meta.url).href, top: String(new Error('at').stack), errs: ${ERRS} }); ${OWN('mod')} ${REFS}.then((v) => postMessage({ kind: 'mod-ref', ...v }));`,
+      '/wk/lib.mjs': 'export const dep = \'lib\';',
+      '/wk/shared.js': `const ref = ${REFS}; onconnect = (e) => { e.ports[0].postMessage({ kind: 'shared', draws: ${DRAWS}, href: location.href, stack: String(new Error('at').stack), errs: ${ERRS} }); ref.then((v) => e.ports[0].postMessage({ kind: 'shared-ref', ...v })); };`,
+      // Module Shared Workers: one plain, one (started by two names, c1
+      // twice) served with a policy that refuses data: scripts. Each
+      // connection after a worker's first is named by its number (c1+2).
+      '/wk/mshared.js': `import { dep } from './lib.mjs'; const top = String(new Error('at').stack); const ref = ${REFS}; self.onconnect = (e) => { e.ports[0].postMessage({ kind: 'mshared', draws: ${DRAWS}, href: location.href, dep, meta: import.meta.url, top, errs: ${ERRS} }); ref.then((v) => e.ports[0].postMessage({ kind: 'mshared-ref', ...v })); };`,
+      // nested.spec.ts's: the page at /nw starts the classic Web Worker
+      // /nw/a.js?x=1 and the module one /nw/am.js, which start the workers
+      // beside them and pass on what each sends; /nw/b.js named b0 starts
+      // /nw/c.js. /nw/s.js, a Shared Worker, says whether its scope has Worker.
+      '/nw/a.js': `postMessage({ kind: 'a', draws: ${DRAWS}, href: location.href, worker: typeof Worker }); const start = (u, o) => { new Worker(u, o).onmessage = (e) => postMessage(e.data); }; ` +
+        'if (typeof Worker === \'function\') { start(\'b.js\', { name: \'b0\' }); start(\'b.js\', { name: \'b1\' }); start(\'bm.js\', { type: \'module\' }); ' +
+        'const blob = URL.createObjectURL(new Blob([\'postMessage({ kind: "blob" });\'], { type: \'text/javascript\' })); start(blob); start(blob); }',
+      '/nw/am.js': `postMessage({ kind: 'am', draws: ${DRAWS}, href: location.href, meta: import.meta.url }); if (typeof Worker === 'function') new Worker('b.js', { name: 'mb' }).onmessage = (e) => postMessage(e.data);`,
+      '/nw/b.js': `postMessage({ kind: self.name, draws: ${DRAWS}, href: location.href }); if (self.name === 'b0') new Worker('c.js').onmessage = (e) => postMessage(e.data);`,
+      '/nw/bm.js': `postMessage({ kind: 'bm', draws: ${DRAWS}, href: location.href, meta: import.meta.url });`,
+      '/nw/c.js': `postMessage({ kind: 'c', draws: ${DRAWS}, href: location.href });`,
+      '/nw/s.js': 'onconnect = (e) => e.ports[0].postMessage({ kind: \'sh\', worker: typeof Worker });',
+      '/wk/cshared.js': `import { dep } from './lib.mjs'; let n = 0; const draws = ${DRAWS}; const errs = ${ERRS}; const top = String(new Error('at').stack); const ref = ${REFS}; self.onconnect = (e) => { n++; if (n === 1) ref.then((v) => e.ports[0].postMessage({ kind: self.name + '-ref', ...v })); e.ports[0].postMessage({ kind: self.name + (n > 1 ? \`+\${n}\` : ''), draws, href: location.href, dep, meta: import.meta.url, top, stack: String(new Error('at').stack), errs }); };`,
+    }[u.pathname];
+    if (wk !== undefined) {
+      res.writeHead(200, { 'content-type': 'text/javascript', ...(u.pathname === '/wk/cshared.js' ? { 'content-security-policy': 'script-src \'self\'' } : {}) });
+      res.end(wk);
+      return;
+    }
+    // service-helper.ts's: the Service Worker /sw.js claims its pages, keeps
+    // the URL of each request it is asked (and leaves it to the network), and
+    // answers a message with them; the workers /swk/w.js and /swk/s.js send
+    // what they drew and their location.
+    const sw = {
+      '/sw.js': 'const seen = []; self.addEventListener(\'install\', () => self.skipWaiting()); self.addEventListener(\'activate\', (e) => e.waitUntil(self.clients.claim())); ' +
+        'self.addEventListener(\'fetch\', (e) => { seen.push(e.request.url); }); self.addEventListener(\'message\', (e) => e.source.postMessage({ kind: \'sw-seen\', seen }));',
+      '/swk/w.js': `postMessage({ kind: 'sw-ded', href: location.href, draws: ${DRAWS} });`,
+      '/swk/s.js': `onconnect = (e) => e.ports[0].postMessage({ kind: 'sw-shared', href: location.href, draws: ${DRAWS} });`,
+      // service-known.spec.ts's: /swr/sw.js (scope /swr/) keeps the URL of
+      // each request it is asked and answers a message with them; /swr/s.js
+      // is a Shared Worker its scope holds.
+      '/swr/sw.js': 'const seen = []; self.addEventListener(\'fetch\', (e) => { seen.push(e.request.url); }); self.addEventListener(\'message\', (e) => e.source.postMessage({ kind: \'sw-seen\', seen }));',
+      '/swr/s.js': `onconnect = (e) => e.ports[0].postMessage({ kind: 'swr-shared', href: location.href, draws: ${DRAWS} });`,
+      // A Shared Worker the scope of /swh/sw.js holds.
+      '/swh/s.js': `onconnect = (e) => e.ports[0].postMessage({ kind: 'swh-shared', href: location.href, draws: ${DRAWS} });`,
+    }[u.pathname];
+    if (sw !== undefined) { res.writeHead(200, { 'content-type': 'text/javascript' }); res.end(sw); return; }
+    res.writeHead(200, { 'content-type': 'text/html' });
+    if (u.pathname === '/wk') {
+      const start = (s) => (s.startsWith('new Worker(') ? `{ const w = ${s}; w.onmessage = take; w.postMessage('early'); }` : `{ const s = ${s}; s.port.onmessage = take; s.port.start(); }`);
+      res.end(page(`<script>window.__w = []; const take = (e) => window.__w.push(e.data);${WK_STARTS.map(start).join('')}</script>`));
+      return;
+    }
+    if (u.pathname === '/nw') {
+      res.end(page('<script>window.__w = []; const take = (e) => window.__w.push(e.data); new Worker(\'/nw/a.js?x=1\').onmessage = take; ' +
+        'new Worker(\'/nw/am.js\', { type: \'module\' }).onmessage = take; new SharedWorker(\'/nw/s.js\').port.onmessage = take;</script>'));
+      return;
+    }
+    // /sw registers /sw.js and, once the browser registered it, waits until
+    // it controls the page; then it starts /swk/w.js and /swk/s.js.
+    if (u.pathname === '/sw') {
+      res.end(page('<script>window.__w = []; const take = (e) => window.__w.push(e.data); (async () => { const c = navigator.serviceWorker; let r = null; ' +
+        'if (c) { r = await c.register(\'/sw.js\'); if (r && !c.controller) await new Promise((ok) => c.addEventListener(\'controllerchange\', ok, { once: true })); } ' +
+        'window.__w.push({ kind: \'reg\', sw: !!c, ok: !!r, controlled: !!(c && c.controller) }); ' +
+        'const w = new Worker(\'/swk/w.js\'); w.onmessage = take; const s = new SharedWorker(\'/swk/s.js\'); s.port.onmessage = take; s.port.start(); })();</script>'));
+      return;
+    }
+    if (u.pathname === '/draws') { res.end(page(`<iframe src="http://localhost:${srv.address().port}/frame"></iframe>`)); return; }
+    if (u.pathname === '/frame') { res.end(page('frame')); return; }
+    // note.spec.ts's page: draws Math.random once and getRandomValues twice
+    // more times after DRAWS, then puts in frames frames at /frame.
+    if (u.pathname === '/note') {
+      const extra = Number(u.searchParams.get('draws')), frames = Number(u.searchParams.get('frames'));
+      const draw = 'Math.random(); crypto.getRandomValues(new Uint8Array(1)); crypto.getRandomValues(new Uint8Array(1));';
+      res.end(page(`<script>for (let i = 0; i < ${extra}; i++) { ${draw} }</script>${'<iframe src="/frame"></iframe>'.repeat(frames)}`));
+      return;
+    }
+    if (u.pathname === '/notef') { res.end('<html><body><iframe src="/frame"></iframe></body></html>'); return; }
+    // /nest holds /frame of its own origin.
+    if (u.pathname === '/nest') { res.end(page('<iframe src="/frame"></iframe>')); return; }
+    // /long/... is a page at an address of any length.
+    if (u.pathname.startsWith('/long/') || u.pathname === '/swr/p' || u.pathname === '/swh/p') { res.end(page('')); return; }
+    // places.spec.ts's: /host puts in a (/fa, its own origin), c (/fc) and
+    // w (/fw, both cross-site) in the order ?order= names; /race holds r0
+    // and r1 at /fr, and /fr answers late the one ?slow= names; /nested
+    // holds x (/fa) and n (/fn), which holds y, z (/fb) and nn (/fa).
+    const port = srv.address().port;
+    if (u.pathname === '/host') {
+      const src = { a: '/fa', c: `http://localhost:${port}/fc`, w: `http://localhost:${port}/fw` };
+      const put = (u.searchParams.get('order') || '').split('').filter((n) => src[n])
+        .map((n) => `{const f=document.createElement('iframe');f.name='${n}';f.src='${src[n]}';document.body.appendChild(f);}`).join('');
+      res.end(page(`<script>${put}</script>`));
+      return;
+    }
+    if (u.pathname === '/race') {
+      const slow = u.searchParams.get('slow');
+      res.end(page(`<iframe name="r0" src="/fr?n=0&slow=${slow}"></iframe><iframe name="r1" src="/fr?n=1&slow=${slow}"></iframe>`));
+      return;
+    }
+    // /before puts in b0 (/fr, answered late), in a div when ?wrap=1, then
+    // 50 ms later b1 (/fr, answered at once) before it; /set is a frameset
+    // of f0 and f1 at /fa.
+    if (u.pathname === '/before') {
+      const wrap = u.searchParams.get('wrap') === '1';
+      res.end(page(`<script>{const a=document.createElement('iframe');a.name='b0';a.src='/fr?n=0&slow=0';const at=${wrap ? "document.createElement('div')" : 'a'};if(at!==a)at.appendChild(a);document.body.appendChild(at);` +
+        `setTimeout(()=>{const b=document.createElement('iframe');b.name='b1';b.src='/fr?n=1&slow=0';document.body.insertBefore(b,at);},50);}</script>`));
+      return;
+    }
+    if (u.pathname === '/set') { res.end(`<html><head><script>window.__draws = ${DRAWS};</script></head><frameset cols="50%,50%"><frame name="f0" src="/fa"><frame name="f1" src="/fa"></frameset></html>`); return; }
+    if (u.pathname === '/fr') { setTimeout(() => res.end(page('r')), u.searchParams.get('n') === u.searchParams.get('slow') ? 800 : 0); return; }
+    if (u.pathname === '/nested') { res.end(page('<iframe name="x" src="/fa"></iframe><iframe name="n" src="/fn"></iframe>')); return; }
+    if (u.pathname === '/fn') { res.end(page('<iframe name="y" src="/fb"></iframe><iframe name="z" src="/fb"></iframe><iframe name="nn" src="/fa"></iframe>')); return; }
+    if (['/fa', '/fb', '/fc', '/fw', '/fm', '/fs'].includes(u.pathname)) { res.end(page(u.pathname)); return; }
+    // /fsv, /fss and /fso replace the global parent before they draw.
+    const swap = { '/fsv': 'var parent = 0;', '/fss': 'parent = self;', '/fso': 'window.parent = { length: 1 };' }[u.pathname];
+    if (swap !== undefined) { res.end(`<html><head><script>${swap}</script><script>window.__draws = ${DRAWS};</script></head><body>${u.pathname}</body></html>`); return; }
+    // many.spec.ts's: /many holds k frames m0.. at /fm, in its markup or put
+    // in by one script (?how=); /sbx holds n sandboxed frames s0.. at /fs,
+    // with nest=1 at /fsn (each holding a srcdoc frame c, of its origin),
+    // or with swap=1, n at each of /fsv (v0..), /fss (s0..) and /fso (o0..);
+    // /cost is a page of n elements, or of that many open shadow roots of
+    // 10 elements each, beside an empty #box.
+    if (u.pathname === '/many') {
+      const k = Number(u.searchParams.get('k'));
+      res.end(page(u.searchParams.get('how') === 'markup'
+        ? Array.from({ length: k }, (_, i) => `<iframe name="m${i}" src="/fm"></iframe>`).join('')
+        : `<script>for(let i=0;i<${k};i++){const f=document.createElement('iframe');f.name='m'+i;f.src='/fm';document.body.appendChild(f);}</script>`));
+      return;
+    }
+    if (u.pathname === '/sbx') {
+      const n = Number(u.searchParams.get('n'));
+      const at = u.searchParams.get('swap') ? [['v', '/fsv'], ['s', '/fss'], ['o', '/fso']] : [['s', u.searchParams.get('nest') ? '/fsn' : '/fs']];
+      res.end(page(at.flatMap(([k, path]) => Array.from({ length: n }, (_, i) => `<iframe name="${k}${i}" sandbox="allow-scripts" src="${path}"></iframe>`)).join('')));
+      return;
+    }
+    if (u.pathname === '/fsn') { res.end(page(`<iframe name="c" srcdoc="<script>window.__draws = ${DRAWS};</script>"></iframe>`)); return; }
+    // /full holds a (/ffill, cross-site), which fills its origin's session
+    // storage in the tab and then has /full put in b (/ffx, cross-site too),
+    // which holds y (/ffy, of b's origin). b cannot count its load, so it is
+    // a frame under a parent of another origin with no session storage, and
+    // y a frame inside one: a is beside b, y is alone in b.
+    if (u.pathname === '/full') {
+      res.end(page(`<iframe name="a" src="http://localhost:${port}/ffill"></iframe><script>addEventListener('message', (e) => { if (e.data !== 'full') return; ` +
+        `const f = document.createElement('iframe'); f.name = 'b'; f.src = 'http://localhost:${port}/ffx'; document.body.appendChild(f); });</script>`));
+      return;
+    }
+    if (u.pathname === '/ffill') {
+      res.end(page(`<script>{ let s = 'x'.repeat(1 << 20), i = 0; while (s.length > 0) { try { sessionStorage.setItem('f' + i, s); i++; } catch (e) { s = s.slice(0, s.length >> 1); } } ` +
+        `parent.postMessage('full', '*'); }</script>`));
+      return;
+    }
+    if (u.pathname === '/ffx') { res.end(page('<iframe name="y" src="/ffy"></iframe>')); return; }
+    if (u.pathname === '/ffy') { res.end(page('')); return; }
+    // /held holds sandboxed frame h0 at /fh, then /held.js, then h1 and h2
+    // at /fh. /held.js is answered only once h0 has loaded (its load sends
+    // /fh-loaded), so its parent's parser puts h1 and h2 in only after h0
+    // has drawn and loaded, every run.
+    if (u.pathname === '/held') {
+      const f = (n) => `<iframe name="${n}" sandbox="allow-scripts" src="/fh"></iframe>`;
+      res.end(page(`${f('h0')}<script src="/held.js"></script>${f('h1')}${f('h2')}`));
+      return;
+    }
+    if (u.pathname === '/fh') { res.end(page('<script>addEventListener("load", () => { new Image().src = "/fh-loaded"; });</script>')); return; }
+    if (u.pathname === '/fh-loaded') { held.loaded(); res.end(''); return; }
+    // parse.spec.ts's: two sandboxed frames u0, u1 at /fs, then a script
+    // (/unparsed) or an image (/unloaded) the server never answers.
+    if (u.pathname === '/unparsed' || u.pathname === '/unloaded') {
+      const f = (n) => `<iframe name="${n}" sandbox="allow-scripts" src="/fs"></iframe>`;
+      res.end(page(`${f('u0')}${f('u1')}${u.pathname === '/unparsed' ? '<script src="/hold.js"></script>' : '<img src="/hold.png">'}`));
+      return;
+    }
+    if (u.pathname === '/hold.js' || u.pathname === '/hold.png') return;
+    // parse.spec.ts's removed: frame p at /rparsed, which holds u0 and u1 at
+    // /fs, then /rhold.js.
+    if (u.pathname === '/removed') { res.end(page('<iframe name="p" src="/rparsed"></iframe>')); return; }
+    if (u.pathname === '/rparsed') {
+      const f = (n) => `<iframe name="${n}" sandbox="allow-scripts" src="/fs"></iframe>`;
+      res.end(page(`${f('u0')}${f('u1')}<script src="/rhold.js"></script>`));
+      return;
+    }
+    if (u.pathname === '/cost') {
+      const n = Number(u.searchParams.get('n') || 0);
+      const sh = Number(u.searchParams.get('shadow') || 0);
+      res.end(page(`<div id="box"></div><script>{const f=document.createDocumentFragment();for(let i=0;i<${n};i++)f.appendChild(document.createElement('i'));` +
+        `for(let i=0;i<${sh};i++){const h=document.createElement('div');f.appendChild(h);h.attachShadow({mode:'open'}).innerHTML='<span>a</span>'.repeat(10);}document.body.appendChild(f);}</script>`));
+      return;
+    }
+    res.end('');
+  });
+  // Every address: the frame is asked for at localhost, which may be ::1.
+  await new Promise((r) => srv.listen(0, r));
+  return { url: `http://127.0.0.1:${srv.address().port}`, seen, close: () => new Promise((r) => { srv.closeAllConnections(); srv.close(r); }) };
+}
+
+// One run of seeded.spec.ts (or another spec of the /draws page): what each
+// test's pages drew, the run's tests, and what its begins and ends sent.
+async function drawRun(j, env, specs = ['seeded.spec.ts'], names = ['one', 'two', 'again', 'three']) {
+  const d = await drawsServer();
+  const from = j.events.length;
+  try {
+    const { tests, tmp, out } = await playwright(specs, { ...env, DRAWS_BASE: d.url });
+    for (const [k, t] of Object.entries(tests)) assert.equal(t.status, 'passed', `${k}: ${t.error}\n${out}`);
+    const drew = {};
+    for (const n of names) drew[n] = JSON.parse(fs.readFileSync(path.join(tmp, `${n}.json`), 'utf8'));
+    const lines = Object.values(tests).map((t) => t.stdout).join('').split('\n');
+    const said = lines.filter((l) => l === SEEDED_LINE).length;
+    const sent = j.events.slice(from).filter((e) => e.agent).map((e) => e.agent);
+    const begins = sent.filter((c) => c.path === '/agent/scope/begin').map((c) => c.body);
+    const ends = sent.filter((c) => c.path === '/agent/scope/end').map((c) => [c.body.name, c.body.random]);
+    // The seed each test's begin sent.
+    const seeds = Object.fromEntries(begins.map((b) => [b.name.replace(/^own › /, ''), b.seed]));
+    return { drew, said, lines, tests, tmp, begins, ends, seeds, seen: d.seen };
+  } finally { await d.close(); }
+}
+
+// What a document at path draws first under seed, in the page the fixture
+// named page (t0: the test's first).
+const expected = (seed, path, storage, page = 't0') => documentAt(initScript(seed), path, storage, page).draws();
+// A document's key: what a frame of its origin's page is named from, with
+// the frame's place among its frames after it.
+const keyOf = (seed, page, path, loads = 0) => `${seed}\n${page}\n${path}\n${loads}\n`;
+const NAMES = ['one', 'two', 'again', 'own › three'];
+
+test('seeded: a record seeds each test\'s pages from the fresh seed its begin sent, from their first script and in a cross-site frame; another test, or the record made again, draws others', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  try {
+    const r1 = await drawRun(j, keployEnv(a.url));
+    const r2 = await drawRun(j, keployEnv(a.url));
+    for (const r of [r1, r2]) {
+      // The numbers are the seed's: the init script ran before the page's
+      // first script, in every frame.
+      for (const n of ['one', 'two']) assert.deepEqual(r.drew[n], { top: expected(r.seeds[n], '/draws'), frame: expected(r.seeds[n], '/frame', undefined, 't0x') }, n);
+      // A page loaded again draws new numbers; a query is no part of its name.
+      const tab = new Map();
+      const loads = [expected(r.seeds.again, '/draws', tab), expected(r.seeds.again, '/draws', tab), expected(r.seeds.again, '/draws', tab)];
+      assert.deepEqual(r.drew.again.map((l) => l.top), loads);
+      assert.notDeepEqual(loads[0], loads[1]);
+      assert.notDeepEqual(r.drew.one, r.drew.two);
+      // Each begin says how its test's browser means to draw; one that
+      // seeds sends a fresh seed. The option's test sends none.
+      assert.deepEqual(r.begins.map((b) => [b.name, b.random, typeof b.seed === 'string' && /^[0-9a-f]{32}$/.test(b.seed)]),
+        [['one', 'seeded', true], ['two', 'seeded', true], ['again', 'seeded', true], ['own › three', 'own', false]]);
+      // Each end says what its pages drew from.
+      assert.deepEqual(r.ends, [['one', 'seeded'], ['two', 'seeded'], ['again', 'seeded'], ['own › three', 'own']]);
+      // Said once a worker: one worker, one line; and no test went unseeded.
+      assert.equal(r.said, 1);
+      assert.equal(r.lines.filter((l) => l.includes('with no seed')).length, 0);
+      // Called with a this that is no Crypto, the seeded functions throw
+      // as the browser's own do.
+      assert.deepEqual(JSON.parse(fs.readFileSync(path.join(r.tmp, 'this.json'), 'utf8')),
+        { grv: 'TypeError: Illegal invocation', uuid: 'TypeError: Illegal invocation', drew: true });
+    }
+    // A record made again draws new numbers: a browser-made ID is not sent
+    // twice to a real server.
+    for (const n of ['one', 'two', 'again']) {
+      assert.notEqual(r2.seeds[n], r1.seeds[n], n);
+      assert.notDeepEqual(r2.drew[n], r1.drew[n], n);
+    }
+    // A test that turned it off with the option draws the browser's own.
+    assert.notDeepEqual(r2.drew.three, r1.drew.three);
+  } finally { await a.close(); }
+});
+
+for (const engine of ['chromium', 'firefox', 'webkit']) {
+  test(`seeded (${engine}): a record's end sends keploy a note of how the test drew, in its test process and in each document, and the frames each document put in at each path; its replay prints one line for each difference, none when it draws as recorded, and says once per worker when keploy answered no note`, async () => {
+    const j = journal();
+    const d = await drawsServer();
+    const rec = await fakeAgent(j);
+    // What the recording kept: each test's seed and note.
+    let kept = {};
+    // The note each begin is answered: the recording's by default.
+    let noteOf = (name) => ({ note: kept[name].note });
+    const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+      ? { body: { v: 1, status: 'ok', seed: kept[c.body.name].seed, ...noteOf(c.body.name) } } : undefined));
+    const run = async (url, more) => {
+      const from = j.events.length;
+      const { tests, out } = await playwright(['note.spec.ts'], { ...keployEnv(url), DRAWS_BASE: d.url, PW_BROWSER: engine, NOTE_MORE: more ? '1' : undefined });
+      for (const [k, t] of Object.entries(tests)) assert.equal(t.status, 'passed', `${k}: ${t.error}\n${out}`);
+      const sent = calls({ events: j.events.slice(from) });
+      const seeds = Object.fromEntries(sent.filter((c) => c.path === '/agent/scope/begin').map((c) => [c.body.name, c.body.seed]));
+      const notes = Object.fromEntries(sent.filter((c) => c.path === '/agent/scope/end').map((c) => [c.body.name, c.body.note]));
+      // What each test said, but the seeding's line and the unplaced document's.
+      const said = Object.fromEntries(Object.entries(tests).map(([k, t]) => [k, t.stdout.split('\n').filter((l) => l.startsWith('keploy:') && l !== SEEDED_LINE && !l.startsWith('keploy: in '))]));
+      return { seeds, notes, said, out };
+    };
+    const at = (n) => Object.values(n.d).map((x) => [x.at.replace(/:\d+\//, ':<port>/'), x.n, x.f]).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    try {
+      const r = await run(rec.url, false);
+      kept = Object.fromEntries(Object.keys(r.seeds).map((k) => [k, { seed: r.seeds[k], note: r.notes[k] }]));
+      const noted0 = readNote(r.notes.noted);
+      assert.equal(typeof noted0, 'object', r.notes.noted);
+      // The test process drew Math.random once, and faker; the page drew
+      // DRAWS (Math.random twice, crypto.getRandomValues and
+      // crypto.randomUUID once) and put in one frame at /frame, whose
+      // document drew DRAWS. No place keeps the seed.
+      assert.deepEqual(Object.keys(noted0.p).sort(), ['@faker-js/faker faker', 'Math.random']);
+      assert.equal(noted0.p['Math.random'], 1);
+      assert.ok(noted0.p['@faker-js/faker faker'] > 0, String(noted0.p['@faker-js/faker faker']));
+      assert.equal(noted0.cut, 0);
+      assert.deepEqual(at(noted0), [
+        ['http://127.0.0.1:<port>/frame', [2, 1, 1], {}],
+        ['http://127.0.0.1:<port>/note', [2, 1, 1], { '/frame': 1 }],
+      ]);
+      for (const k of Object.keys(noted0.d)) assert.ok(!k.includes(r.seeds.noted), k);
+      // A document that puts in a frame before its place is known (it never
+      // draws) is told once its frame's document asks for it.
+      const plain = readNote(r.notes.plain);
+      assert.deepEqual(at(plain), [['http://127.0.0.1:<port>/frame', [2, 1, 1], {}], ['http://127.0.0.1:<port>/notef', [0, 0, 0], { '/frame': 1 }]]);
+      assert.ok(Object.keys(plain.d).includes('t0\n/notef\n0\n'), Object.keys(plain.d).join(' | '));
+      // A document with no place is not in the note, nor are the frames it
+      // put in.
+      assert.deepEqual(readNote(r.notes.unplaced), { v: 1, p: {}, d: {}, cut: 0 });
+      // A record says nothing of notes.
+      assert.deepEqual(r.said, { noted: [], plain: [], unplaced: [] }, r.out);
+      // A replay that draws as its recording did says nothing.
+      const same = await run(rep.url, false);
+      assert.deepEqual(same.said, { noted: [], plain: [], unplaced: [] }, same.out);
+      // One that draws once more in each place (getRandomValues twice more
+      // in the page), with one more frame at /frame, names each difference;
+      // faker drew as recorded.
+      const more = await run(rep.url, true);
+      const lines = more.said.noted.map((l) => l.replace(/:\d+\//, ':<port>/'));
+      assert.deepEqual(lines.map((l) => l.split(', so ')[0]), [
+        'keploy: noted drew Math.random 2 times in the test process at this replay and once in its recording',
+        'keploy: noted: the document at http://127.0.0.1:<port>/note drew Math.random 3 times at this replay and 2 times in its recording',
+        'keploy: noted: the document at http://127.0.0.1:<port>/note drew crypto.getRandomValues 3 times at this replay and once in its recording',
+        'keploy: noted: the document at http://127.0.0.1:<port>/note put in 2 frame(s) at /frame at this replay and 1 in its recording',
+        'keploy: noted: the document at http://127.0.0.1:<port>/frame drew Math.random 2 times at this replay and 0 times in its recording',
+        'keploy: noted: the document at http://127.0.0.1:<port>/frame drew crypto.getRandomValues once at this replay and 0 times in its recording',
+        'keploy: noted: the document at http://127.0.0.1:<port>/frame drew crypto.randomUUID once at this replay and 0 times in its recording',
+      ], more.out);
+      assert.deepEqual([more.said.plain, more.said.unplaced], [[], []]);
+      // A replay keploy answered no note (none, or an empty one) says so once
+      // in the worker.
+      noteOf = (name) => (name === 'noted' ? {} : { note: '' });
+      const none = await run(rep.url, false);
+      assert.deepEqual([...none.said.noted, ...none.said.plain, ...none.said.unplaced], [NO_NOTE_LINE], none.out);
+      // A note this package cannot read is named, and nothing is compared.
+      noteOf = (name) => ({ note: name === 'noted' ? '{"v":2}' : kept[name].note });
+      const other = await run(rep.url, true);
+      assert.deepEqual(other.said, { noted: [unreadNoteLine('noted', 'it is version 2, and this @keploy/playwright reads version 1')], plain: [], unplaced: [] }, other.out);
+    } finally { await rep.close(); await rec.close(); await d.close(); }
+  });
+}
+
+test('seeded: a replay draws the numbers its recording drew, from the seed keploy answers, not the one its begin sent', async () => {
+  const j = journal();
+  const rec = await fakeAgent(j);
+  let kept = {};
+  // The replay's agent answers each begin with the seed its recording kept.
+  const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+    ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+  try {
+    const r = await drawRun(j, keployEnv(rec.url));
+    kept = r.seeds;
+    for (let i = 0; i < 2; i++) {
+      const p = await drawRun(j, keployEnv(rep.url));
+      for (const n of ['one', 'two', 'again']) {
+        assert.deepEqual(p.drew[n], r.drew[n], n);
+        assert.notEqual(p.seeds[n], kept[n], n);
+      }
+      assert.notDeepEqual(p.drew.three, r.drew.three);
+      assert.deepEqual(p.ends, [['one', 'seeded'], ['two', 'seeded'], ['again', 'seeded'], ['own › three', 'own']]);
+      assert.equal(p.said, 1);
+    }
+    // The draws follow the seed keploy answers, not the test's name: a test
+    // whose entry was renamed (two, answered one's seed) draws as it did.
+    kept = { ...r.seeds, two: r.seeds.one };
+    const renamed = await drawRun(j, keployEnv(rep.url));
+    assert.deepEqual(renamed.drew.two, r.drew.one);
+  } finally { await rep.close(); await rec.close(); }
+});
+
+test('seeded: each page of a test draws its own numbers at one path, a popup placed by its opener too, the same ones at replay; a document keploy cannot place draws its own and is named', async () => {
+  const j = journal();
+  const rec = await fakeAgent(j);
+  let kept = {};
+  const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+    ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+  const names = ['tabs', 'atonce', 'nest', 'popnest', 'noopener'];
+  // The unplaced lines a test printed, with the run's port as <port>.
+  const unplaced = (r, n) => r.tests[n].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${n}, `)).map((l) => l.replace(/:\d+\//, ':<port>/'));
+  try {
+    const r = await drawRun(j, keployEnv(rec.url), ['tabs.spec.ts'], names);
+    const seed = r.seeds.tabs;
+    const t = r.drew.tabs;
+    // Two tabs of the test at one path: each its own numbers, the tab's
+    // place in the order the test opened them naming it, in its cross-site
+    // frame too.
+    assert.notEqual(t.second.top.uuid, t.first.top.uuid);
+    assert.deepEqual(t.first, { top: expected(seed, '/draws'), frame: expected(seed, '/frame', undefined, 't0x') });
+    assert.deepEqual(t.second, { top: expected(seed, '/draws', undefined, 't1'), frame: expected(seed, '/frame', undefined, 't1x') });
+    // Two popups the first tab opened at one moment: each the window its
+    // opener's document opened, in that order, from the opener's copied
+    // session storage (its /draws loaded once).
+    const opener = `${seed}\nt0\n/draws\n0\n`;
+    for (const [w, i] of [['one', 0], ['two', 1]]) {
+      assert.deepEqual(t[w].top, expected(seed, '/draws', new Map([[LOADS_KEY, '{"/draws":1}']]), `${opener}w${i}`), w);
+    }
+    const uuids = [t.first, t.second, t.one, t.two].map((d) => d.top.uuid);
+    assert.equal(new Set(uuids).size, 4, uuids.join(' '));
+    // A popup's cross-site frame has no place: the browser's own numbers,
+    // named once for the test.
+    assert.notDeepEqual(t.one.frame, t.two.frame);
+    assert.deepEqual(unplaced(r, 'tabs'), [unplacedLine('tabs', 'http://localhost:<port>/frame')]);
+    // Asked for at once, the pages keep the order the test asked in, not
+    // the order they loaded in.
+    const at = r.drew.atonce;
+    assert.deepEqual(at.a.top, expected(r.seeds.atonce, '/draws'));
+    assert.deepEqual(at.b.top, expected(r.seeds.atonce, '/draws', undefined, 't1'));
+    assert.deepEqual(unplaced(r, 'atonce'), []);
+    // A frame of the page's own origin, whose document may take over the
+    // window of its first about:blank, is seeded in its parent document's
+    // place, at the path its element asks for, the first there.
+    assert.deepEqual(r.drew.nest, { top: expected(r.seeds.nest, '/nest'), frame: expected(r.seeds.nest, '/frame', undefined, `${keyOf(r.seeds.nest, 't0', '/nest')}f/frame\n0`) });
+    assert.deepEqual(unplaced(r, 'nest'), []);
+    // So is one in a popup, in the popup's place: the popup's document and
+    // its frame both took over their windows' first about:blank.
+    const pop = `${r.seeds.popnest}\nt0\n/draws\n0\nw0`;
+    assert.deepEqual(r.drew.popnest, {
+      top: expected(r.seeds.popnest, '/nest', new Map([[LOADS_KEY, '{"/draws":1}']]), pop),
+      frame: expected(r.seeds.popnest, '/frame', undefined, `${keyOf(r.seeds.popnest, pop, '/nest')}f/frame\n0`),
+    });
+    assert.deepEqual(unplaced(r, 'popnest'), []);
+    // A popup opened with noopener has no opener to place it: its own
+    // numbers, never its opener's, and both its documents named.
+    const n = r.drew.noopener;
+    assert.deepEqual(n.first.top, expected(r.seeds.noopener, '/draws'));
+    assert.notDeepEqual(n.popup.top, n.first.top);
+    // (Sorted: the frame's renderer may tell first.)
+    assert.deepEqual(unplaced(r, 'noopener').sort(), [unplacedLine('noopener', 'http://127.0.0.1:<port>/draws'), unplacedLine('noopener', 'http://localhost:<port>/frame')].sort());
+    assert.deepEqual(r.ends, names.map((x) => [x, 'seeded']));
+    // A replay answers the recording's seeds: each tab and popup draws what
+    // it drew in the recording; what had no place draws anew, named again.
+    kept = r.seeds;
+    for (let i = 0; i < 2; i++) {
+      const p = await drawRun(j, keployEnv(rep.url), ['tabs.spec.ts'], names);
+      for (const w of ['first', 'second']) assert.deepEqual(p.drew.tabs[w], t[w], w);
+      for (const w of ['one', 'two']) {
+        assert.deepEqual(p.drew.tabs[w].top, t[w].top, w);
+        assert.notDeepEqual(p.drew.tabs[w].frame, t[w].frame, w);
+      }
+      assert.deepEqual(p.drew.atonce, at);
+      assert.deepEqual(p.drew.nest, r.drew.nest);
+      assert.deepEqual(p.drew.popnest, r.drew.popnest);
+      assert.deepEqual(p.drew.noopener.first, n.first);
+      assert.notDeepEqual(p.drew.noopener.popup.top, n.popup.top);
+      for (const x of names) assert.deepEqual(unplaced(p, x).sort(), unplaced(r, x).sort(), x);
+      assert.deepEqual(p.ends, names.map((x) => [x, 'seeded']));
+    }
+  } finally { await rep.close(); await rec.close(); }
+});
+
+test('seeded: a page\'s first document, before its first goto and as setContent writes it, draws in the page\'s place, the same at replay; an address keploy cannot place is shown cut to 512 characters', async () => {
+  const j = journal();
+  const rec = await fakeAgent(j);
+  let kept = {};
+  const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+    ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+  const names = ['blank', 'longpath'];
+  const unplaced = (r, n) => r.tests[n].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${n}, `));
+  try {
+    const r = await drawRun(j, keployEnv(rec.url), ['first.spec.ts'], names);
+    // The page fixture's page and one context.newPage() made, each in its
+    // place, in its one document: the page's draw before the first goto, then
+    // its own script in what setContent wrote; the other's script in what
+    // setContent wrote as soon as newPage returned, then a draw.
+    const draws = (id) => {
+      const d = documentAt(initScript(r.seeds.blank), 'blank', undefined, id);
+      return [0, 1].map(() => JSON.parse(JSON.stringify(d.run(BLANK_DRAWS))));
+    };
+    const [first, set] = draws('t0');
+    assert.deepEqual(r.drew.blank.page, { url: 'about:blank', first, set });
+    const [oset, after] = draws('t1');
+    assert.deepEqual(r.drew.blank.other, { url: 'about:blank', set: oset, after });
+    assert.notDeepEqual(first, oset);
+    assert.deepEqual(unplaced(r, 'blank'), []);
+    // A noopener popup at an overlong address: named once, its address cut.
+    const long = r.drew.longpath.url;
+    assert.ok(long.length > 600, long);
+    assert.deepEqual(unplaced(r, 'longpath'), [unplacedLine('longpath', long.slice(0, 512))]);
+    assert.deepEqual(r.ends, names.map((x) => [x, 'seeded']));
+    kept = r.seeds;
+    const p = await drawRun(j, keployEnv(rep.url), ['first.spec.ts'], names);
+    assert.deepEqual(p.drew.blank, r.drew.blank);
+    assert.deepEqual(unplaced(p, 'blank'), []);
+    assert.deepEqual(unplaced(p, 'longpath'), [unplacedLine('longpath', p.drew.longpath.url.slice(0, 512))]);
+  } finally { await rep.close(); await rec.close(); }
+});
+
+// The engines the seeding's frame, first-document popup and own-init-script
+// rows run in (CI installs all three).
+const ENGINES = ['chromium', 'firefox', 'webkit'];
+
+for (const engine of ENGINES) {
+  test(`seeded, in ${engine}: frames of a first document each draw their own numbers, never their parent's, numbered at the path their element asks for, one put where a removed frame was, one in an open shadow root and one drawn from after its removal too; one in a closed shadow root has no place; a first document's popup is named in every engine; a top document with no session storage but the page's first draws its own and is named; the test's own context init script is named as the test's`, async () => {
+    const j = journal();
+    const rec = await fakeAgent(j);
+    let kept = {};
+    const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+      ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+    const names = ['frames', 'popupfromblank', 'ownctxinit', 'shadow', 'nostorage', 'removed'];
+    const unplaced = (r, n) => r.tests[n].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${n}, `)).map((l) => l.replace(/:\d+\//, ':<port>/')).sort();
+    const env = (url) => ({ ...keployEnv(url), PW_BROWSER: engine });
+    try {
+      const r = await drawRun(j, env(rec.url), ['engines.spec.ts'], names);
+      const at = (id, where, seed = r.seeds.frames) => JSON.parse(JSON.stringify(documentAt(initScript(seed), where, new Map(), id).run(BLANK_DRAWS)));
+      // The first document, its srcdoc frames, a frame inside one, its
+      // about:blank frame, and the frame put in after that one's removal:
+      // each its own numbers, a frame in its parent document's place at
+      // the path its element asks for (about:srcdoc, about:blank), by how
+      // many of the parent's frames asked for that path before it.
+      const f = r.drew.frames;
+      // Firefox runs a window's first document's init scripts before that
+      // document has its URL, so its draws are its own engine's, not the vm
+      // model's: there each document draws apart, the same at replay.
+      const model = engine !== 'firefox';
+      const top = keyOf(r.seeds.frames, 't0', 'blank');
+      if (model) {
+        assert.deepEqual(f.top, at('t0', 'blank'));
+        assert.deepEqual(f.n, { url: 'about:srcdoc', draws: at(`${top}fabout:srcdoc\n0`, 'srcdoc') });
+        assert.deepEqual(f.nn, { url: 'about:blank', draws: at(`${keyOf(r.seeds.frames, `${top}fabout:srcdoc\n0`, 'srcdoc')}fabout:blank\n0`, 'blank') });
+        assert.deepEqual(f.s, { url: 'about:srcdoc', draws: at(`${top}fabout:srcdoc\n1`, 'srcdoc') });
+        assert.deepEqual(f.b, { url: 'about:blank', draws: at(`${top}fabout:blank\n0`, 'blank') });
+        assert.deepEqual(f.c, at(`${top}fabout:blank\n1`, 'blank'));
+      }
+      const docs = [f.top, f.n.draws, f.nn.draws, f.s.draws, f.b.draws, f.c].map((d) => JSON.stringify(d));
+      assert.equal(new Set(docs).size, 6, docs.join('\n'));
+      assert.deepEqual(unplaced(r, 'frames'), []);
+      // A popup the first document opens with window.open('about:blank')
+      // draws its own in every engine, and is named: Chromium places it,
+      // but it has no session storage (its opener's origin is opaque);
+      // Firefox and WebKit begin its document before window.open returns,
+      // so it has no place there.
+      const pop = r.drew.popupfromblank;
+      assert.equal(pop.url, 'about:blank');
+      assert.deepEqual(unplaced(r, 'popupfromblank'), [unplacedLine('popupfromblank', 'about:blank', engine === 'chromium' ? 'nostorage' : 'popup')]);
+      // Top documents with no session storage: the page's first draws in
+      // its place; about:blank loaded after it (twice), a srcdoc frame of
+      // its origin in the first of those (its own reason, at its address), a page served with a CSP sandbox
+      // (twice) and a data: URL (twice) each draw their own, named once for
+      // each address, with why.
+      const ns = r.drew.nostorage;
+      if (model) assert.deepEqual(ns.first, at('t0', 'blank', r.seeds.nostorage));
+      assert.ok(ns.csp.every((d) => d && typeof d.uuid === 'string'), JSON.stringify(ns.csp));
+      const nsDocs = [ns.first, ...ns.blank, ns.inner, ...ns.csp, ...ns.data].map((d) => JSON.stringify(d));
+      assert.equal(new Set(nsDocs).size, 8, nsDocs.join('\n'));
+      assert.deepEqual(unplaced(r, 'nostorage'), ['about:blank', 'about:srcdoc', 'data:text/html,d', 'http://127.0.0.1:<port>/csp'].map((a) => unplacedLine('nostorage', a, 'nostorage')).sort());
+      // The test's own context init script draws first in each document of
+      // its page, its first about:blank too: named as the test's, with the
+      // reason.
+      // A popup that first document opens is at about:blank too, and has no
+      // place since its opener has none: named again there, as a page the
+      // app opened (a line for each address and reason).
+      assert.deepEqual(unplaced(r, 'ownctxinit'), [...['about:blank', 'http://127.0.0.1:<port>/draws', 'http://localhost:<port>/frame'].map((a) => unplacedLine('ownctxinit', a, 'own')),
+        unplacedLine('ownctxinit', 'about:blank', 'popup')].sort());
+      // A frame in an open shadow root, which no engine lists among its
+      // parent's frames, is placed by its element; one in a closed shadow
+      // root, which its parent document cannot reach, has no place, and is
+      // named with the frame reason.
+      const sh = r.drew.shadow;
+      assert.equal(sh.index, -1);
+      if (model) assert.deepEqual(sh.open, at(`${keyOf(r.seeds.shadow, 't0', 'blank')}fabout:blank\n0`, 'blank', r.seeds.shadow));
+      assert.notDeepEqual(sh.closed, sh.open);
+      assert.deepEqual(unplaced(r, 'shadow'), [unplacedLine('shadow', 'about:blank', 'frame')]);
+      // A removed frame's Math.random, first drawn from after the removal:
+      // its document began (as the row took its functions) while the frame
+      // was in the page, so it draws in that frame's place, never its
+      // page's first document's numbers.
+      assert.notDeepEqual(r.drew.removed, at('t0', 'blank', r.seeds.removed).random);
+      if (model) assert.deepEqual(r.drew.removed, at(`${keyOf(r.seeds.removed, 't0', 'blank')}fabout:blank\n0`, 'blank', r.seeds.removed).random);
+      assert.deepEqual(unplaced(r, 'removed'), []);
+      assert.deepEqual(r.ends, names.map((x) => [x, 'seeded']));
+      // A replay draws what each placed document drew; what had no place
+      // draws anew, named again.
+      kept = r.seeds;
+      const p = await drawRun(j, env(rep.url), ['engines.spec.ts'], names);
+      assert.deepEqual(p.drew.frames, f);
+      assert.notDeepEqual(p.drew.popupfromblank.draws, pop.draws);
+      assert.deepEqual(p.drew.nostorage.first, ns.first);
+      assert.notDeepEqual(p.drew.nostorage.inner, ns.inner);
+      for (const k of ['blank', 'csp', 'data']) for (const i of [0, 1]) assert.notDeepEqual(p.drew.nostorage[k][i], ns[k][i], `${k}${i}`);
+      assert.notEqual(p.drew.ownctxinit.early, r.drew.ownctxinit.early);
+      // A document that drew its own numbers before its page was named
+      // keeps drawing its own: it is named once, as drawing them.
+      assert.notEqual(p.drew.ownctxinit.late, r.drew.ownctxinit.late);
+      assert.deepEqual({ ...p.drew.shadow, closed: null }, { ...sh, closed: null });
+      assert.notDeepEqual(p.drew.shadow.closed, sh.closed);
+      assert.deepEqual(p.drew.removed, r.drew.removed);
+      for (const x of names) assert.deepEqual(unplaced(p, x), unplaced(r, x), x);
+    } finally { await rep.close(); await rec.close(); }
+  });
+
+  test(`seeded, in ${engine}: a frame of its parent's origin keeps its place whatever order the frames come or load in: frames put in another order, two at one path whose documents load in the other order, a frame put back after its removal, a nested frame at another index than its parent, and one that loads another document; a cross-site frame is placed by its page and path`, async () => {
+    const j = journal();
+    const rec = await fakeAgent(j);
+    let kept = {};
+    const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+      ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+    const names = ['order', 'race', 'remount', 'nested', 'navigate', 'before', 'beforewrapped', 'frameset'];
+    const lines = (r) => r.lines.filter((l) => l.startsWith('keploy: in '));
+    const env = (url, order, slow) => ({ ...keployEnv(url), PW_BROWSER: engine, PLACES_ORDER: order, PLACES_SLOW: slow });
+    try {
+      // The record puts a, c, w in; the server answers r1 late.
+      const r = await drawRun(j, env(rec.url, 'acw', '1'), ['places.spec.ts'], names);
+      const seed = r.seeds;
+      const ex = (n, path, page, loads = 0) => expected(seed[n], path, new Map([[LOADS_KEY, JSON.stringify({ [path]: loads })]]), page);
+      // a in /host's place, the first frame there at /fa; c and w, under
+      // a parent of another origin, by the page and their own paths.
+      const host = (n) => keyOf(seed[n], 't0', '/host');
+      assert.deepEqual(r.drew.order, {
+        top: expected(seed.order, '/host'),
+        a: ex('order', '/fa', `${host('order')}f/fa\n0`),
+        c: ex('order', '/fc', 't0x'),
+        w: ex('order', '/fw', 't0x'),
+      });
+      // r0 and r1 numbered in their elements' order, not their documents'.
+      const race = keyOf(seed.race, 't0', '/race');
+      // Put back, they take the next numbers there as they are put back,
+      // whatever order their documents then load in.
+      assert.deepEqual(r.drew.race, {
+        r0: ex('race', '/fr', `${race}f/fr\n0`), r1: ex('race', '/fr', `${race}f/fr\n1`),
+        again0: ex('race', '/fr', `${race}f/fr\n2`), again1: ex('race', '/fr', `${race}f/fr\n3`),
+      });
+      // The frame put back at /fa takes the next number there: its own
+      // numbers, never the removed one's.
+      assert.deepEqual(r.drew.remount, { first: ex('remount', '/fa', `${host('remount')}f/fa\n0`), again: ex('remount', '/fa', `${host('remount')}f/fa\n1`) });
+      // nn, n's third frame (n is the top's second), in n's place: never
+      // x's numbers, though both are the first at /fa in their parents.
+      const nested = keyOf(seed.nested, 't0', '/nested');
+      const n = `${nested}f/fn\n0`;
+      const inN = keyOf(seed.nested, n, '/fn');
+      assert.deepEqual(r.drew.nested, {
+        x: ex('nested', '/fa', `${nested}f/fa\n0`),
+        n: ex('nested', '/fn', n),
+        y: ex('nested', '/fb', `${inN}f/fb\n0`),
+        z: ex('nested', '/fb', `${inN}f/fb\n1`),
+        nn: ex('nested', '/fa', `${inN}f/fa\n0`),
+      });
+      assert.notDeepEqual(r.drew.nested.nn, r.drew.nested.x);
+      // A frame keeps its place in each document it loads: /fb, then /fa
+      // a second time in that frame.
+      const a = `${host('navigate')}f/fa\n0`;
+      assert.deepEqual(r.drew.navigate, [ex('navigate', '/fa', a), ex('navigate', '/fb', a), ex('navigate', '/fa', a, 1)]);
+      // b0 is numbered as it is put in, before its document loads: b1, put
+      // in before it later, and whose document loads first, is the second
+      // at /fr, wrapped or not.
+      for (const x of ['before', 'beforewrapped']) {
+        const k = keyOf(seed[x], 't0', '/before');
+        assert.deepEqual(r.drew[x], { b0: ex(x, '/fr', `${k}f/fr\n0`), b1: ex(x, '/fr', `${k}f/fr\n1`) }, x);
+      }
+      // A frameset's frames are placed as an iframe is.
+      const set = keyOf(seed.frameset, 't0', '/set');
+      assert.deepEqual(r.drew.frameset, { f0: ex('frameset', '/fa', `${set}f/fa\n0`), f1: ex('frameset', '/fa', `${set}f/fa\n1`) });
+      assert.deepEqual(lines(r), []);
+      // Replays: w, a, c put in, and r0 answered late; then the record's
+      // own order. Each frame draws what it drew in the record, and no
+      // document is named.
+      kept = r.seeds;
+      for (const [order, slow] of [['wac', '0'], ['acw', '1']]) {
+        const p = await drawRun(j, env(rep.url, order, slow), ['places.spec.ts'], names);
+        for (const x of names) assert.deepEqual(p.drew[x], r.drew[x], `${order} ${x}`);
+        assert.deepEqual(lines(p), [], order);
+      }
+    } finally { await rep.close(); await rec.close(); }
+  });
+}
+
+for (const engine of ENGINES) {
+  test(`seeded, in ${engine}: 300 frames in a page's markup, or put in by one script, each load and draw their own numbers, the same at replay, with no page error; sandboxed frames are never seeded, each draws its own numbers and is named with how many frames are beside it once its parent's parser has ended: three at one path, a lone one, a new one put in at a removed one's path, ones whose own script replaces the global parent before they draw, one that draws and loads while its parent's parser holds the frames after it, and a srcdoc frame inside one (sandboxed too, alone under its parent); a cross-site frame that cannot count its load (its origin's session storage full) and a frame of its origin inside it are named with the frames beside the first; a page whose DOM changes often is walked only when a frame is put in`, async () => {
+    const j = journal();
+    const rec = await fakeAgent(j);
+    let kept = {};
+    const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+      ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+    const names = ['markup', 'script', 'sandboxed', 'lone', 'swapped', 'held', 'nested', 'filled', 'cost'];
+    const env = (url) => ({ ...keployEnv(url), PW_BROWSER: engine });
+    const unplaced = (r, n) => r.tests[n].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${n}, `)).map((l) => l.replace(/:\d+\//, ':<port>/'));
+    const line = (n, at, others) => unplacedLine(n, `http://127.0.0.1:<port>${at}`, 'uncounted', others);
+    const SWAP = [['v', '/fsv'], ['s', '/fss'], ['o', '/fso']];
+    const sandboxed = (run) => {
+      assert.deepEqual(unplaced(run, 'sandboxed'), [line('sandboxed', '/fs', 2)]);
+      assert.deepEqual(unplaced(run, 'lone'), [line('lone', '/fs', 0)]);
+      assert.deepEqual(unplaced(run, 'swapped').sort(), SWAP.map(([, at]) => line('swapped', at, 8)).sort());
+      assert.deepEqual(unplaced(run, 'held'), [line('held', '/fh', 2)]);
+      // A srcdoc frame in a sandboxed one is sandboxed too, so its origin
+      // is an opaque one of its own, not its parent's: it is itself a frame
+      // under a parent of another origin with no session storage, alone
+      // under its parent, and its line counts no other frame (every engine).
+      assert.deepEqual(unplaced(run, 'nested').sort(), [line('nested', '/fsn', 1), unplacedLine('nested', 'about:srcdoc', 'uncounted', 0)].sort());
+      // A cross-site frame b that cannot count its load (a frame of its
+      // origin filled that origin's session storage in the tab), and y, of
+      // b's origin, inside it: both lines count the frames beside b under
+      // its parent (a), not those beside y in b (none).
+      const full = (at) => unplacedLine('filled', `http://localhost:<port>${at}`, 'uncounted', 1);
+      assert.deepEqual(unplaced(run, 'filled').sort(), [full('/ffx'), full('/ffy')].sort());
+    };
+    try {
+      const r = await drawRun(j, env(rec.url), ['many.spec.ts'], names);
+      const seed = r.seeds;
+      // Every frame loads, each the k-th at /fm in /many, and nothing is
+      // thrown into the page.
+      for (const how of ['markup', 'script']) {
+        const { drew, errors } = r.drew[how];
+        assert.deepEqual(errors, [], how);
+        assert.equal(drew.filter((x) => x !== null).length, 300, how);
+        const k = keyOf(seed[how], 't0', '/many');
+        drew.forEach((x, i) => assert.deepEqual(x, expected(seed[how], '/fm', new Map(), `${k}f/fm\n${i}`), `${how} m${i}`));
+        assert.deepEqual(unplaced(r, how), [], how);
+      }
+      // Sandboxed frames: none draws what seeding would give it (its page,
+      // marked, and its path); each draws its own, named once for each
+      // address, with how many other frames its parent holds once its
+      // parser has ended. Three at one path, then a lone one; a lone one,
+      // taken out and another put in at its path; nine whose script
+      // replaces parent before they draw; three where the first draws and
+      // loads while its parent holds no other (the count is still 2).
+      const { three, one } = r.drew.sandboxed;
+      const seeded = (n, at) => expected(seed[n], at, new Map(), 't0x');
+      assert.equal(new Set(Object.values(three).map((x) => x.uuid)).size, 3);
+      for (const x of [...Object.values(three), one]) assert.notDeepEqual(x, seeded('sandboxed', '/fs'));
+      const { first, again } = r.drew.lone;
+      for (const x of [first, again]) assert.notDeepEqual(x, seeded('lone', '/fs'));
+      assert.notEqual(first.uuid, again.uuid);
+      const swapped = r.drew.swapped;
+      assert.equal(new Set(Object.values(swapped).map((x) => x.uuid)).size, 9);
+      for (const [k, at] of SWAP) for (let i = 0; i < 3; i++) assert.notDeepEqual(swapped[`${k}${i}`], seeded('swapped', at), `${k}${i}`);
+      const held = r.drew.held;
+      assert.equal(new Set(Object.values(held).map((x) => x.uuid)).size, 3);
+      for (const x of Object.values(held)) assert.notDeepEqual(x, seeded('held', '/fh'));
+      const nested = Object.values(r.drew.nested).flatMap((x) => [x.own, x.child]);
+      assert.equal(new Set(nested.map((x) => x.uuid)).size, 4);
+      assert.notEqual(r.drew.filled.b.uuid, r.drew.filled.y.uuid);
+      sandboxed(r);
+      // A page whose DOM changes often: seeding walks the document for no
+      // change that puts in no frame, and once when one frame is put in.
+      // The times are printed, not judged: a loaded machine moves them.
+      console.log(`seeding cost in ${engine}, ms (least of two runs): ${JSON.stringify(Object.fromEntries(Object.entries(r.drew.cost).map(([k, t]) => [k, { seeded: Math.round(t.seeded), own: Math.round(t.own) }])))}`);
+      for (const [kind, t] of Object.entries(r.drew.cost)) assert.deepEqual({ walks: t.walks, framed: t.framed, own: t.ownWalks }, { walks: [0, 0], framed: [1, 1], own: [0, 0] }, kind);
+      // A replay draws what the record drew, frame by frame.
+      kept = r.seeds;
+      const p = await drawRun(j, env(rep.url), ['many.spec.ts'], names);
+      for (const how of ['markup', 'script']) {
+        assert.deepEqual(p.drew[how].errors, [], how);
+        assert.deepEqual(p.drew[how].drew, r.drew[how].drew, how);
+        assert.deepEqual(unplaced(p, how), [], how);
+      }
+      // Sandboxed frames draw the browser's own again, named as in the
+      // record.
+      assert.notDeepEqual(p.drew.sandboxed.one, one);
+      assert.notDeepEqual(p.drew.sandboxed.three.s0, three.s0);
+      assert.notDeepEqual(p.drew.lone.first, first);
+      sandboxed(p);
+    } finally { await rep.close(); await rec.close(); }
+  });
+}
+
+for (const engine of ENGINES) {
+  test(`seeded, in ${engine}: a sandboxed frame's line counts the frames beside it once its parent's parser has ended, not at its parent's load; or at the test's end, before its wait, when the parser has not ended by then; or at once, naming none, when its parent is removed`, async () => {
     const j = journal();
     const a = await fakeAgent(j);
-    const p = await pageServer(j);
+    const d = await drawsServer();
     try {
-      const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, NO_RELEASE: '1', PW_TIMEOUT: '4000' });
-      const t = tests[title];
-      assert.equal(t.status, 'timedOut', out);
-      const named = new RegExp(`^keploy: wait for the test's 1 call\\(s\\) in flight before its browser context closes: GET http://127\\.0\\.0\\.1:\\d+${call}$`);
-      assert.ok(t.steps.some((s) => named.test(s)), t.steps.join('\n'));
-    } finally { await p.close(); await a.close(); }
+      const { tests, out } = await playwright(['parse.spec.ts'], { ...keployEnv(a.url), PW_BROWSER: engine, DRAWS_BASE: d.url, PW_TIMEOUT: '15000' });
+      // unloaded: counted at the parse's end, before the test put u2 in;
+      // unparsed: at the test's end, u2 included. Each test then waits for
+      // the call its page never had answered.
+      for (const [n, others, call] of [['unloaded', 1, '/hold.png'], ['unparsed', 2, '/hold.js']]) {
+        const t = tests[n];
+        assert.equal(t.status, 'timedOut', `${n}: ${t.error}\n${out}`);
+        const said = t.stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${n}, `)).map((l) => l.replace(/:\d+\//, ':<port>/'));
+        assert.deepEqual(said, [unplacedLine(n, 'http://127.0.0.1:<port>/fs', 'uncounted', others)], n);
+        assert.ok(t.steps.some((s) => s.startsWith('keploy: wait for the test\'s 1 call(s) in flight') && s.endsWith(call)), `${n}: ${t.steps.join('\n')}`);
+        // The line comes before that wait, not when the context closes.
+        const line = t.order.findIndex((o) => o.out?.startsWith(`keploy: in ${n}, `));
+        const wait = t.order.findIndex((o) => o.step?.startsWith('keploy: wait for the test\'s 1 call(s) in flight'));
+        assert.ok(line >= 0 && line < wait, `${n}: ${JSON.stringify(t.order)}`);
+      }
+      // removed: the line comes once p is removed, before the test's next
+      // step, and names no other frame: theirs are gone with p.
+      const t = tests.removed;
+      assert.equal(t.status, 'passed', `removed: ${t.error}\n${out}`);
+      const said = t.stdout.split('\n').filter((l) => l.startsWith('keploy: in removed, ')).map((l) => l.replace(/:\d+\//, ':<port>/'));
+      assert.deepEqual(said, [unplacedLine('removed', 'http://127.0.0.1:<port>/fs', 'uncounted', 0)]);
+      const line = t.order.findIndex((o) => o.out?.startsWith('keploy: in removed, '));
+      const next = t.order.findIndex((o) => o.step === 'p removed');
+      assert.ok(line >= 0 && line < next, `removed: ${JSON.stringify(t.order)}`);
+    } finally { await d.close(); await a.close(); }
+  });
+}
+
+// The workers the page at /wk starts, in order: a classic and a module Web
+// Worker, a classic Shared Worker, and module Shared Workers.
+const WK_STARTS = [
+  'new Worker(\'/wk/ded.js?x=1\')',
+  'new Worker(\'/wk/mod.js\', { type: \'module\' })',
+  'new SharedWorker(\'/wk/shared.js\', \'sn\')',
+  'new SharedWorker(\'/wk/mshared.js\', { type: \'module\', name: \'mn\' })',
+  'new SharedWorker(\'/wk/cshared.js\', { type: \'module\', name: \'c1\' })',
+  'new SharedWorker(\'/wk/cshared.js\', { type: \'module\', name: \'c2\' })',
+  'new SharedWorker(\'/wk/cshared.js\', { type: \'module\', name: \'c1\' })',
+];
+
+// What each worker sends of the errors the browser's own calls throw in its
+// seeded functions and its location's getters (a float array, more than
+// 65536 bytes, a this that is no Crypto or location): each one's stack, or
+// null for an error with none; 'none' if a call threw nothing.
+const ERRS = '[() => crypto.getRandomValues(new Float64Array(1)), () => crypto.getRandomValues(new Uint8Array(65537)), () => crypto.randomUUID.call({}), ' +
+  '...[\'href\', \'search\'].map((k) => () => Object.getOwnPropertyDescriptor(WorkerLocation.prototype, k).get.call({})), () => WorkerLocation.prototype.toString.call({})]' +
+  '.map((f) => { try { f(); return \'none\'; } catch (e) { return e.stack === undefined ? null : String(e.stack); } })';
+
+// What a Web Worker's own code gets at its script's URL, which its script's
+// marked URL is the base of: fetch(''), fetch('#h') and an XMLHttpRequest of
+// '', each one's text (or 'error'), sent as kind <k>-own.
+const OWN = (k) => 'Promise.all([fetch(\'\'), fetch(\'#h\')].map((p) => p.then((r) => r.text(), () => \'error\')).concat(new Promise((ok) => { ' +
+  'const x = new XMLHttpRequest(); x.open(\'GET\', \'\'); x.onload = () => ok(x.responseText); x.onerror = () => ok(\'error\'); x.send(); })))' +
+  `.then((own) => postMessage({ kind: '${k}-own', own }));`;
+
+// What a worker's fetch and Request send, which /wk/ref answers with the
+// request's Referer (or 'none'): a fetch with no init, one with an init, one
+// of a Request made with no referrer, and one of a Request made with a
+// policy of its own (no-referrer); the URL fetch('') was answered at; and the
+// URLs of a Request at '' and at a fragment alone.
+const REFS = 'Promise.all([fetch(\'ref\'), fetch(\'ref\', { cache: \'no-store\' }), fetch(new Request(\'ref\')), fetch(new Request(\'ref\', { referrerPolicy: \'no-referrer\' }))]' +
+  '.map((p) => p.then((r) => r.text(), () => \'error\')).concat(fetch(\'\').then((r) => r.url, () => \'error\')))' +
+  '.then((ref) => ({ ref, req: [new Request(\'\').url, new Request(\'#h\').url] }))';
+
+// The marks a document at /wk of page t0 gives the workers workers.spec.ts
+// starts (WK_STARTS).
+function workerMarks(seed) {
+  const made = [];
+  class Worker { constructor(url) { made.push(workerMark(String(url))); } }
+  documentAt(initScript(seed), '/wk', new Map(), 't0', { globals: { URL, Worker, SharedWorker: Worker } })
+    .run(WK_STARTS.map((s) => `${s};`).join(' '));
+  return made;
+}
+
+// workers.spec.ts's tests that start the workers at /wk.
+const WK_TITLES = ['workers', 'workers behind routes'];
+
+for (const engine of ENGINES) {
+  test(`seeded, in ${engine}: a page's classic and module Web Workers and its classic and module Shared Workers draw from the test's seed, the same at replay, a module Shared Worker whose policy refuses data: too (each connection that came before its script ran given to it, in order), at the app's location, URLs and stack, loading what sits beside them, a Web Worker's own requests at its script's URL getting the app's script, each worker's fetch and Request asking for its script's own URL and naming it as the Referer with no mark, and the app's server never sees keploy's mark in a URL, behind the test's own catch-all routes on its context and page too; in Firefox each Shared Worker draws its own and is named; a worker whose script the test's own route answers runs it as given, unseeded, and is named once`, async () => {
+    const j = journal();
+    const rec = await fakeAgent(j);
+    let kept = {};
+    const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+      ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+    const env = (url) => ({ ...keployEnv(url), PW_BROWSER: engine });
+    const byKind = (r, title) => Object.fromEntries(r.drew[title].map((w) => [w.kind, w]));
+    try {
+      const r = await drawRun(j, env(rec.url), ['workers.spec.ts'], [...WK_TITLES, 'own']);
+      for (const title of WK_TITLES) {
+      const w = byKind(r, title);
+      const [ded, mod, shared, mshared, c1, c2, c1again] = workerMarks(r.seeds[title]);
+      assert.deepEqual([ded, mod, shared, mshared, c1, c2, c1again].map((m) => m.kind), ['w', 'm', 's', 'x', 'x', 'x', 'x']);
+      assert.notEqual(c1.token, c2.token);
+      assert.equal(c1again.token, c1.token);
+      assert.match(w.ded.href, /^http:\/\/127\.0\.0\.1:\d+\/wk\/ded\.js\?x=1$/);
+      assert.match(w.mod.href, /^http:\/\/127\.0\.0\.1:\d+\/wk\/mod\.js$/);
+      assert.match(w.shared.href, /^http:\/\/127\.0\.0\.1:\d+\/wk\/shared\.js$/);
+      assert.match(w.mshared.href, /^http:\/\/127\.0\.0\.1:\d+\/wk\/mshared\.js$/);
+      for (const c of [w.c1, w.c2, w['c1+2']]) assert.match(c.href, /^http:\/\/127\.0\.0\.1:\d+\/wk\/cshared\.js$/);
+      // A Shared Worker's app's script runs at its own URL: its
+      // import.meta.url shows no mark; a module Web Worker's runs at its
+      // marked URL, which its import.meta.url shows (workerAnswer). A stack
+      // through either shows no mark.
+      assert.equal(w.mod.meta, markWorker(w.mod.href, 'm', mod.token));
+      // A URL the module builds from its import.meta.url with a relative
+      // path, or a query of its own, is the app's, with no mark (the path is
+      // the app's); one with a fragment alone keeps the URL's query, mark
+      // and all, as code that compares the exact URL sees it.
+      assert.equal(w.mod.rel, w.mod.href.replace(/mod\.js$/, 'lib.mjs'));
+      assert.equal(w.mod.up, w.mod.href.replace(/mod\.js$/, 'data.json?v=2'));
+      assert.equal(w.mod.frag, `${w.mod.meta}#part`);
+      assert.match(w.mshared.meta, /^http:\/\/127\.0\.0\.1:\d+\/wk\/mshared\.js$/);
+      for (const c of [w.c1, w.c2, w['c1+2']]) assert.match(c.meta, /^http:\/\/127\.0\.0\.1:\d+\/wk\/cshared\.js$/);
+      // No code of keploy's is on a stack through the app's script, at its
+      // top level or in its handlers, held connections' too.
+      const stacks = [['ded', 'stack', 'ded'], ['shared', 'stack', 'shared'], ['mod', 'top', 'mod'], ['mshared', 'top', 'mshared'],
+        ...['c1', 'c2', 'c1+2'].flatMap((c) => [[c, 'top', 'cshared'], [c, 'stack', 'cshared']])];
+      for (const [k, f, file] of stacks) {
+        assert.match(w[k][f], new RegExp(`/wk/${file}\\.js[?:]`), `${k}.${f}: ${w[k][f]}`);
+        assert.doesNotMatch(w[k][f], /__keploy_worker/, `${k}.${f}: ${w[k][f]}`);
+      }
+      // An error the browser's own call throws in a seeded function or
+      // getter shows no frame of keploy's seeding (at its marked URL or its
+      // data: module): each frame is the app's script's or the browser's own
+      // (Firefox, whose stacks go on through queued code: none of keploy's).
+      for (const [k, file] of [['ded', 'ded'], ['mod', 'mod'], ['shared', 'shared'], ['mshared', 'mshared'], ['c1', 'cshared'], ['c2', 'cshared']]) {
+        assert.equal(w[k].errs.length, 6, k);
+        for (const s of w[k].errs) {
+          assert.notEqual(s, 'none', k);
+          if (s === null) continue;
+          assert.doesNotMatch(s, /__keploy_worker|data:/, `${k}: ${s}`);
+          const frames = s.split('\n').filter((l) => (engine === 'chromium' ? /^\s+at /.test(l) : l !== ''));
+          assert.ok(frames.some((l) => l.includes(`/wk/${file}.js`)), `${k}: ${s}`);
+          if (engine !== 'firefox') for (const l of frames) assert.match(l, new RegExp(`/wk/${file}\\.js[?:]|\\[native code\\]|<anonymous>`), `${k}: ${s}`);
+        }
+      }
+      // A message the page posts as it starts a Web Worker reaches the app's
+      // handler: the app's script has run before the worker takes it.
+      assert.deepEqual([w['ded-early'], w['mod-early']], [{ kind: 'ded-early', data: 'early' }, { kind: 'mod-early', data: 'early' }]);
+      // What a Web Worker's own code asks for at its script's URL (fetch(''),
+      // a fragment alone, an XMLHttpRequest of '') is the app's script, from
+      // the app's server (which never sees the mark, below), not keploy's
+      // answer for a worker's script.
+      for (const [k, first] of [['ded', 'importScripts(\'dep.js\');'], ['mod', 'import { dep } from \'./lib.mjs\';']]) {
+        assert.equal(w[`${k}-own`].own.length, 3, k);
+        for (const body of w[`${k}-own`].own) {
+          assert.ok(body.startsWith(first), `${k}: ${body.slice(0, 120)}`);
+          assert.doesNotMatch(body, /__keploy_worker/, k);
+        }
+      }
+      // What each worker's fetch and Request send (REFS): its script's URL
+      // with no mark as the Referer the browser picks (no init, an init with
+      // no referrer, a Request made with no referrer), none for a Request
+      // with a policy of its own that sends none, and fetch('') and a Request
+      // at '' or a fragment alone at its script's URL with no mark.
+      const origin = new URL(w.ded.href).origin;
+      for (const [k, file] of [['ded', 'ded.js?x=1'], ['mod', 'mod.js'], ['shared', 'shared.js'], ['mshared', 'mshared.js'], ['c1', 'cshared.js'], ['c2', 'cshared.js']]) {
+        const url = `${origin}/wk/${file}`;
+        const v = w[`${k}-ref`];
+        assert.deepEqual(v.ref, [url, url, url, 'none', url], k);
+        assert.equal(v.req[0], url, k);
+        assert.ok([url, `${url}#h`].includes(v.req[1]), `${k}: ${v.req[1]}`);
+      }
+      assert.deepEqual([w.ded.dep, w.mod.dep, w.mshared.dep, w.c1.dep, w.c2.dep, w['c1+2'].dep], ['dep', 'lib', 'lib', 'lib', 'lib', 'lib']);
+      // c1's second connection is c1's worker's: what it drew as it loaded.
+      assert.deepEqual(w['c1+2'].draws, w.c1.draws);
+      assert.deepEqual(w.ded.draws, workerAt('http://h/wk/ded.js?x=1', workerScript(ded.token, 0, 'w')).draws());
+      assert.deepEqual(w.mod.draws, workerAt('http://h/wk/mod.js', workerScript(mod.token, 0, 'm')).draws());
+      const model = workerAt('http://h/wk/shared.js', workerScript(shared.token, 0, 's')).draws();
+      const mmodel = workerAt('http://h/wk/mshared.js', workerScript(mshared.token, 0, 'x')).draws();
+      const cmodel = [c1, c2].map((m) => workerAt('http://h/wk/cshared.js', workerScript(m.token, 0, 'x')).draws());
+      const said = r.tests[title].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${title}, `)).map((l) => l.replace(/:\d+\//, ':<port>/'));
+      const at = (p) => `http://127.0.0.1:<port>/wk/${p}`;
+      // Every engine: each Shared Worker script's address, once, is not waited for.
+      // Behind the test's routes: the worker whose script its own route
+      // answered, once for its address (it started two there).
+      const unwaited = ['shared.js', 'mshared.js', 'cshared.js'].map((p) => sharedWorkerLine(title, at(p)))
+        .concat(title === 'workers' ? [] : [unplacedLine(title, at('own.js'), 'routed')]);
+      if (engine === 'firefox') {
+        assert.notDeepEqual(w.shared.draws, model);
+        assert.notDeepEqual(w.mshared.draws, mmodel);
+        assert.notDeepEqual([w.c1.draws, w.c2.draws], cmodel);
+        assert.deepEqual(said.sort(), [...['shared.js', 'mshared.js', 'cshared.js'].map((p) => unplacedLine(title, at(p), 'shared')), ...unwaited].sort());
+      } else {
+        assert.deepEqual(w.shared.draws, model);
+        assert.deepEqual(w.mshared.draws, mmodel);
+        assert.deepEqual([w.c1.draws, w.c2.draws], cmodel);
+        assert.deepEqual(said.sort(), [...unwaited].sort());
+      }
+      }
+      // The worker whose script the test's own route answered runs that
+      // script, at its marked URL: each start of it is the next.
+      assert.equal(r.drew.own.length, 2);
+      for (const h of r.drew.own) assert.match(h, /^http:\/\/127\.0\.0\.1:\d+\/wk\/own\.js\?__keploy_worker=w\.[0-9a-f]{32}$/);
+      assert.notEqual(r.drew.own[0], r.drew.own[1]);
+      // What the app's server was asked for: never keploy's mark, and each
+      // worker's script and what it loads.
+      assert.deepEqual(r.seen.filter((u) => u.includes('__keploy_worker')), []);
+      for (const u of ['/wk/ded.js?x=1', '/wk/dep.js', '/wk/mod.js', '/wk/lib.mjs', '/wk/shared.js', '/wk/mshared.js', '/wk/cshared.js']) assert.ok(r.seen.includes(u), `${u}: ${r.seen.join(' ')}`);
+      kept = r.seeds;
+      const q = await drawRun(j, env(rep.url), ['workers.spec.ts'], [...WK_TITLES, 'own']);
+      for (const title of WK_TITLES) {
+      const w = byKind(r, title);
+      const p = byKind(q, title);
+      assert.deepEqual([p.ded.draws, p.mod.draws], [w.ded.draws, w.mod.draws]);
+      for (const k of ['shared', 'mshared']) {
+        if (engine === 'firefox') assert.notDeepEqual(p[k].draws, w[k].draws, k);
+        else assert.deepEqual(p[k].draws, w[k].draws, k);
+      }
+      for (const k of ['c1', 'c2']) {
+        if (engine === 'firefox') assert.notDeepEqual(p[k].draws, w[k].draws, k);
+        else assert.deepEqual(p[k].draws, w[k].draws, k);
+      }
+      }
+      assert.deepEqual(q.seen.filter((u) => u.includes('__keploy_worker')), []);
+    } finally { await rep.close(); await rec.close(); }
+  });
+}
+
+for (const engine of ENGINES) {
+  test(`served, in ${engine}: a worker's script in Latin-1 reads the same seeded as off (Chromium: as Latin-1); one served with a Content-Security-Policy (default-src 'none', script-src 'none', require-trusted-types-for 'script', and two module ones under default-src 'none') runs seeded, its draws the seed's, the module ones named as seeded late once; one the server redirects (classic, module, a Shared Worker, and the classic one again) ${engine === 'chromium' ? 'does not start seeded (keploy stops its load, which Chromium would send round the redirect again and again) and is named once for each address, the server asked for its first URL once for each start and never for the next, and off it ' : ''}runs at the URL the redirect gives, loading what sits beside it there, as off${engine === 'chromium' ? '' : ', unseeded and named, the server asked for its first URL ' + (engine === 'webkit' ? 'twice' : 'once')}${engine === 'webkit' ? " (a run where WebKit itself dropped the Shared Worker, as it sometimes does with no keploy, is taken only on exactly that record, and said)" : ''}; the server never sees keploy's mark`, async (t) => {
+    const j = journal();
+    const a = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' ? { body: { v: 1, status: 'ok', seed: 'cd'.repeat(16) } } : undefined));
+    try {
+      const run = (off) => drawRun(j, { ...keployEnv(a.url), PW_BROWSER: engine, ...(off ? { KEPLOY_SEED_RANDOM: 'off' } : {}) }, ['served.spec.ts'], ['latin1', 'csp', 'redirect']);
+      const s1 = await run(false);
+      const s2 = await run(false);
+      const o1 = await run(true);
+      const o2 = await run(true);
+      const at = (p) => new RegExp(`^http://127\\.0\\.0\\.1:\\d+${p.replace(/\./g, '\\.')}$`);
+      for (const [mode, r] of [['seeded', s1], ['seeded again', s2], ['off', o1], ['off again', o2]]) {
+        assert.deepEqual(r.drew.latin1.map((w) => w.k), ['l1', 'l1'], mode);
+        assert.deepEqual(r.drew.csp.map((w) => w.k), ['cn', 'csn', 'ctt', 'cn', 'cn'], mode);
+        for (const [w, p] of [...r.drew.latin1.map((w) => [w, '/sv/l1.js']), ...r.drew.csp.map((w) => [w, `/sv/${w.k}.js`])]) assert.match(w.href, at(p), mode);
+        // Chromium, seeded: keploy stopped each redirected load, so none starts.
+        const stops = engine === 'chromium' && (r === s1 || r === s2);
+        if (stops) {
+          assert.deepEqual(r.drew.redirect, ['error', 'error', 'error', 'error'], mode);
+        } else {
+          const [rd, rdm, rds, rd2] = r.drew.redirect;
+          // WebKit sometimes never runs this Shared Worker, with no keploy too (test/webkit.mjs,
+          // microsoft/playwright#44134): only that record is taken in place of its answer, and the row says so.
+          const dropped = webkitDroppedSharedWorker(engine, rds, r.seen);
+          if (dropped) t.diagnostic(webkitDroppedLine(mode));
+          assert.deepEqual([rd.k, rd.H, rdm.k, rdm.H, rd2.k, rd2.H], ['rd', 'v2', 'rdm', 'v2', 'rd', 'v2'], mode);
+          if (!dropped) assert.deepEqual([rds.k, rds.H], ['rds', 'v2'], mode);
+          assert.match(rd.href, at('/rd/v2/w.js'), mode);
+          assert.match(rd2.href, at('/rd/v2/w.js'), mode);
+          assert.match(rdm.href, at('/rdm/v2/m.js'), mode);
+          assert.match(rdm.meta, at('/rdm/v2/m.js'), mode);
+          if (!dropped) assert.match(rds.href, at('/rds/v2/s.js'), mode);
+        }
+        assert.deepEqual(r.seen.filter((u) => u.includes('__keploy_worker')), [], mode);
+        // Each Web Worker's script loaded once (two start at /sv/l1.js, three at /sv/cn.js).
+        assert.deepEqual(['/sv/l1.js', '/sv/cn.js', '/sv/csn.js', '/sv/ctt.js'].map((p) => r.seen.filter((u) => u === p).length), [2, 3, 1, 1], mode);
+        // For each start (/rd/w.js starts twice), a redirect's next URL once (never where keploy stopped the load), and its first once, but twice seeded in WebKit.
+        for (const [p, starts] of [['/rd/w.js', 2], ['/rdm/m.js', 1], ['/rds/s.js', 1]]) {
+          assert.equal(r.seen.filter((u) => u === p.replace(/\/([^/]+)$/, '/v2/$1')).length, stops ? 0 : starts, `${mode} ${p}`);
+          assert.equal(r.seen.filter((u) => u === p).length, starts * ((r === s1 || r === s2) && engine === 'webkit' ? 2 : 1), `${mode} ${p}`);
+        }
+      }
+      // The Latin-1 text reads as off: Chromium decodes a worker's script by its charset, Firefox and WebKit as UTF-8.
+      for (const r of [s1, s2, o2]) assert.deepEqual(r.drew.latin1.map((w) => w.s), o1.drew.latin1.map((w) => w.s));
+      if (engine === 'chromium') assert.deepEqual(s1.drew.latin1.map((w) => w.s), ['h\u00e9', 'h\u00e9']);
+      // Seeded: the seed's draws, the same in each run; off, and a redirected worker seeded, the browser's own.
+      const draws = (r, t) => r.drew[t].map((w) => w.draws);
+      assert.deepEqual(draws(s1, 'latin1'), draws(s2, 'latin1'));
+      assert.deepEqual(draws(s1, 'csp'), draws(s2, 'csp'));
+      assert.notDeepEqual(draws(o1, 'latin1'), draws(o2, 'latin1'));
+      assert.notDeepEqual(draws(o1, 'csp'), draws(o2, 'csp'));
+      if (engine !== 'chromium') for (const i of [0, 1, 2, 3]) assert.notDeepEqual(s1.drew.redirect[i].draws, s2.drew.redirect[i].draws, `redirect ${i}`);
+      // The lines: the module one under a policy, seeded late; each redirected one, once: in WebKit saying the second ask, in Chromium that it does not start.
+      const said = (r, re) => r.lines.filter((l) => re.test(l));
+      for (const r of [s1, s2]) {
+        assert.equal(said(r, /^keploy: in .*csp.*, the module Web Worker at http:\/\/127\.0\.0\.1:\d+\/sv\/cn\.js is served with a Content-Security-Policy/).length, 1);
+        // served.spec.ts's 'own' test runs too: its lines name /mc/ and /sv/sn*.js (its own row).
+        assert.equal(said(r, /\/sv\/c[a-z]+\.js is served with a Content-Security-Policy/).length, 1);
+        assert.equal(said(r, /Content-Security-Policy/).filter((l) => !/\/mc\/|\/sv\/snm?\.js/.test(l)).length, 1);
+        // Firefox routes no Shared Worker's script: its redirected one is named as one keploy cannot reach.
+        const moved = engine === 'firefox' ? ['/rd/w.js', '/rdm/m.js'] : ['/rd/w.js', '/rdm/m.js', '/rds/s.js'];
+        for (const p of moved) {
+          const how = engine === 'chromium' ? 'does not start' : "draws the browser's own random numbers, .*";
+          const l = said(r, new RegExp(`^keploy: in .*redirect.*, the worker at http://127\\.0\\.0\\.1:\\d+${p.replace(/\./g, '\\.')} ${how}: the server redirects its script, `));
+          assert.equal(l.length, 1, p);
+          assert.equal(/once more than with seeding off/.test(l[0]), engine === 'webkit', p);
+          assert.equal(/stopped the load after asking the server for the script once/.test(l[0]), engine === 'chromium', p);
+        }
+        assert.equal(said(r, /redirects its script/).length, moved.length);
+        assert.equal(said(r, /^keploy: in .*redirect.*, the Shared Worker at http:\/\/127\.0\.0\.1:\d+\/rds\/s\.js draws the browser's own random numbers, .*: it is a Shared Worker, and Firefox does not let keploy reach/).length, engine === 'firefox' ? 1 : 0);
+      }
+      for (const r of [o1, o2]) assert.deepEqual(said(r, /redirects its script|Content-Security-Policy/), []);
+    } finally { await a.close(); }
+  });
+}
+
+for (const engine of ENGINES) {
+  test(`served, in ${engine}: a worker's script whose Content-Security-Policy allows a script from the worker's own origin keeps its seeding ahead of the modules it imports (default-src 'self'; a nonce and 'strict-dynamic', module and classic; helmet's default, which upgrades http but on this loopback host), draws the seed's numbers there, its imports' too, and is named as late by no line; a Shared Worker under default-src 'none', classic and module, starts, as off, ${engine === 'firefox' ? 'unseeded (Firefox routes no Shared Worker\'s script)' : 'seeded, the module one named as seeded late once'}; the server never sees keploy's mark`, async () => {
+    const j = journal();
+    const a = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' ? { body: { v: 1, status: 'ok', seed: 'ce'.repeat(16) } } : undefined));
+    try {
+      const run = (off) => drawRun(j, { ...keployEnv(a.url), PW_BROWSER: engine, ...(off ? { KEPLOY_SEED_RANDOM: 'off' } : {}) }, ['served.spec.ts'], ['own']);
+      const s1 = await run(false);
+      const s2 = await run(false);
+      const o1 = await run(true);
+      const o2 = await run(true);
+      const names = ['s', 'h', 'sd', 'sdc', 'sn', 'snm'];
+      const kinds = (r) => r.drew.own.map((w) => (typeof w === 'string' ? w : w.k));
+      for (const [mode, r] of [['seeded', s1], ['seeded again', s2], ['off', o1], ['off again', o2]]) {
+        // Each starts as it does off, in every engine.
+        assert.deepEqual(kinds(r), kinds(o1), mode);
+        assert.deepEqual(kinds(r), names, mode);
+        assert.deepEqual(r.seen.filter((u) => u.includes('__keploy_worker')), [], mode);
+        // Each Web Worker's script loaded once by the browser, as off (the row counts no Shared Worker's loads).
+        for (const p of ['/mc/s.js', '/mc/sd.js', '/mc/sdc.js']) assert.equal(r.seen.filter((u) => u === p).length, 1, `${mode} ${p}`);
+      }
+      const at = (r, i) => r.drew.own[i];
+      // Seeded: the seed's draws, the same in each run, an import's too; off, the browser's own.
+      const seededAt = engine === 'firefox' ? [0, 1, 2, 3] : [0, 1, 2, 3, 4, 5];
+      for (const i of seededAt) {
+        assert.deepEqual(at(s1, i).draws, at(s2, i).draws, names[i]);
+        if (at(s1, i).dep !== undefined) assert.deepEqual(at(s1, i).dep, at(s2, i).dep, `${names[i]} dep`);
+      }
+      assert.notDeepEqual(at(o1, 0).draws, at(o2, 0).draws);
+      assert.notDeepEqual(at(o1, 0).dep, at(o2, 0).dep);
+      assert.notDeepEqual(at(o1, 1).dep, at(o2, 1).dep);
+      if (engine === 'firefox') for (const i of [4, 5]) assert.notDeepEqual(at(s1, i).draws, at(s2, i).draws, names[i]);
+      // The lines: a module worker seeded after its imports, once each.
+      // served.spec.ts's other tests run too: only this test's addresses (/mc/, /sv/sn.js, /sv/snm.js).
+      const late = (r) => r.lines.filter((l) => /is served with a Content-Security-Policy/.test(l) && /\/mc\/|\/sv\/snm?\.js/.test(l)).map((l) => /the (module (?:Web|Shared) Worker) at http:\/\/127\.0\.0\.1:\d+(\S+) is served/.exec(l)?.slice(1).join(' ')).sort();
+      const want = { chromium: ['module Shared Worker /sv/snm.js'], firefox: [], webkit: ['module Shared Worker /sv/snm.js'] }[engine];
+      for (const r of [s1, s2]) assert.deepEqual(late(r), want);
+      for (const r of [o1, o2]) assert.deepEqual(late(r), []);
+    } finally { await a.close(); }
+  });
+}
+
+// overrides.spec.ts's tests, and the scripts each one's page starts its
+// workers at (/ov/<k>w.js and /ov/<k>s.js).
+const OV = [['continue headers on page', 'a'], ['continue headers on context', 'a'], ['continue url on page', 'o'], ['continue url on context', 'o'],
+  ['fallback headers on page', 'a'], ['fallback headers on context', 'a'], ['fallback url on page', 'o'], ['browser headers on page', 'p'], ['own url and method on page', 'p']];
+
+// The marks a document at /ov of page t0 gives the workers overrides.spec.ts
+// starts there.
+function ovMarks(seed, k) {
+  const made = [];
+  class Worker { constructor(url) { made.push(workerMark(String(url))); } }
+  documentAt(initScript(seed), '/ov', new Map(), 't0', { globals: { URL, Worker, SharedWorker: Worker } })
+    .run(`new Worker('/ov/${k}w.js'); new SharedWorker('/ov/${k}s.js');`);
+  return made;
+}
+
+for (const engine of ENGINES) {
+  test(`seeded, in ${engine}: a worker whose script the test's own route, on its page or its context, continues or falls back with a header the app's server needs or with a stand-in's URL runs what that route asked for; a Web Worker's is seeded (keploy answers its seeding's load of the app's script with what it fetched so) at the app's URL; a Shared Worker's runs unseeded and is named in Chromium and WebKit (nothing a Shared Worker loads after its script is routed there), and is seeded when the route continues with the browser's own headers, or with its own URL and method; Firefox's route reaches no Shared Worker's script, the test's neither, so there it fails as with no keploy`, async () => {
+    const j = journal();
+    const rec = await fakeAgent(j);
+    try {
+      const r = await drawRun(j, { ...keployEnv(rec.url), PW_BROWSER: engine }, ['overrides.spec.ts'], OV.map(([t]) => t));
+      for (const [title, k] of OV) {
+        const [web, shared] = r.drew[title];
+        const [wm, sm] = ovMarks(r.seeds[title], k);
+        const ran = k === 'o' ? 'm' : k;
+        assert.equal(web.kind, `${ran}w`, `${title}: ${JSON.stringify(web)}`);
+        assert.match(web.href, new RegExp(`^http://127\\.0\\.0\\.1:\\d+/ov/${k}w\\.js$`), title);
+        assert.deepEqual(web.draws, workerAt(`http://h/ov/${k}w.js`, workerScript(wm.token, 0, 'w')).draws(), title);
+        // Firefox's route reaches no Shared Worker's script, keploy's or the
+        // test's: what the test's route asks of it never reaches the server,
+        // and the worker fails as it does with no keploy.
+        if (engine === 'firefox' && k !== 'p') assert.ok(['error', 'none'].includes(shared), `${title}: ${JSON.stringify(shared)}`);
+        else assert.equal(shared.kind, `${ran}s`, `${title}: ${JSON.stringify(shared)}`);
+        const at = `http://127.0.0.1:<port>/ov/${k}s.js`;
+        const said = r.tests[title].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${title}, `)).map((l) => l.replace(/:\d+\//, ':<port>/'));
+        const lines = [sharedWorkerLine(title, at)];
+        const model = workerAt(`http://h/ov/${k}s.js`, workerScript(sm.token, 0, 's')).draws();
+        if (engine === 'firefox') {
+          lines.push(unplacedLine(title, at, 'shared'));
+        } else if (k === 'p') {
+          assert.deepEqual(shared.draws, model, title);
+          assert.match(shared.href, new RegExp(`^http://127\\.0\\.0\\.1:\\d+/ov/ps\\.js$`), title);
+        } else {
+          lines.push(unplacedLine(title, at, 'continued'));
+          assert.notDeepEqual(shared.draws, model, title);
+          assert.match(shared.href, new RegExp(`^http://127\\.0\\.0\\.1:\\d+/ov/${k}s\\.js\\?__keploy_worker=s\\.[0-9a-f]{32}$`), title);
+        }
+        assert.deepEqual(said.sort(), lines.sort(), title);
+      }
+      assert.deepEqual(r.seen.filter((u) => u.includes('__keploy_worker')), []);
+    } finally { await rec.close(); }
+  });
+}
+
+// aborts.spec.ts's tests of a route of the test's own that aborts a request,
+// and the one where keploy stops a seeded Web Worker's script load (Chromium).
+const AB = ['abort with a code on page', 'abort with a code on context', 'abort with no code on page', 'abort a worker script with a code', 'abort a worker script with blockedbyclient', 'abort a worker script with no code'];
+const AB_G = 'abort with a code|abort with no code|abort a worker script';
+const AB_STOP = 'a worker script the server redirects';
+
+// Settle wraps each route's abort (and keploy's worker routes the abort of
+// a worker script's load they hand to the test's routes), so the error code
+// the test gives reaches the browser: the page's requestfailed text is what
+// it is with no keploy. keploy's own stop of a seeded Web Worker's script
+// the server redirects (Chromium) fails the load with blockedbyclient, as a
+// route's abort('blockedbyclient') does with no keploy. Not every engine
+// names codes apart (measured): WebKit gives every abort one text (Blocked by
+// Web Inspector); Firefox gives blockedbyclient the text of no code
+// (NS_ERROR_FAILURE), and accessdenied its own; Chromium names a fetch's code
+// (net::ERR_ACCESS_DENIED, net::ERR_FAILED) but reports every failed Web
+// Worker script load to the page as net::ERR_ABORTED, whatever the code. So a
+// code dropped on the way shows in a fetch's text in Chromium and Firefox,
+// and in a worker script's in Firefox, for accessdenied: the row checks that
+// it would there.
+for (const engine of ENGINES) {
+  test(`aborts, in ${engine}: a route of the test's own that aborts a fetch (with an error code, on its page or its context, or with none) or a Web Worker's script (with an error code, with blockedbyclient or with none) fails it with the requestfailed text it has with no keploy, seeded and with seeding off, and the server never sees it${engine === 'chromium' ? "; keploy's stop of a seeded Web Worker's script the server redirects fails it as a route's abort('blockedbyclient') does with no keploy" : ''}`, async (t) => {
+    const j = journal();
+    const a = await fakeAgent(j);
+    try {
+      const only = ['aborts.spec.ts', '-g', AB_G];
+      const plain = await drawRun(j, { KEPLOY_MOCK_AGENT: undefined, KEPLOY_TEST_PID: undefined, PW_BROWSER: engine }, only, AB);
+      const off = await drawRun(j, { ...keployEnv(a.url), PW_BROWSER: engine, PW_NOSEED: '1' }, only, AB);
+      const on = await drawRun(j, { ...keployEnv(a.url), PW_BROWSER: engine }, engine === 'chromium' ? ['aborts.spec.ts'] : only, engine === 'chromium' ? [...AB, AB_STOP] : AB);
+      const text = (r, n) => r.drew[n][1];
+      for (const [mode, r] of [['no keploy', plain], ['seeding off', off], ['seeded', on]]) t.diagnostic(`${engine}, ${mode}: ${[...AB, AB_STOP].filter((n) => r.drew[n] !== undefined).map((n) => `${n}: ${r.drew[n].join(' ')}`).join('; ')}`);
+      // Each failed, as the page saw it, and the page's requestfailed event named it.
+      assert.deepEqual(AB.map((n) => plain.drew[n][0]), ['failed', 'failed', 'failed', 'error', 'error', 'error']);
+      for (const n of AB) assert.notEqual(text(plain, n), 'finished', n);
+      for (const n of AB) {
+        assert.deepEqual(on.drew[n], plain.drew[n], `seeded: ${n}`);
+        assert.deepEqual(off.drew[n], plain.drew[n], `seeding off: ${n}`);
+      }
+      // Where the engine names the code apart, a code dropped on the way would show.
+      if (engine !== 'webkit') assert.notEqual(text(plain, 'abort with a code on page'), text(plain, 'abort with no code on page'));
+      if (engine === 'firefox') assert.notEqual(text(plain, 'abort a worker script with a code'), text(plain, 'abort a worker script with no code'));
+      if (engine === 'chromium') assert.deepEqual(on.drew[AB_STOP], plain.drew['abort a worker script with blockedbyclient']);
+      // No request a route aborted reached the server; keploy asked it once
+      // for the redirected script (to see the redirect), never for the next.
+      for (const r of [plain, off]) assert.deepEqual(r.seen.filter((u) => u.startsWith('/ab/') || u.startsWith('/rd/')), []);
+      assert.deepEqual(on.seen.filter((u) => u.startsWith('/ab/') || u.startsWith('/rd/')), engine === 'chromium' ? ['/rd/w.js'] : []);
+    } finally { await a.close(); }
+  });
+}
+
+// once.spec.ts's tests, and the workers each one's page starts, in order
+// (each script's URL, and w a classic Web Worker, m a module one, s a
+// Shared Worker), and the doc tests' document paths (/ov for the others).
+const DOCS = ['meta', 'header'].flatMap((how) => ['no-referrer', 'origin', 'strict-origin'].map((policy) => [how, policy]));
+const DOC_PATH = Object.fromEntries(DOCS.map(([how, policy]) => [`doc ${how} ${policy}`, `/ovd/${how}/${policy}`]));
+const ONCE = [['once on page', [['/ov/aw.js', 'w']]], ['once on context, module', [['/ov/aw.js', 'm']]], ['by destination', [['/ov/aw.js', 'w']]],
+  ['once under no-referrer', [['/ov/nw.js', 'w']]], ['once under no-referrer, module', [['/ov/nw.js', 'm']]], ['once under origin, module', [['/ov/gw.js', 'm']]],
+  ['counted', [['/ov/pw.js', 'w'], ['/ov/pw.js', 'm']]], ['answered then continued at one address', [['/ov/as.js', 'w'], ['/ov/as.js', 's']]],
+  ['two routes', [['/ov/aw.js', 'w'], ['/ov/as.js', 's']]],
+  ...Object.keys(DOC_PATH).map((t) => [t, [['/ov/aw.js', 'w'], ['/ov/tw.js', 'm'], ['/ov/pw.js', 'w'], ['/ov/pw.js', 'm']]])];
+
+// The marks a document at doc of page t0 gives the workers list starts.
+function onceMarks(seed, list, doc = '/ov') {
+  const made = [];
+  class Worker { constructor(url) { made.push(workerMark(String(url))); } }
+  const code = list.map(([u, k]) => (k === 's' ? `new SharedWorker('${u}');` : `new Worker('${u}'${k === 'm' ? ', { type: \'module\' }' : ''});`)).join(' ');
+  documentAt(initScript(seed), doc, new Map(), 't0', { globals: { URL, Worker, SharedWorker: Worker } }).run(code);
+  return made;
+}
+
+for (const engine of ENGINES) {
+  test(`seeded, in ${engine}: a test's own route that treats a Web Worker's script loads apart (one that answers once, on its page or its context, one that picks the worker's script by its destination, one that counts its loads) sees what it sees with seeding off and the worker runs, seeded, at the app's URL: the worker's script is loaded once, keploy's seeding ahead of it, so the app's server is asked for a Web Worker's script once, under a script's Referrer-Policy and under a document's (no-referrer, origin, strict-origin, by a meta tag or a header), classic and module; an error a seeded Web Worker throws names the app's script and its line, in the worker and in the page; a Web Worker at one address whose script the test's route answers itself and a Shared Worker there whose script it sends on with a header are each named; of two routes, the last one's options count`, async () => {
+    const j = journal();
+    const rec = await fakeAgent(j);
+    try {
+      const names = [...ONCE.map(([t]) => t), 'counted-n', ...Object.keys(DOC_PATH).map((t) => `${t}-n`), 'error event'];
+      const r = await drawRun(j, { ...keployEnv(rec.url), PW_BROWSER: engine }, ['once.spec.ts'], names);
+      const off = await drawRun(j, { ...keployEnv(rec.url), PW_BROWSER: engine, KEPLOY_SEED_RANDOM: 'off' }, ['once.spec.ts'], names);
+      for (const [title, list] of ONCE) {
+        const marks = onceMarks(r.seeds[title], list, DOC_PATH[title]);
+        const at = (u) => `http://127.0.0.1:<port>${u}`;
+        const lines = [];
+        list.forEach(([u, k], i) => {
+          const [got, was] = [r.drew[title][i], off.drew[title][i]];
+          const what = `${title} ${u} ${k}: ${JSON.stringify(got)} (off: ${JSON.stringify(was)})`;
+          if (k === 's') {
+            lines.push(sharedWorkerLine(title, at(u)));
+            // Firefox's route reaches no Shared Worker's script: it fails
+            // as with no keploy, and is named.
+            if (engine === 'firefox') {
+              assert.ok(['error', 'none'].includes(got), what);
+              lines.push(unplacedLine(title, at(u), 'shared'));
+              return;
+            }
+            assert.equal(got.kind, 'as', what);
+            assert.match(got.href, new RegExp(`^http://127\\.0\\.0\\.1:\\d+/ov/as\\.js\\?__keploy_worker=s\\.[0-9a-f]{32}$`), what);
+            lines.push(unplacedLine(title, at(u), 'continued'));
+            return;
+          }
+          if (title === 'answered then continued at one address') {
+            assert.deepEqual([got, was], [{ kind: 'own' }, { kind: 'own' }], what);
+            lines.push(unplacedLine(title, at(u), 'routed'));
+            return;
+          }
+          const kind = u.slice('/ov/'.length, -'.js'.length);
+          assert.equal(got.kind, kind, what);
+          assert.equal(was.kind, kind, what);
+          assert.match(got.href, new RegExp(`^http://127\\.0\\.0\\.1:\\d+${u.replace('.', '\\.')}$`), what);
+          assert.equal(marks[i].kind, k, what);
+          assert.deepEqual(got.draws, workerAt(`http://h${u}`, workerScript(marks[i].token, 0, k)).draws(), what);
+        });
+        const said = r.tests[title].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${title}, `)).map((l) => l.replace(/:\d+\//g, ':<port>/'));
+        assert.deepEqual(said.sort(), lines.sort(), title);
+      }
+      // The counting route saw each worker's script once, as with seeding
+      // off; the app's server was asked for the same scripts.
+      assert.deepEqual([r.drew['counted-n'], off.drew['counted-n']], [2, 2]);
+      // Under each document's referrer policy too: the counting route saw
+      // its two workers' script twice, the app's server was asked once for
+      // each Web Worker's script (tw.js only by the doc tests; pw.js by them
+      // and counted), as with seeding off.
+      for (const t of Object.keys(DOC_PATH)) assert.deepEqual([r.drew[`${t}-n`], off.drew[`${t}-n`]], [2, 2], t);
+      const asked = (seen, u) => seen.filter((s) => s === u).length;
+      assert.deepEqual([asked(r.seen, '/ov/tw.js'), asked(off.seen, '/ov/tw.js')], [DOCS.length, DOCS.length]);
+      assert.deepEqual([asked(r.seen, '/ov/pw.js'), asked(off.seen, '/ov/pw.js')], [2 + 2 * DOCS.length, 2 + 2 * DOCS.length]);
+      // An error a seeded Web Worker throws, classic and module, names the
+      // app's script and the line it was thrown on, in the worker and in
+      // the page, as with seeding off: no mark.
+      const port = (x) => JSON.parse(JSON.stringify(x).replace(/:\d+\//g, ':<port>/'));
+      const ew = 'http://127.0.0.1:<port>/ov/ew.js';
+      [0, 1].forEach((i) => {
+        const [got, was] = [port(r.drew['error event'][i]), port(off.drew['error event'][i])];
+        const what = `error event ${i === 0 ? 'classic' : 'module'}: ${JSON.stringify(got)} (off: ${JSON.stringify(was)})`;
+        assert.deepEqual(got, was, what);
+        assert.deepEqual([got.in.kind, got.in.filename, got.page.filename], ['ew-in', ew, ew], what);
+        assert.equal(got.in.lineno, 2, what);
+      });
+      assert.deepEqual(r.tests['error event'].stdout.split('\n').filter((l) => l.startsWith('keploy: in error event, ')), []);
+      const scripts = (seen) => seen.filter((u) => u.startsWith('/ov/')).sort();
+      assert.deepEqual(scripts(r.seen), scripts(off.seen));
+      assert.deepEqual(r.seen.filter((u) => u.includes('__keploy_worker')), []);
+    } finally { await rec.close(); }
+  });
+}
+
+// The marks a document at /nw of page t0 gives the workers nested.spec.ts's
+// page starts, and the marks those Web Workers' seedings give theirs.
+function nestedMarks(seed) {
+  const made = [];
+  class Worker { constructor(url) { made.push(workerMark(String(url))); } }
+  documentAt(initScript(seed), '/nw', new Map(), 't0', { globals: { URL, Worker, SharedWorker: Worker } })
+    .run('new Worker(\'/nw/a.js?x=1\'); new Worker(\'/nw/am.js\', { type: \'module\' }); new SharedWorker(\'/nw/s.js\');');
+  const kids = (m, code) => {
+    const got = [];
+    class W { constructor(url) { got.push(workerMark(String(url))); } }
+    workerAt(markWorker(m.url, m.kind, m.token), workerScript(m.token, 0, m.kind, true), { URL, Worker: W, fetch: () => Promise.resolve(), Request: class Request {} }).run(code);
+    return got;
+  };
+  const [a, am] = made;
+  const [b0, b1, bm] = kids(a, 'new Worker(\'b.js\', { name: \'b0\' }); new Worker(\'b.js\', { name: \'b1\' }); new Worker(\'bm.js\', { type: \'module\' });');
+  const [mb] = kids(am, 'new Worker(\'b.js\', { name: \'mb\' });');
+  const [c] = kids(b0, 'new Worker(\'c.js\');');
+  return { a, am, b0, b1, bm, mb, c };
+}
+
+for (const engine of ENGINES) {
+  test(`seeded, in ${engine}: the Web Workers a Web Worker starts, classic and module, and one that one of them starts, draw from the test's seed in WebKit, each its own numbers, the same at replay, at the app's location; in Chromium and Firefox, whose route does not reach their scripts, they start as the app asked and each address is named once; the app's server never sees keploy's mark; one it starts from a blob: URL draws its own and is named once`, async () => {
+    const j = journal();
+    const rec = await fakeAgent(j);
+    let kept = {};
+    const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+      ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+    const env = (url) => ({ ...keployEnv(url), PW_BROWSER: engine });
+    const SEEDED = [['a', 'a.js?x=1'], ['am', 'am.js'], ['b0', 'b.js'], ['b1', 'b.js'], ['bm', 'bm.js'], ['mb', 'b.js'], ['c', 'c.js']];
+    try {
+      const r = await drawRun(j, env(rec.url), ['nested.spec.ts'], ['nested']);
+      const w = Object.fromEntries(r.drew.nested.map((x) => [x.kind, x]));
+      const facts = JSON.stringify(r.drew.nested);
+      assert.deepEqual(Object.keys(w).sort(), ['a', 'am', 'b0', 'b1', 'blob', 'bm', 'c', 'mb', 'sh'], facts);
+      // Chromium has no Worker in a Shared Worker's scope.
+      assert.equal(w.sh.worker, engine === 'chromium' ? 'undefined' : 'function', facts);
+      const seeds = engine === 'webkit';
+      const m = nestedMarks(r.seeds.nested);
+      assert.deepEqual(SEEDED.map(([k]) => m[k].kind), ['w', 'm', 'w', 'w', 'm', 'w', 'w']);
+      assert.equal(new Set(SEEDED.map(([k]) => m[k].token)).size, SEEDED.length);
+      for (const [k, file] of SEEDED) {
+        assert.match(w[k].href, new RegExp(`^http://127\\.0\\.0\\.1:\\d+/nw/${file.replace(/[.?]/g, '\\$&')}$`), `${k} ${facts}`);
+        const model = workerAt(`http://h/nw/${file}`, workerScript(m[k].token, 0, m[k].kind)).draws();
+        if (seeds || k === 'a' || k === 'am') assert.deepEqual(w[k].draws, model, `${k} ${facts}`);
+        else assert.notDeepEqual(w[k].draws, model, `${k} ${facts}`);
+      }
+      // A seeded module Web Worker runs the app's script at its marked URL:
+      // its import.meta.url shows the mark (workerAnswer).
+      for (const k of ['am', 'bm']) assert.equal(w[k].meta, seeds || k === 'am' ? markWorker(w[k].href, 'm', m[k].token) : w[k].href, k);
+      const said = r.tests.nested.stdout.split('\n').filter((l) => l.startsWith('keploy: in nested, ')).map((l) => l.replace(/:\d+\//, ':<port>/'));
+      const at = (p) => `http://127.0.0.1:<port>/nw/${p}`;
+      assert.deepEqual(said.sort(), [unplacedLine('nested', 'blob:', 'worker'), sharedWorkerLine('nested', at('s.js')),
+        ...(seeds ? [] : ['b.js', 'bm.js'].map((f) => unplacedLine('nested', at(f), 'nested'))),
+        ...(engine === 'firefox' ? [unplacedLine('nested', at('s.js'), 'shared')] : [])].sort(), facts);
+      assert.deepEqual(r.seen.filter((u) => u.includes('__keploy_worker')), []);
+      for (const u of ['/nw/a.js?x=1', '/nw/am.js', '/nw/b.js', '/nw/bm.js', '/nw/c.js', '/nw/s.js']) assert.ok(r.seen.includes(u), `${u}: ${r.seen.join(' ')}`);
+      kept = r.seeds;
+      const q = await drawRun(j, env(rep.url), ['nested.spec.ts'], ['nested']);
+      const p = Object.fromEntries(q.drew.nested.map((x) => [x.kind, x]));
+      for (const [k] of SEEDED) {
+        if (seeds || k === 'a' || k === 'am') assert.deepEqual(p[k].draws, w[k].draws, k);
+        else assert.notDeepEqual(p[k].draws, w[k].draws, k);
+      }
+      assert.deepEqual(q.seen.filter((u) => u.includes('__keploy_worker')), []);
+    } finally { await rep.close(); await rec.close(); }
+  });
+}
+
+// service-helper.ts's tests: one with its Service Worker, one with
+// serviceWorkers: 'block'.
+const SW_TITLES = ['service worker', 'service worker blocked'];
+
+for (const engine of ENGINES) {
+  test(`seeded, in ${engine}: a Service Worker a page registers draws the browser's own and is named once; a Web Worker and a Shared Worker that it may answer start as the app asked, so neither the Service Worker nor the app's server sees keploy's mark, and each is named with it; with serviceWorkers: 'block' neither is named and the Web Worker draws from the test's seed, the same at replay`, async () => {
+    const j = journal();
+    const rec = await fakeAgent(j);
+    let kept = {};
+    const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+      ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+    const env = (url) => ({ ...keployEnv(url), PW_BROWSER: engine });
+    const byKind = (r, title) => Object.fromEntries(r.drew[title].w.map((m) => [m.kind, m]));
+    const specs = ['service.spec.ts', 'service-blocked.spec.ts'];
+    try {
+      const r = await drawRun(j, env(rec.url), specs, SW_TITLES);
+      const facts = JSON.stringify(r.drew);
+      const said = (title) => r.tests[title].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${title}, `)).map((l) => l.replace(/127\.0\.0\.1:\d+\//g, '127.0.0.1:<port>/')).sort();
+      const at = (p) => `http://127.0.0.1:<port>/${p}`;
+      const on = byKind(r, 'service worker');
+      const off = byKind(r, 'service worker blocked');
+      const origin = new URL(on['sw-ded'].href).origin;
+      // With its Service Worker: registered, controlling the page, and named;
+      // each worker named with it (in Firefox, whose route does not reach a
+      // Shared Worker's script, the Shared Worker is named for that).
+      assert.deepEqual(on.reg, { kind: 'reg', sw: true, ok: true, controlled: true }, facts);
+      assert.deepEqual(said('service worker'), [
+        unplacedLine('service worker', at('sw.js'), 'service'),
+        unplacedLine('service worker', at('swk/w.js'), 'controlled', 0, at('sw.js')),
+        engine === 'firefox' ? unplacedLine('service worker', at('swk/s.js'), 'shared') : unplacedLine('service worker', at('swk/s.js'), 'controlled', 0, at('sw.js')),
+        sharedWorkerLine('service worker', at('swk/s.js')),
+      ].sort(), facts);
+      // Each worker runs at the URL the app asked for, and the Service Worker
+      // was asked for the Web Worker's script with no mark.
+      assert.deepEqual([on['sw-ded'].href, on['sw-shared'].href], [`${origin}/swk/w.js`, `${origin}/swk/s.js`], facts);
+      assert.equal(r.drew['service worker'].seen.kind, 'sw-seen', facts);
+      assert.ok(r.drew['service worker'].seen.seen.includes(`${origin}/swk/w.js`), facts);
+      assert.deepEqual(r.drew['service worker'].seen.seen.filter((u) => u.includes('__keploy_worker')), [], facts);
+      // Blocked: Playwright registers none, nothing but the Shared Worker's
+      // settle line is said, and the Web Worker draws from the test's seed.
+      assert.deepEqual(off.reg, { kind: 'reg', sw: true, ok: false, controlled: false }, facts);
+      assert.equal(r.drew['service worker blocked'].seen, null, facts);
+      assert.deepEqual(said('service worker blocked'), [
+        ...(engine === 'firefox' ? [unplacedLine('service worker blocked', at('swk/s.js'), 'shared')] : []),
+        sharedWorkerLine('service worker blocked', at('swk/s.js')),
+      ].sort(), facts);
+      assert.deepEqual([off['sw-ded'].href, off['sw-shared'].href], [`${origin}/swk/w.js`, `${origin}/swk/s.js`], facts);
+      const made = [];
+      class Worker { constructor(url) { made.push(workerMark(String(url))); } }
+      documentAt(initScript(r.seeds['service worker blocked']), '/sw', new Map(), 't0', { globals: { URL, Worker } }).run('new Worker("/swk/w.js");');
+      assert.deepEqual(off['sw-ded'].draws, workerAt('http://h/swk/w.js', workerScript(made[0].token, 0, 'w')).draws(), facts);
+      // The app's server never sees keploy's mark.
+      assert.deepEqual(r.seen.filter((u) => u.includes('__keploy_worker')), []);
+      kept = r.seeds;
+      const q = await drawRun(j, env(rep.url), specs, SW_TITLES);
+      assert.deepEqual(byKind(q, 'service worker blocked')['sw-ded'].draws, off['sw-ded'].draws);
+      if (engine !== 'firefox') assert.deepEqual(byKind(q, 'service worker blocked')['sw-shared'].draws, off['sw-shared'].draws);
+      assert.notDeepEqual(byKind(q, 'service worker')['sw-ded'].draws, on['sw-ded'].draws);
+      assert.deepEqual(q.seen.filter((u) => u.includes('__keploy_worker')), []);
+    } finally { await rep.close(); await rec.close(); }
+  });
+}
+
+// service-known.spec.ts's tests.
+const KNOWN_TITLES = ['shared worker early', 'shared worker announced', 'shared worker registering', 'shared worker known'];
+
+for (const engine of ENGINES) {
+  test(`seeded, in ${engine}: a Shared Worker is marked only once keploy knows no Service Worker's scope holds its URL: one started before the browser answers starts as the app asked and is named; one whose URL the scope of a registration another page made holds starts as the app asked, so that Service Worker sees no mark, and is named with it; one of a page that began while another page's register was in flight starts as the app asked and is named, even once keploy's lock read would have answered; one started once the browser said there is none draws from the test's seed, the same at replay (in Firefox, whose route does not reach a Shared Worker's script, each is named for that)`, async () => {
+    const j = journal();
+    const rec = await fakeAgent(j);
+    let kept = {};
+    const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+      ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+    const env = (url) => ({ ...keployEnv(url), PW_BROWSER: engine });
+    const specs = ['service-known.spec.ts'];
+    try {
+      const r = await drawRun(j, env(rec.url), specs, KNOWN_TITLES);
+      const facts = JSON.stringify(r.drew);
+      const said = (title) => r.tests[title].stdout.split('\n').filter((l) => l.startsWith(`keploy: in ${title}, `)).map((l) => l.replace(/127\.0\.0\.1:\d+\//g, '127.0.0.1:<port>/')).sort();
+      const at = (p) => `http://127.0.0.1:<port>/${p}`;
+      const ff = engine === 'firefox';
+      const early = r.drew['shared worker early'].w[0];
+      const origin = new URL(early.href).origin;
+      // Early: as the app asked, named for that.
+      assert.equal(early.href, `${origin}/swk/s.js`, facts);
+      assert.deepEqual(said('shared worker early'), [
+        unplacedLine('shared worker early', at('swk/s.js'), ff ? 'shared' : 'early'),
+        sharedWorkerLine('shared worker early', at('swk/s.js')),
+      ].sort(), facts);
+      // Announced: named with the Service Worker the other page registered,
+      // which sees no mark.
+      const ann = r.drew['shared worker announced'];
+      assert.equal(ann.w[0].href, `${origin}/swr/s.js`, facts);
+      assert.deepEqual(said('shared worker announced'), [
+        unplacedLine('shared worker announced', at('swr/sw.js'), 'service'),
+        ff ? unplacedLine('shared worker announced', at('swr/s.js'), 'shared') : unplacedLine('shared worker announced', at('swr/s.js'), 'controlled', 0, at('swr/sw.js')),
+        sharedWorkerLine('shared worker announced', at('swr/s.js')),
+      ].sort(), facts);
+      assert.equal(ann.seen.kind, 'sw-seen', facts);
+      assert.deepEqual(ann.seen.seen.filter((u) => u.includes('__keploy_worker')), [], facts);
+      // Registering: the page began while the other page's register held
+      // keploy's lock, so it never knows: as the app asked, named.
+      const reg = r.drew['shared worker registering'];
+      assert.equal(reg.w[0].href, `${origin}/swh/s.js`, facts);
+      assert.deepEqual(said('shared worker registering'), [
+        unplacedLine('shared worker registering', at('swh/sw.js'), 'service'),
+        unplacedLine('shared worker registering', at('swh/s.js'), ff ? 'shared' : 'early'),
+        sharedWorkerLine('shared worker registering', at('swh/s.js')),
+      ].sort(), facts);
+      // Known: seeded (Chromium, WebKit), and only the settle line is said.
+      const known = r.drew['shared worker known'].w[0];
+      assert.equal(known.href, `${origin}/swk/s.js`, facts);
+      assert.deepEqual(said('shared worker known'), [
+        ...(ff ? [unplacedLine('shared worker known', at('swk/s.js'), 'shared')] : []),
+        sharedWorkerLine('shared worker known', at('swk/s.js')),
+      ].sort(), facts);
+      assert.deepEqual(r.seen.filter((u) => u.includes('__keploy_worker')), []);
+      kept = r.seeds;
+      const q = await drawRun(j, env(rep.url), specs, KNOWN_TITLES);
+      const again = q.drew['shared worker known'].w[0];
+      if (ff) assert.notDeepEqual(again.draws, known.draws, facts);
+      else assert.deepEqual(again.draws, known.draws, facts);
+      // The early one is not seeded: it draws other numbers at replay, as
+      // does the registering one.
+      assert.notDeepEqual(q.drew['shared worker early'].w[0].draws, early.draws, facts);
+      assert.notDeepEqual(q.drew['shared worker registering'].w[0].draws, reg.w[0].draws, facts);
+    } finally { await rep.close(); await rec.close(); }
+  });
+}
+
+test('seeded: keploy answers no seed (an older recording, or an older keploy): the browser draws its own, each test says so, and its end says own', async () => {
+  const j = journal();
+  const a = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' ? { body: { v: 1, status: 'ok' } } : undefined));
+  try {
+    const r1 = await drawRun(j, keployEnv(a.url));
+    const r2 = await drawRun(j, keployEnv(a.url));
+    for (const n of ['one', 'two', 'again', 'three']) assert.notDeepEqual(r2.drew[n], r1.drew[n], n);
+    assert.notDeepEqual(r1.drew.one.top, expected(r1.seeds.one, '/draws'));
+    for (const r of [r1, r2]) {
+      assert.equal(r.said, 0);
+      for (const n of ['one', 'two', 'again']) assert.ok(r.tests[n].stdout.split('\n').includes(unseededLine(n)), `${n}: ${r.tests[n].stdout}`);
+      assert.ok(!r.tests['own › three'].stdout.includes('with no seed'), r.tests['own › three'].stdout);
+      assert.deepEqual(r.ends, NAMES.map((n) => [n, 'own']));
+    }
+    // A test with no page says own too: it asked for a seed and got none.
+    const from = j.events.length;
+    await playwright(['basic.spec.ts'], keployEnv(a.url));
+    const ends = j.events.slice(from).filter((e) => e.agent && e.agent.path === '/agent/scope/end').map((e) => e.agent.body.random);
+    assert.deepEqual(ends, ['own', 'own', 'own', 'own']);
+  } finally { await a.close(); }
+});
+
+test('a page the test\'s context already holds when keploy\'s fixture gets it is the test\'s: its end says seeded, or own with seeding off; a test that takes the context and opens no page says neither', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  const d = await drawsServer();
+  try {
+    for (const [env, want] of [[{}, 'seeded'], [{ KEPLOY_SEED_RANDOM: 'off' }, 'own']]) {
+      const from = j.events.length;
+      const { tests, out } = await playwright(['opened.spec.ts'], { ...keployEnv(a.url), DRAWS_BASE: d.url, ...env });
+      for (const n of ['held page', 'no page']) assert.equal(tests[n].status, 'passed', `${n}: ${out}`);
+      const ends = j.events.slice(from).filter((e) => e.agent && e.agent.path === '/agent/scope/end').map((e) => [e.agent.body.name, e.agent.body.random]);
+      assert.deepEqual(ends, [['held page', want], ['no page', undefined]], `${want}: ${out}`);
+    }
+  } finally { await d.close(); await a.close(); }
+});
+
+test('seeded: keploySeedRandom: false for the whole project asks no seed, says once what that costs, and the browser draws its own', async () => {
+  const j = journal();
+  // An agent that answers a seed even to a begin that asked for none: the
+  // test that opted out still draws the browser's own numbers.
+  const a = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' ? { body: { v: 1, status: 'ok', seed: '0123456789abcdef' } } : undefined));
+  try {
+    const r1 = await drawRun(j, { ...keployEnv(a.url), PW_NOSEED: '1' });
+    const r2 = await drawRun(j, { ...keployEnv(a.url), PW_NOSEED: '1' });
+    for (const n of ['one', 'two', 'again', 'three']) assert.notDeepEqual(r2.drew[n], r1.drew[n], n);
+    for (const r of [r1, r2]) {
+      assert.equal(r.said, 0);
+      assert.deepEqual(r.lines.filter((l) => l.startsWith('keploy:')), [OFF_LINE], r.lines.join('\n'));
+      assert.deepEqual(r.begins.map((b) => [b.random, b.seed]), Array(4).fill(['own', undefined]));
+      assert.deepEqual(r.ends, NAMES.map((n) => [n, 'own']));
+    }
+  } finally { await a.close(); }
+});
+
+test('KEPLOY_SEED_RANDOM=off, or no keploy: the test browser draws its own random numbers; under keploy the worker says once what that costs, without it nothing is said', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  try {
+    for (const [env, said] of [[{ ...keployEnv(a.url), KEPLOY_SEED_RANDOM: 'off' }, [OFF_LINE]], [{ KEPLOY_MOCK_AGENT: undefined, KEPLOY_TEST_PID: undefined }, []]]) {
+      const r1 = await drawRun(j, env);
+      const r2 = await drawRun(j, env);
+      for (const n of ['one', 'two', 'again', 'three']) assert.notDeepEqual(r2.drew[n], r1.drew[n], n);
+      assert.equal(r1.said + r2.said, 0);
+      for (const r of [r1, r2]) assert.deepEqual(r.lines.filter((l) => l.startsWith('keploy:')), said, r.lines.join('\n'));
+    }
+    // Under keploy with it off, each begin says the browser draws its own
+    // and sends no seed, and each end says it did.
+    assert.deepEqual(calls(j).filter((c) => c.path === '/agent/scope/begin').map((c) => [c.body.random, c.body.seed]), Array(8).fill(['own', undefined]));
+    // Unseeded, a test's end sends no note.
+    assert.deepEqual(calls(j).filter((c) => c.path === '/agent/scope/end').map((c) => [c.body.random, c.body.note]), Array(8).fill(['own', undefined]));
+  } finally { await a.close(); }
+});
+
+test('KEPLOY_SEED_RANDOM neither on nor off fails every test, naming it, and the worker claims nothing', async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  const d = await drawsServer();
+  try {
+    const { tests } = await playwright(['seeded.spec.ts'], { ...keployEnv(a.url), KEPLOY_SEED_RANDOM: 'yes', DRAWS_BASE: d.url });
+    assert.equal(Object.keys(tests).length, 4);
+    for (const [k, t] of Object.entries(tests)) {
+      assert.equal(t.status, 'failed', k);
+      assert.match(t.error, /keploy: KEPLOY_SEED_RANDOM="yes" is neither on nor off; set it to off to give the test browser and the test process their own random numbers, or unset it to seed them per test/, k);
+    }
+    assert.deepEqual(calls(j), []);
+  } finally { await d.close(); await a.close(); }
+});
+
+// One run of process.spec.ts: what each test drew in the test process, what
+// code outside every test drew, what the run said, and the seed each begin
+// sent.
+async function processRun(j, env) {
+  const from = j.events.length;
+  const { tests, tmp, out } = await playwright(['process.spec.ts'], env);
+  for (const [k, t] of Object.entries(tests)) assert.equal(t.status, 'passed', `${k}: ${t.error}\n${out}`);
+  const drew = {};
+  for (const n of ['made', 'other', 'mine', 'outside']) drew[n] = JSON.parse(fs.readFileSync(path.join(tmp, `${n}.json`), 'utf8'));
+  // Every line the run's tests said, in no order: the report lists a
+  // describe group's tests before the file's own.
+  const lines = Object.values(tests).map((t) => t.stdout).join('').split('\n').sort();
+  const begins = calls({ events: j.events.slice(from) }).filter((c) => c.path === '/agent/scope/begin').map((c) => c.body);
+  const seeds = Object.fromEntries(begins.map((b) => [b.name.replace(/^own › /, ''), b.seed]));
+  return { drew, lines, seeds, out };
+}
+
+test('seeded: the test process draws Math.random from its test\'s seed in its beforeEach, body and afterEach, so a replay makes the data its recording made; another test, an opted-out one and code outside every test draw others', async () => {
+  const j = journal();
+  const rec = await fakeAgent(j);
+  let kept = {};
+  const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+    ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+  try {
+    const r = await processRun(j, keployEnv(rec.url));
+    kept = r.seeds;
+    // Four draws a test: its beforeEach, two in its body, its afterEach,
+    // each from the stream of the seed keploy answered its begin with.
+    for (const n of ['made', 'other']) {
+      const next = processRandom(r.seeds[n]);
+      assert.deepEqual(r.drew[n], [next(), next(), next(), next()], n);
+    }
+    assert.equal(r.drew.mine.length, 4);
+    assert.equal(r.seeds.mine, undefined);
+    assert.notDeepEqual(r.drew.made, r.drew.other);
+    // Said once each: the seeding at the first seeded test, the cost at the
+    // opted-out one.
+    assert.deepEqual(r.lines.filter((l) => l.startsWith('keploy:')), [SEEDED_LINE, OFF_LINE].sort(), r.out);
+    const p = await processRun(j, keployEnv(rep.url));
+    // The replay's begins sent fresh seeds; keploy answered the recording's.
+    for (const n of ['made', 'other']) {
+      assert.notEqual(p.seeds[n], kept[n], n);
+      assert.deepEqual(p.drew[n], r.drew[n], n);
+    }
+    // The opted-out test and the code after the last test draw the worker's own.
+    assert.notDeepEqual(p.drew.mine, r.drew.mine);
+    assert.notDeepEqual(p.drew.outside.draws, r.drew.outside.draws);
+    for (const x of [r, p]) assert.equal(x.drew.outside.own, true);
+    // A record made again draws new numbers.
+    const r2 = await processRun(j, keployEnv(rec.url));
+    assert.notDeepEqual(r2.drew.made, r.drew.made);
+  } finally { await rep.close(); await rec.close(); }
+});
+
+// One run of faker.spec.ts (CommonJS) and faker-esm.spec.mts (an ES
+// module): what each test made with faker, and the seed each begin sent.
+async function fakerRun(j, env) {
+  const from = j.events.length;
+  const { tests, tmp, out } = await playwright(['faker.spec.ts', 'faker-esm.spec.mts'], env);
+  for (const [k, t] of Object.entries(tests)) assert.equal(t.status, 'passed', `${k}: ${t.error}\n${out}`);
+  const made = {};
+  for (const n of ['made', 'other', 'mine', 'itself', 'outside', 'esm made', 'own']) made[n] = JSON.parse(fs.readFileSync(path.join(tmp, `faker-${n}.json`), 'utf8'));
+  const begins = calls({ events: j.events.slice(from) }).filter((c) => c.path === '/agent/scope/begin').map((c) => c.body);
+  const seeds = Object.fromEntries(begins.map((b) => [b.name.replace(/^own › /, ''), b.seed]));
+  return { made, seeds, out };
+}
+
+test('seeded: faker\'s instances in the test process make from the test\'s seed in its beforeEach, body and afterEach, in a CommonJS test file and an ES module one, so a replay makes the data its recording made, and so do the suite\'s own instances given to seedFaker or made in a test; another test, an opted-out one, a test that seeds faker itself, code outside every test and an own instance not given make others', async () => {
+  const j = journal();
+  const rec = await fakeAgent(j);
+  let kept = {};
+  const rep = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' && c.body.seed
+    ? { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } } : undefined));
+  try {
+    const r = await fakerRun(j, keployEnv(rec.url));
+    kept = r.seeds;
+    // An ID and a name in each of the beforeEach, the body and the afterEach.
+    assert.equal(r.made.made.length, 6);
+    assert.notDeepEqual(r.made.made, r.made.other);
+    assert.equal(r.seeds.mine, undefined);
+    const p = await fakerRun(j, keployEnv(rep.url));
+    for (const n of ['made', 'other', 'esm made']) {
+      assert.notEqual(p.seeds[n], kept[n], n);
+      assert.deepEqual(p.made[n], r.made[n], n);
+    }
+    // The suite's own instances: one given to seedFaker as the file loads and
+    // one made in the test make the recording's data; one not given, its own.
+    assert.notEqual(p.seeds['own instances'], kept['own instances']);
+    assert.equal(r.made['esm made'].length, 3);
+    assert.deepEqual(p.made.own.mine, r.made.own.mine);
+    assert.equal(p.made.own.inTest, r.made.own.inTest);
+    assert.notEqual(p.made.own.notGiven, r.made.own.notGiven);
+    // The opted-out test and the code after the last test make the worker's own.
+    assert.notDeepEqual(p.made.mine, r.made.mine);
+    assert.notDeepEqual(p.made.outside.made, r.made.outside.made);
+    for (const x of [r, p]) assert.equal(x.made.outside.own, true);
+    // A test that seeds an instance itself draws what that seed gives.
+    const { fakerFR } = await import('@faker-js/faker');
+    fakerFR.seed(7);
+    const want = fakerFR.number.int();
+    for (const x of [r, p]) assert.deepEqual(x.made.itself, [want, want]);
+    // A record made again makes new data.
+    const r2 = await fakerRun(j, keployEnv(rec.url));
+    assert.notDeepEqual(r2.made.made, r.made.made);
+    assert.notDeepEqual(r2.made['esm made'], r.made['esm made']);
+    assert.notDeepEqual(r2.made.own.mine, r.made.own.mine);
+  } finally { await rep.close(); await rec.close(); }
+});
+
+test('a worker says once for each reason that it cannot seed faker, however many seeded tests and test files that reason meets', async () => {
+  // Two folders whose tests import a faker keploy cannot seed: one that
+  // exports no instance, one that throws as it loads. The first folder's
+  // two files hold three tests; the second's one file, one. One worker
+  // runs them all, seeded, and a fifth test that imports a faker keploy
+  // seeds.
+  fs.mkdirSync(path.join(PKG, 'test-results'), { recursive: true });
+  const dir = fs.mkdtempSync(path.join(PKG, 'test-results', 'faker-said-'));
+  const j = journal();
+  const a = await fakeAgent(j);
+  try {
+    const fakerIn = (sub, main) => {
+      const d = path.join(dir, sub, 'node_modules', '@faker-js', 'faker');
+      fs.mkdirSync(d, { recursive: true });
+      fs.writeFileSync(path.join(d, 'package.json'), JSON.stringify({ name: '@faker-js/faker', main: 'm.cjs' }));
+      fs.writeFileSync(path.join(d, 'm.cjs'), main);
+    };
+    fakerIn('none', 'exports.x = 1;\n');
+    fakerIn('throws', 'throw new Error(\'this faker cannot load\');\n');
+    const spec = (sub, file, names) => fs.writeFileSync(path.join(dir, sub, file),
+      `import { test } from ${JSON.stringify(path.join(PKG, 'dist'))};\n` +
+      names.map((n) => `test(${JSON.stringify(n)}, () => {});\n`).join(''));
+    spec('none', 'one.spec.ts', ['none one a', 'none one b']);
+    spec('none', 'two.spec.ts', ['none two']);
+    spec('throws', 'three.spec.ts', ['throws three']);
+    // A folder whose tests import the package's own faker, which keploy
+    // seeds: no line.
+    fs.mkdirSync(path.join(dir, 'seeds'));
+    spec('seeds', 'four.spec.ts', ['seeds four']);
+    const config = path.join(dir, 'playwright.config.mjs');
+    fs.writeFileSync(config, 'export default { testDir: \'.\', workers: 1, retries: 0, reporter: [[\'json\']], ' +
+      `outputDir: ${JSON.stringify(path.join(dir, 'out'))}, projects: [{ name: 'p1' }] };\n`);
+    const { tests, out } = await playwright([], keployEnv(a.url), PKG, config);
+    assert.deepEqual(Object.keys(tests).sort(), ['none one a', 'none one b', 'none two', 'seeds four', 'throws three'], out);
+    for (const [k, t] of Object.entries(tests)) assert.equal(t.status, 'passed', `${k}: ${t.error}\n${out}`);
+    const seeds = calls(j).filter((c) => c.path === '/agent/scope/begin').map((c) => c.body.seed);
+    assert.equal(seeds.length, 5);
+    for (const sd of seeds) assert.match(sd, /^[0-9a-f]{32}$/);
+    const said = Object.values(tests).map((t) => t.stdout).join('').split('\n').filter((l) => l.includes('cannot seed it')).sort();
+    assert.deepEqual(said, [
+      fakerLine('it exports no instance keploy knows how to seed (faker 8, 9 and 10 do)'),
+      fakerLine('this faker cannot load'),
+    ].sort(), out);
+  } finally {
+    await a.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the test process draws its own Math.random when keploy answers no seed, each test saying so, or with KEPLOY_SEED_RANDOM=off, the worker saying once what that costs', async () => {
+  const j = journal();
+  const none = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' ? { body: { v: 1, status: 'ok' } } : undefined));
+  const rec = await fakeAgent(j);
+  try {
+    for (const [env, said] of [
+      [keployEnv(none.url), [unseededLine('made'), unseededLine('other'), OFF_LINE]],
+      [{ ...keployEnv(rec.url), KEPLOY_SEED_RANDOM: 'off' }, [OFF_LINE]],
+    ]) {
+      const r1 = await processRun(j, env);
+      const r2 = await processRun(j, env);
+      for (const n of ['made', 'other', 'mine']) assert.notDeepEqual(r2.drew[n], r1.drew[n], n);
+      for (const r of [r1, r2]) {
+        assert.equal(r.drew.outside.own, true);
+        assert.deepEqual(r.lines.filter((l) => l.startsWith('keploy:')), said.sort(), r.out);
+      }
+    }
+  } finally { await rec.close(); await none.close(); }
+});
+
+// One run of process-order.spec.ts (spec args after the file, as --grep):
+// what each test drew, each test's status, the lines its tests said, and the
+// seed each begin sent.
+const ORDER = ['first', 'second', 'third'];
+async function orderRun(j, env, args = []) {
+  const from = j.events.length;
+  const { tests, tmp, out } = await playwright(['process-order.spec.ts', ...args], env);
+  const drew = {};
+  for (const n of ORDER) {
+    const f = path.join(tmp, `${n}.json`);
+    drew[n] = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : null;
+  }
+  const status = Object.fromEntries(Object.entries(tests).map(([k, t]) => [k, t.status]));
+  const lines = Object.values(tests).map((t) => t.stdout).join('').split('\n').filter((l) => l.startsWith('keploy:')).sort();
+  const seeds = Object.fromEntries(calls({ events: j.events.slice(from) }).filter((c) => c.path === '/agent/scope/begin').map((c) => [c.body.name, c.body.seed]));
+  return { drew, status, lines, seeds, out };
+}
+
+for (const helper of ['step', 'stack']) {
+  test(`seeded: a test's draws in the test process do not depend on which tests its worker ran before it, when its helper file's source map is parsed in it (${helper === 'step' ? 'test.step' : 'an Error\'s stack'}): replayed alone, after keploy set an earlier test aside, or after its record's first test failed, it draws what its recording drew`, async () => {
+    const j = journal();
+    const rec = await fakeAgent(j);
+    let kept = {};
+    // A replay answers each begin the recording's seed, and sets aside the
+    // tests named in skip, as keploy does a quarantined one.
+    let skip = [];
+    const rep = await fakeAgent(j, (c) => {
+      if (c.path !== '/agent/scope/begin') return undefined;
+      if (skip.includes(c.body.name)) return { body: { v: 1, status: 'ok', action: 'skip', reason: 'flaky/request_changed: the body changed' } };
+      return { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } };
+    });
+    const env = (url, x = {}) => ({ ...keployEnv(url), HELPER: helper, ...x });
+    const same = (p, r, names) => Object.fromEntries(names.map((n) => [n, JSON.stringify(p.drew[n]) === JSON.stringify(r.drew[n]) ? 'same' : 'other']));
+    try {
+      const r = await orderRun(j, env(rec.url));
+      assert.deepEqual(r.status, { first: 'passed', second: 'passed', third: 'passed' }, r.out);
+      // Each test's two draws are its seed's stream's first two: the
+      // first test, which parsed the helper's map, too.
+      for (const n of ORDER) {
+        const next = processRandom(r.seeds[n]);
+        assert.deepEqual(r.drew[n], [next(), next()], n);
+      }
+      // Seeded, with no test opting out: the seeding line once, nothing else.
+      assert.deepEqual(r.lines, [SEEDED_LINE], r.out);
+      kept = r.seeds;
+      const alone = await orderRun(j, env(rep.url), ['--grep', 'third']);
+      assert.deepEqual(alone.status, { third: 'passed' }, alone.out);
+      assert.deepEqual(same(alone, r, ['third']), { third: 'same' });
+      skip = ['first'];
+      const aside = await orderRun(j, env(rep.url));
+      assert.deepEqual(aside.status, { first: 'skipped', second: 'passed', third: 'passed' }, aside.out);
+      assert.deepEqual(same(aside, r, ['second', 'third']), { second: 'same', third: 'same' });
+      skip = [];
+      // A record whose first test fails runs the rest in a new worker; its
+      // replay, where the first passes, runs all three in one.
+      const rf = await orderRun(j, env(rec.url, { FAIL_FIRST: '1' }));
+      assert.deepEqual(rf.status, { first: 'failed', second: 'passed', third: 'passed' }, rf.out);
+      kept = rf.seeds;
+      const pf = await orderRun(j, env(rep.url));
+      assert.deepEqual(pf.status, { first: 'passed', second: 'passed', third: 'passed' }, pf.out);
+      assert.deepEqual(same(pf, rf, ['second', 'third']), { second: 'same', third: 'same' });
+    } finally { await rep.close(); await rec.close(); }
+  });
+}
+
+// One run of process-worker.spec.ts, as orderRun runs process-order's.
+async function workerRun(j, env, args = []) {
+  const from = j.events.length;
+  const { tests, tmp, out } = await playwright(['process-worker.spec.ts', ...args], env);
+  const drew = {};
+  for (const n of [...ORDER, 'broken', 'pst']) {
+    const f = path.join(tmp, `${n}.json`);
+    drew[n] = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : null;
+  }
+  const status = Object.fromEntries(Object.entries(tests).map(([k, t]) => [k, t.status]));
+  const seeds = Object.fromEntries(calls({ events: j.events.slice(from) }).filter((c) => c.path === '/agent/scope/begin').map((c) => [c.body.name, c.body.seed]));
+  return { drew, status, seeds, tests, out };
+}
+
+test('seeded: a worker fixture set up in the first test that asks for it draws the worker\'s own Math.random, so a test draws what its recording drew when replayed alone or after keploy set an earlier test aside; a test fixture draws from its test\'s stream', async () => {
+  const j = journal();
+  const rec = await fakeAgent(j);
+  let kept = {};
+  let skip = [];
+  const rep = await fakeAgent(j, (c) => {
+    if (c.path !== '/agent/scope/begin') return undefined;
+    if (skip.includes(c.body.name)) return { body: { v: 1, status: 'ok', action: 'skip', reason: 'flaky/request_changed: the body changed' } };
+    return { body: { v: 1, status: 'ok', ...(kept[c.body.name] ? { seed: kept[c.body.name] } : {}) } };
+  });
+  const same = (p, r, names) => Object.fromEntries(names.map((n) => [n, JSON.stringify(p.drew[n]) === JSON.stringify(r.drew[n]) ? 'same' : 'other']));
+  try {
+    for (const how of ['extend', 'use']) {
+      const env = (url) => ({ ...keployEnv(url), USE_ACCOUNT: how === 'use' ? '1' : undefined });
+      const r = await workerRun(j, env(rec.url));
+      assert.deepEqual(r.status, { first: 'passed', second: 'passed', third: 'passed' }, r.out);
+      // Each test's draws are its stream's first ones: the first test's
+      // lead (a test fixture) first, then its body's; account (set up in
+      // the first test) and team (in the third) take none of them.
+      const firsts = (n, k) => { const next = processRandom(r.seeds[n]); return Array.from({ length: k }, () => next()); };
+      const [l, a, b] = firsts('first', 3);
+      assert.deepEqual(r.drew.first, [`lead-${l}`, a, b], how);
+      assert.deepEqual(r.drew.second, firsts('second', 2), how);
+      // A plain value and an option are given as they were written.
+      assert.deepEqual(r.drew.third, [...firsts('third', 2), 'a', 'x'], how);
+      // Playwright names each fixture at the line that registered it, in the
+      // spec, not in this package.
+      // So it is through use with no formatter set and a stack trace limit
+      // of 0; extend and use leave Error.prepareStackTrace and the limit as
+      // they found them.
+      const line = how === 'use' ? 28 : 15;
+      assert.equal(r.tests.first.at['Fixture "account"'], `process-worker.spec.ts:${line}`, how);
+      assert.equal(r.tests.third.at['Fixture "team"'], 'process-worker.spec.ts:15', how);
+      assert.deepEqual(r.drew.pst, { extend: { same: true, limit: true }, ...(how === 'use' ? { use: { absent: true, limit: true } } : {}) }, how);
+      if (how === 'use') continue;
+      kept = r.seeds;
+      for (const n of ['second', 'third']) {
+        const alone = await workerRun(j, env(rep.url), ['--grep', n]);
+        assert.deepEqual(alone.status, { [n]: 'passed' }, alone.out);
+        assert.deepEqual(same(alone, r, [n]), { [n]: 'same' });
+      }
+      skip = ['first'];
+      const aside = await workerRun(j, env(rep.url));
+      assert.deepEqual(aside.status, { first: 'skipped', second: 'passed', third: 'passed' }, aside.out);
+      assert.deepEqual(same(aside, r, ['second', 'third']), { second: 'same', third: 'same' });
+      skip = [];
+    }
+    // A worker fixture that fails before use() leaves the rest of its test
+    // (its afterEach) drawing the test's stream.
+    const bk = await workerRun(j, { ...keployEnv(rec.url), BROKEN: '1' }, ['--grep', 'broken']);
+    assert.deepEqual(bk.status, { broken: 'failed' }, bk.out);
+    assert.deepEqual(bk.drew.broken, [processRandom(bk.seeds.broken)()]);
+  } finally { await rep.close(); await rec.close(); }
+});
+
+test('the test process draws its own Math.random when keploy answers no seed and no test opts out: each test says so, and nothing else is said', async () => {
+  const j = journal();
+  const none = await fakeAgent(j, (c) => (c.path === '/agent/scope/begin' ? { body: { v: 1, status: 'ok' } } : undefined));
+  try {
+    const r1 = await orderRun(j, { ...keployEnv(none.url), HELPER: 'step' });
+    const r2 = await orderRun(j, { ...keployEnv(none.url), HELPER: 'step' });
+    for (const n of ORDER) assert.notDeepEqual(r2.drew[n], r1.drew[n], n);
+    for (const r of [r1, r2]) assert.deepEqual(r.lines, ORDER.map((n) => unseededLine(n)).sort(), r.out);
+  } finally { await none.close(); }
+});
+
+test('seeded: after a test that throws, and after one that times out, the worker draws its own Math.random again', async () => {
+  const j = journal();
+  const rec = await fakeAgent(j);
+  try {
+    const { tests, tmp, out } = await playwright(['process-ends.spec.ts'], keployEnv(rec.url));
+    assert.deepEqual(Object.fromEntries(Object.entries(tests).map(([k, t]) => [k, t.status])), { throws: 'failed', 'times out': 'timedOut' }, out);
+    for (const n of ['after throws', 'after times out']) {
+      assert.deepEqual(JSON.parse(fs.readFileSync(path.join(tmp, `${n}.json`), 'utf8')), { own: true }, n);
+    }
+    // Both were seeded: each began with a seed.
+    const begins = calls(j).filter((c) => c.path === '/agent/scope/begin').map((c) => c.body);
+    assert.deepEqual(begins.map((b) => [b.name, b.random, /^[0-9a-f]{32}$/.test(b.seed)]), [['throws', 'seeded', true], ['times out', 'seeded', true]]);
+  } finally { await rec.close(); }
+});
+
+// A route of the test's own page that takes itself off as it gets a Web
+// Worker's script load (unroute, unrouteAll with each behavior), then
+// answers it (Playwright sent it on already: the page has no route left),
+// and unrouteAll's 'wait' from the test while the route holds the load
+// (unroute.spec.ts): seeded, each test fails with Playwright's own error,
+// or passes, as with seeding off; the app's server is asked for each
+// worker's script once, never with keploy's mark; seeded, the worker of each
+// test draws its seeding's numbers. Each test ends once its worker's
+// message has come and its route's answer has ended, and one that fails
+// throws its route's error then, so it ends after its worker's loads, as
+// the README's next step for a request the browser starts as Playwright
+// closes a seeded test's context says.
+for (const engine of ENGINES) {
+  test(`seeded, in ${engine}: a page route that takes itself off (unroute, unrouteAll with each behavior), then continues, fulfills or aborts a Web Worker's script load, fails the test with Playwright's own error, as with seeding off (after 'ignoreErrors' it passes), one that falls back passes, and unrouteAll's 'wait' waits for the route's continue; the app's server is asked for each script once, never with the mark, and each worker runs, seeded`, async () => {
+    // The tests that pass; every test's worker's message is kept.
+    const passing = ['unroute then fallback', 'unrouteAll ignoreErrors then abort', 'unrouteAll wait then continue'];
+    const all = ['unroute then continue', 'unrouteAll default then fulfill', ...passing];
+    const j = journal();
+    const rec = await fakeAgent(j);
+    try {
+      const runs = {};
+      for (const mode of ['seeded', 'off']) {
+        const d = await drawsServer();
+        const from = j.events.length;
+        try {
+          const { tests, tmp, out } = await playwright(['unroute.spec.ts'], { ...keployEnv(rec.url), PW_BROWSER: engine, DRAWS_BASE: d.url, ...(mode === 'off' ? { KEPLOY_SEED_RANDOM: 'off' } : {}) });
+          const begins = j.events.slice(from).filter((e) => e.agent && e.agent.path === '/agent/scope/begin').map((e) => e.agent.body);
+          runs[mode] = { tests, tmp, out, seen: d.seen.slice(), seeds: Object.fromEntries(begins.map((b) => [b.name, b.seed])) };
+        } finally { await d.close(); }
+      }
+      for (const mode of ['seeded', 'off']) {
+        const { tests, tmp, out, seen } = runs[mode];
+        const c = tests['unroute then continue'];
+        assert.equal(c.status, 'failed', `${mode}\n${out}`);
+        assert.match(c.error, /route\.continue: Route is already handled!/, `${mode}: ${c.error}`);
+        const u = tests['unrouteAll default then fulfill'];
+        assert.equal(u.status, 'failed', `${mode}\n${out}`);
+        assert.match(u.error, /route\.fulfill: Route is already handled!/, `${mode}: ${u.error}`);
+        for (const title of passing) {
+          assert.equal(tests[title].status, 'passed', `${mode} ${title}: ${tests[title].error}\n${out}`);
+        }
+        for (const title of all) {
+          const got = JSON.parse(fs.readFileSync(path.join(tmp, `${title}.json`), 'utf8'));
+          assert.equal(got.kind, 'pw', `${mode} ${title}`);
+          assert.match(got.href, /^http:\/\/127\.0\.0\.1:\d+\/ov\/pw\.js$/, `${mode} ${title}`);
+        }
+        assert.deepEqual(seen.filter((u) => u.startsWith('/ov/')), Array(5).fill('/ov/pw.js'), mode);
+        assert.deepEqual(seen.filter((u) => u.includes('__keploy_worker')), [], mode);
+      }
+      for (const title of all) {
+        const [mark] = onceMarks(runs.seeded.seeds[title], [['/ov/pw.js', 'w']]);
+        const got = JSON.parse(fs.readFileSync(path.join(runs.seeded.tmp, `${title}.json`), 'utf8'));
+        assert.deepEqual(got.draws, workerAt('http://h/ov/pw.js', workerScript(mark.token, 0, 'w')).draws(), title);
+      }
+    } finally { await rec.close(); }
   });
 }

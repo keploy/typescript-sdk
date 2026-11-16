@@ -8,9 +8,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { AgentClient, KeployError } from '../dist/agent.js';
 import { decide } from '../dist/join.js';
-import { Inflight } from '../dist/settle.js';
+import { Inflight, workersScript } from '../dist/settle.js';
+import { markWorker } from '../dist/random.js';
 import { EventEmitter } from 'node:events';
-import { testRef, outcomeOf, sourceOf, keployText } from '../dist/index.js';
+import vm from 'node:vm';
+import { testRef, outcomeOf, sourceOf, keployText, runAgain } from '../dist/index.js';
 
 // One fake agent answering every call with answer(path, body).
 async function agent(answer) {
@@ -45,13 +47,31 @@ test('the client sends the token and the protocol body, and takes v1 answers', a
     const c = new AgentClient(a.url + '/', 'tok');
     await c.claim('chromium', '/proj');
     await c.begin({ name: 'g › a', file: 'tests/a.spec.ts', project: 'chromium' });
+    await c.begin({ name: 'g › b', file: 'tests/a.spec.ts' }, 'seeded');
+    await c.begin({ name: 'g › c', file: 'tests/a.spec.ts' }, 'own');
+    await c.begin({ name: 'g › d', file: 'tests/a.spec.ts' }, 'seeded', '0123abcd');
     await c.end({ name: 'g › a', file: 'tests/a.spec.ts', project: 'chromium' }, 'passed');
+    await c.end({ name: 'g › d', file: 'tests/a.spec.ts' }, 'failed', 'own');
     assert.deepEqual(a.calls.map((x) => [x.path, x.auth, x.body]), [
       ['/agent/instance', 'Bearer tok', { key: 'chromium', dir: '/proj' }],
       ['/agent/scope/begin', 'Bearer tok', { name: 'g › a', file: 'tests/a.spec.ts', project: 'chromium', canSkip: true }],
+      ['/agent/scope/begin', 'Bearer tok', { name: 'g › b', file: 'tests/a.spec.ts', canSkip: true, random: 'seeded' }],
+      ['/agent/scope/begin', 'Bearer tok', { name: 'g › c', file: 'tests/a.spec.ts', canSkip: true, random: 'own' }],
+      ['/agent/scope/begin', 'Bearer tok', { name: 'g › d', file: 'tests/a.spec.ts', canSkip: true, random: 'seeded', seed: '0123abcd' }],
       ['/agent/scope/end', 'Bearer tok', { name: 'g › a', file: 'tests/a.spec.ts', project: 'chromium', outcome: 'passed' }],
+      ['/agent/scope/end', 'Bearer tok', { name: 'g › d', file: 'tests/a.spec.ts', outcome: 'failed', random: 'own' }],
     ]);
   } finally { await a.close(); }
+});
+
+test('a begin\'s answer gives the seed keploy answered, or none', async () => {
+  for (const [body, seed] of [[{ v: 1, status: 'ok', seed: '0123abcd' }, '0123abcd'], [{ v: 1, status: 'ok', seed: '' }, ''], [{ v: 1, status: 'ok' }, undefined]]) {
+    const a = await agent(() => ({ body }));
+    try {
+      const b = await new AgentClient(a.url, '').begin({ name: 'a', file: 'a.spec.ts' }, 'seeded', 'ffffffff');
+      assert.equal(b.seed, seed);
+    } finally { await a.close(); }
+  }
 });
 
 test('no token: no authorization header', async () => {
@@ -76,6 +96,12 @@ test('every answer the client cannot trust is an error', async () => {
     [{ status: 302, body: '' }, /answered 302/],
     [{ body: { v: 1, status: 'busy' } }, /begin of a with status "busy"/],
     [{ body: { v: 1, status: 'ok', action: 'fail' } }, /begin of a with the unknown action "fail"/],
+    // A seed keploy would not keep, or one that is no string.
+    [{ body: { v: 1, status: 'ok', seed: 'not-hex-at-all' } }, /^keploy: the keploy agent answered the begin of a with the seed "not-hex-at-all", which is no seed keploy keeps \(8 to 64 lower-case hex digits\)$/],
+    [{ body: { v: 1, status: 'ok', seed: '0123ABCD' } }, /with the seed "0123ABCD", which is no seed/],
+    [{ body: { v: 1, status: 'ok', seed: '0123abc' } }, /with the seed "0123abc", which is no seed/],
+    [{ body: { v: 1, status: 'ok', seed: 12345678 } }, /with the seed "12345678", which is no seed/],
+    [{ body: { v: 1, status: 'ok', seed: null } }, /with the seed "null", which is no seed/],
   ];
   for (const [answer, re] of cases) {
     const a = await agent(() => answer);
@@ -131,6 +157,63 @@ test('a claim answered with a plain 404 names the route and the switch keploy sp
   try {
     await rejects(new AgentClient(a.url, '').claim('p', '/d'), /^keploy: the keploy agent answered 500 Internal Server Error to \/agent\/instance: "boom"$/);
   } finally { await a.close(); }
+});
+
+test('a begin, an end or a refusal answered with a plain 404 names the route and the switch, as the claim does; keploy\'s own 404 shows keploy\'s reason', async () => {
+  const t = { name: 'g › a', file: 'a.spec.ts' };
+  const proven = (route, what) => new RegExp(`^keploy: this keploy agent answered 404 to POST ${route.replace(/\//g, '\\/')}, so ${what}: ` +
+    'keploy speaks @keploy\\/playwright\'s wire, scope protocol v1, only when it runs with KEPLOY_PROVEN=1 ' +
+    '\\(KEPLOY_PROVEN=1 keploy mock record\\|replay -c "npx playwright test --workers=1 --retries=0"\\); ' +
+    'a keploy run without KEPLOY_PROVEN=1, or one from before scope protocol v1, answers 404 there$');
+  const calls = [
+    [(c) => c.begin(t), proven('/agent/scope/begin', 'g › a cannot begin')],
+    [(c) => c.end(t, 'passed'), proven('/agent/scope/end', 'g › a cannot end')],
+    [(c) => c.refuse('test_run_again', 'm', 'r'), proven('/agent/refusal', 'keploy cannot be told of the refusal')],
+  ];
+  for (const [call, re] of calls) {
+    let a = await agent(() => ({ status: 404, body: '404 page not found' }));
+    try {
+      await rejects(call(new AgentClient(a.url, '')), re);
+    } finally { await a.close(); }
+    a = await agent(() => ({ status: 404, body: { error: 'not_open', message: 'g › a is not open', remedy: 'begin it first' } }));
+    try {
+      await rejects(call(new AgentClient(a.url, '')), /^keploy: g › a is not open \(begin it first\)$/);
+    } finally { await a.close(); }
+    // Any other plain answer keeps the generic text.
+    a = await agent(() => ({ status: 500, body: 'boom' }));
+    try {
+      await rejects(call(new AgentClient(a.url, '')), /^keploy: the keploy agent answered 500 Internal Server Error to \/agent\/[a-z/]+: "boom"$/);
+    } finally { await a.close(); }
+  }
+});
+
+test('refuse sends the code, the message and the remedy, and takes only ok', async () => {
+  let a = await agent(() => ({ body: { v: 1, status: 'ok' } }));
+  try {
+    await new AgentClient(a.url, 'tok').refuse('test_run_again', 'Playwright retried a', 'run with --retries=0');
+    assert.deepEqual(a.calls.map((x) => [x.path, x.auth, x.body]),
+      [['/agent/refusal', 'Bearer tok', { code: 'test_run_again', message: 'Playwright retried a', remedy: 'run with --retries=0' }]]);
+  } finally { await a.close(); }
+  for (const body of [{ v: 1 }, { v: 1, status: 'busy' }]) {
+    a = await agent(() => ({ body }));
+    try {
+      await rejects(new AgentClient(a.url, '').refuse('test_run_again', 'm', 'r'), /^keploy: the keploy agent answered the refusal test_run_again with status "(busy)?"$/);
+    } finally { await a.close(); }
+  }
+});
+
+test('runAgain: a retry and a repeat of --repeat-each are refused, naming the test by its keploy ID; a first run is not', () => {
+  const ref = { name: 'g › a', file: 'tests/a.spec.ts', project: 'chromium' };
+  assert.equal(runAgain(ref, { retry: 0, repeatEachIndex: 0 }), null);
+  const retry = { message: 'Playwright retried chromium::tests/a.spec.ts::g › a, and keploy runs each test once in a run',
+    remedy: 'run the suite with --retries=0, and with no retries in its config or its test.describe.configure' };
+  assert.deepEqual(runAgain(ref, { retry: 1, repeatEachIndex: 0 }), retry);
+  // The message names no attempt: the agent keeps one refusal per test.
+  assert.deepEqual(runAgain(ref, { retry: 2, repeatEachIndex: 0 }), retry);
+  assert.deepEqual(runAgain(ref, { retry: 1, repeatEachIndex: 1 }), retry);
+  assert.deepEqual(runAgain({ name: 'g › a', file: 'tests/a.spec.ts' }, { retry: 0, repeatEachIndex: 1 }), {
+    message: 'Playwright ran tests/a.spec.ts::g › a again for --repeat-each, and keploy runs each test once in a run',
+    remedy: 'run the suite without --repeat-each, and with no repeatEach in its config' });
 });
 
 test('an unreachable agent is an error', async () => {
@@ -194,6 +277,555 @@ async function ticks() {
   for (let i = 0; i < 5; i++) await Promise.resolve();
 }
 
+// A fake Playwright route, as far as a handler drives it: _handlingPromise
+// is set while a handler may still answer it (settle reads it no more);
+// fulfill throws as Playwright's does when the browser refuses the answer
+// (refuse: WebKit's redirect, the route still the handler's), and each
+// call throws when the route was already handled (fallback hands it to the
+// next route, as Playwright's does). calls: each fulfill, continue and
+// abort it got, with what it was given.
+function fakeRoute(req) {
+  const route = {
+    _handlingPromise: {},
+    calls: [],
+    request: () => req,
+    async fulfill(o = {}) {
+      route.calls.push(['fulfill', o]);
+      if (!route._handlingPromise) throw new Error('Route is already handled!');
+      if (o.refuse) throw new Error('Cannot fulfill with redirect status: 302');
+      route._handlingPromise = null;
+    },
+    async continue(o) {
+      route.calls.push(['continue', o]);
+      if (!route._handlingPromise) throw new Error('Route is already handled!');
+      route._handlingPromise = null;
+    },
+    async abort(code) {
+      route.calls.push(['abort', code]);
+      if (!route._handlingPromise) throw new Error('Route is already handled!');
+      route._handlingPromise = null;
+    },
+    async fallback() {
+      if (!route._handlingPromise) throw new Error('Route is already handled!');
+      route._handlingPromise = null;
+    },
+  };
+  return route;
+}
+// A page or context with Playwright's _onRoute, which keeps each route it
+// is handed (seen) and runs target.handler on it, as Playwright runs the
+// target's routes: a handler's throw rejects it; a page's handler that
+// answers 'next' hands the route on to its context's (ctx).
+function withRoutes(target, ctx = null) {
+  target.seen = [];
+  target._onRoute = async function (route) {
+    target.seen.push(route);
+    const next = target.handler ? await target.handler(route) : undefined;
+    if (next === 'next' && ctx !== null) await ctx._onRoute(route);
+  };
+  return target;
+}
+
+test('settle: a request a route of the test\'s answered (fulfill returned) has ended, though the browser reports no end; one whose handler throws before a continue() or abort() of its route returned (the browser refused its answer, the handler fell back, its continue() failed, or nothing answered it) is not waited for; one the handler holds, sent on or aborted, before or after a refused answer, is', async () => {
+  const ctx = withRoutes(fakeContext());
+  const inflight = new Inflight(ctx);
+  const page = withRoutes(new EventEmitter());
+  ctx.emit('page', page);
+  const sent = async (handler) => {
+    const r = fakeRequest(page);
+    ctx.emit('request', r);
+    const route = fakeRoute(r);
+    page.handler = handler;
+    const done = page._onRoute(route).then(() => 'returned', (e) => e.message);
+    return { r, route, done };
+  };
+  // Answered: fulfill returned.
+  const a = await sent((route) => route.fulfill({ status: 302 }));
+  assert.equal(await a.done, 'returned');
+  assert.deepEqual(page.seen, [a.route]);
+  await ticks();
+  assert.equal(inflight.size, 0);
+  // Refused, and the handler throws: held by the route, sent nowhere.
+  const b = await sent((route) => route.fulfill({ refuse: true }));
+  assert.match(await b.done, /Cannot fulfill/);
+  assert.equal(inflight.size, 0);
+  // A handler that throws before it answers.
+  const c = await sent(async () => { throw new Error('the handler'); });
+  assert.equal(await c.done, 'the handler');
+  assert.equal(inflight.size, 0);
+  // Refused, and the handler catches it and sends the request on.
+  const d = await sent(async (route) => { await route.fulfill({ refuse: true }).catch(() => {}); await route.continue(); });
+  assert.equal(await d.done, 'returned');
+  assert.equal(inflight.size, 1);
+  ctx.emit('requestfinished', d.r);
+  assert.equal(inflight.size, 0);
+  // Refused, and the handler returns holding it: it may still send it on.
+  const e = await sent((route) => route.fulfill({ refuse: true }).catch(() => {}));
+  assert.equal(await e.done, 'returned');
+  assert.equal(inflight.size, 1);
+  await e.route.continue();
+  ctx.emit('requestfinished', e.r);
+  assert.equal(inflight.size, 0);
+  // Sent on, then the handler throws (a fulfill Playwright refuses): in flight.
+  const f = await sent(async (route) => { await route.continue(); await route.fulfill({}); });
+  assert.match(await f.done, /already handled/);
+  assert.equal(inflight.size, 1);
+  ctx.emit('requestfinished', f.r);
+  assert.equal(inflight.size, 0);
+  // Fallen back, then the handler throws: Playwright hands the request to no
+  // other route and sends it nowhere.
+  const g = await sent(async (route) => { await route.fallback(); throw new Error('after the fallback'); });
+  assert.equal(await g.done, 'after the fallback');
+  assert.equal(inflight.size, 0);
+  // Fallen back, then a continue() that fails (already handled), which the
+  // handler throws: sent nowhere.
+  const h = await sent(async (route) => { await route.fallback(); await route.continue(); });
+  assert.match(await h.done, /already handled/);
+  assert.equal(inflight.size, 0);
+  // Aborted, then the handler throws: the browser fails the request, and it
+  // ends as the browser reports that.
+  const i = await sent(async (route) => { await route.abort(); throw new Error('after the abort'); });
+  assert.equal(await i.done, 'after the abort');
+  assert.equal(inflight.size, 1);
+  ctx.emit('requestfailed', i.r);
+  assert.equal(inflight.size, 0);
+});
+
+test('settle: a route the page\'s routes hand on reaches its context\'s, watched there too: one the context\'s handler answers has ended; one it still holds when it throws is not waited for', async () => {
+  const ctx = withRoutes(fakeContext());
+  const inflight = new Inflight(ctx);
+  const page = withRoutes(new EventEmitter(), ctx);
+  ctx.emit('page', page);
+  page.handler = () => 'next';
+  for (const [handler, ended] of [[(route) => route.fulfill({}), 'returned'], [(route) => route.fulfill({ refuse: true }), 'Cannot fulfill with redirect status: 302']]) {
+    const r = fakeRequest(page);
+    ctx.emit('request', r);
+    const route = fakeRoute(r);
+    ctx.handler = handler;
+    assert.equal(await page._onRoute(route).then(() => 'returned', (e) => e.message), ended);
+    assert.equal(ctx.seen.at(-1), route);
+    assert.equal(inflight.size, 0, ended);
+  }
+  // The context alone (a service worker's request).
+  const r = fakeRequest(null);
+  ctx.emit('request', r);
+  ctx.handler = (route) => route.fulfill({});
+  await ctx._onRoute(fakeRoute(r));
+  assert.equal(inflight.size, 0);
+});
+
+test('settle: the watched route\'s fulfill, continue and abort reach Playwright\'s own with what the test gave them (an abort\'s error code, a continue\'s options, a fulfill\'s answer), on a page\'s route and on its context\'s', async () => {
+  const ctx = withRoutes(fakeContext());
+  const inflight = new Inflight(ctx);
+  const page = withRoutes(new EventEmitter(), ctx);
+  ctx.emit('page', page);
+  const given = [['abort', 'accessdenied'], ['abort', undefined], ['continue', { url: 'http://h/m.js', headers: { 'x-auth': 'k' } }], ['continue', undefined], ['fulfill', { status: 201, body: 'b' }]];
+  for (const on of ['page', 'context']) {
+    for (const [name, arg] of given) {
+      const r = fakeRequest(page);
+      ctx.emit('request', r);
+      const route = fakeRoute(r);
+      const handler = (rt) => rt[name](arg);
+      page.handler = on === 'page' ? handler : () => 'next';
+      ctx.handler = handler;
+      assert.equal(await page._onRoute(route).then(() => 'returned', (e) => e.message), 'returned');
+      assert.deepEqual(route.calls, [[name, arg]], `${on} ${name} ${JSON.stringify(arg)}`);
+    }
+  }
+  // Each one aborted or sent on is in flight until the browser reports its
+  // end; each fulfilled one has ended.
+  assert.equal(inflight.size, 8);
+});
+
+test('settle: a page or context with no _onRoute (a Playwright without it) gets none, and its requests are waited for as before', async () => {
+  const ctx = fakeContext();
+  const inflight = new Inflight(ctx);
+  const page = new EventEmitter();
+  ctx.emit('page', page);
+  assert.equal('_onRoute' in ctx, false);
+  assert.equal('_onRoute' in page, false);
+  const r = fakeRequest(page);
+  ctx.emit('request', r);
+  assert.equal(inflight.size, 1);
+});
+
+test('settle: of two Inflights on one context (Playwright reuses it between tests), the newest watches its routes, a handler that throws holding its request too; its _onRoute is wrapped once', async () => {
+  const ctx = withRoutes(fakeContext());
+  const first = new Inflight(ctx);
+  const wrapped = ctx._onRoute;
+  const second = new Inflight(ctx);
+  assert.equal(ctx._onRoute, wrapped);
+  const r = fakeRequest(null);
+  ctx.emit('request', r);
+  assert.equal(first.size, 1);
+  assert.equal(second.size, 1);
+  const route = fakeRoute(r);
+  await ctx._onRoute(route);
+  assert.deepEqual(ctx.seen, [route]);
+  await route.fulfill({});
+  assert.equal(second.size, 0);
+  assert.equal(first.size, 1);
+  // The second test's handler throws while its route holds the request: the
+  // newest Inflight ends it, and the first's is left as it was.
+  const held = fakeRequest(null);
+  ctx.emit('request', held);
+  assert.equal(second.size, 1);
+  assert.equal(first.size, 2);
+  ctx.handler = async () => { throw new Error('the second test\'s handler'); };
+  assert.equal(await ctx._onRoute(fakeRoute(held)).then(() => 'returned', (e) => e.message), 'the second test\'s handler');
+  assert.equal(second.size, 0);
+  assert.equal(first.size, 2);
+});
+
+test('settle: a call keploy\'s route answered has ended, though the browser reports no end (Chromium, a Shared Worker\'s script); one reported after its answer is not waited for', async () => {
+  const ctx = fakeContext();
+  const inflight = new Inflight(ctx);
+  const page = new EventEmitter();
+  ctx.emit('page', page);
+  const script = fakeRequest(page);
+  const other = fakeRequest(page);
+  ctx.emit('request', script);
+  ctx.emit('request', other);
+  let settled = false;
+  inflight.settled().then(() => { settled = true; });
+  inflight.answered(script);
+  await ticks();
+  assert.equal(inflight.size, 1);
+  assert.equal(settled, false);
+  ctx.emit('requestfinished', other);
+  await ticks();
+  assert.equal(settled, true);
+  const late = fakeRequest(page);
+  inflight.answered(late);
+  ctx.emit('request', late);
+  assert.equal(inflight.size, 0);
+});
+
+test('settle: a request whose URL carries keploy\'s mark for a Shared Worker\'s script, classic or module, is not waited for, whichever route answers it (a test\'s own that continues it: no answered); a Web Worker\'s, its seeding\'s, a navigation and a malformed mark are', async () => {
+  const ctx = fakeContext();
+  const inflight = new Inflight(ctx);
+  const page = new EventEmitter();
+  ctx.emit('page', page);
+  const f = { page: () => page };
+  const call = (url, nav = false) => ({ frame: () => f, isNavigationRequest: () => nav, method: () => 'GET', url: () => url });
+  const t = 'cd'.repeat(16);
+  ctx.emit('request', call(markWorker('http://h/s.js', 's', t)));
+  ctx.emit('request', call(markWorker('http://h/x.js?q=1#a', 'x', t)));
+  assert.equal(inflight.size, 0);
+  const waited = [markWorker('http://h/w.js', 'w', t), markWorker('http://h/m.js', 'm', t), markWorker('http://h/m.js', 'p', t, 0), 'http://h/s.js?__keploy_worker=s.zz']
+    .map((u) => call(u)).concat(call(markWorker('http://h/s.js', 's', t), true));
+  for (const r of waited) ctx.emit('request', r);
+  assert.equal(inflight.size, 5);
+});
+
+test('settle: a request of the frame that started a Shared Worker at its script\'s URL (fragment aside), reported before or after, is not waited for; one of another frame, another URL, or a navigation is', async () => {
+  const call = (frame, url, nav = false) => ({ frame: () => frame, isNavigationRequest: () => nav, method: () => 'GET', url: () => url });
+  const ctx = fakeContext();
+  const inflight = new Inflight(ctx);
+  const page = new EventEmitter();
+  ctx.emit('page', page);
+  const f = { page: () => page };
+  const g = { page: () => page };
+  const before = call(f, 'http://h/s.js?q=1#a');
+  const waited = [call(g, 'http://h/s.js?q=1'), call(f, 'http://h/s.js'), call(f, 'http://h/s.js?q=1', true)];
+  ctx.emit('request', before);
+  for (const r of waited) ctx.emit('request', r);
+  let settled = false;
+  inflight.settled().then(() => { settled = true; });
+  inflight.sharedWorker(f, 'http://h/s.js?q=1#b');
+  await ticks();
+  assert.equal(inflight.size, 3);
+  // A second Shared Worker of that frame, at another URL: both are kept.
+  inflight.sharedWorker(f, 'http://h/t.js');
+  ctx.emit('request', call(f, 'http://h/s.js?q=1'));
+  ctx.emit('request', call(f, 'http://h/s.js?q=1#c'));
+  ctx.emit('request', call(f, 'http://h/t.js'));
+  assert.equal(inflight.size, 3);
+  // A navigation of that frame to that URL, reported after: waited for.
+  const nav = call(f, 'http://h/s.js?q=1', true);
+  ctx.emit('request', nav);
+  assert.equal(inflight.size, 4);
+  waited.push(nav);
+  for (const r of waited) {
+    assert.equal(settled, false);
+    ctx.emit('requestfinished', r);
+    await ticks();
+  }
+  assert.equal(settled, true);
+  // With nothing else in flight, the frame's report wakes settle.
+  const ctx2 = fakeContext();
+  const one = new Inflight(ctx2);
+  ctx2.emit('request', call(f, 'http://h/s.js'));
+  let woke = false;
+  one.settled().then(() => { woke = true; });
+  one.sharedWorker(f, 'http://h/s.js');
+  await ticks();
+  assert.deepEqual([woke, one.size], [true, 0]);
+});
+
+test('workersScript: the page\'s SharedWorker starts each worker as asked, then reports its script URL against the document\'s base with no fragment; the binding leaves the window; a worker the browser refuses throws its own error and reports nothing; new, instanceof, constructor, name and length kept; with no binding the browser\'s own stays', () => {
+  const made = [];
+  const told = [];
+  class Base {}
+  class SharedWorker extends Base { constructor(url, o) { super(); if (String(url) === 'http://[' || String(url).endsWith('/refused.js')) throw new SyntaxError('the browser\'s own'); made.push([url, o]); } }
+  const ctx = { URL, document: { baseURI: 'http://h/a/p' }, location: { href: 'http://h/b/p' }, __r: (k, u) => { told.push(`${k} ${u}`); return Promise.reject(new Error('gone')); } };
+  // As a window's: not enumerable; the wrapper keeps the property's flags.
+  Object.defineProperty(ctx, 'SharedWorker', { value: SharedWorker, writable: true, enumerable: false, configurable: true });
+  vm.createContext(ctx);
+  vm.runInContext(workersScript('__r'), ctx);
+  assert.equal(vm.runInContext('typeof __r', ctx), 'undefined');
+  const o = { name: 'n', type: 'module' };
+  ctx.o = o;
+  vm.runInContext('globalThis.w = new SharedWorker("s.js?q=1#f", o)', ctx);
+  assert.deepEqual(made, [['s.js?q=1#f', o]]);
+  assert.equal(made[0][1], o);
+  assert.deepEqual(told, ['s http://h/a/s.js?q=1']);
+  assert.equal(vm.runInContext('w instanceof SharedWorker && SharedWorker.prototype.constructor === SharedWorker && SharedWorker.name === "SharedWorker" && SharedWorker.length === 1', ctx), true);
+  assert.equal(vm.runInContext('const d = Object.getOwnPropertyDescriptor(globalThis, "SharedWorker"); JSON.stringify([d.enumerable, d.writable, d.configurable])', ctx), '[false,true,true]');
+  assert.equal(Object.getPrototypeOf(ctx.SharedWorker), Base);
+  for (const u of ['http://[', '/refused.js']) assert.throws(() => vm.runInContext(`new SharedWorker(${JSON.stringify(u)})`, ctx), (e) => e.message === 'the browser\'s own', u);
+  assert.throws(() => vm.runInContext('SharedWorker("/s.js")', ctx), TypeError);
+  assert.equal(told.length, 1);
+  // A window with no document yet: its location.
+  delete ctx.document;
+  vm.runInContext('new SharedWorker("s.js")', ctx);
+  assert.deepEqual(told, ['s http://h/a/s.js?q=1', 's http://h/b/s.js']);
+  // A report that throws: the worker is still the app's.
+  const c2 = { URL, SharedWorker, location: { href: 'http://h/p' }, __r: () => { throw new Error('gone'); } };
+  vm.createContext(c2);
+  vm.runInContext(workersScript('__r'), c2);
+  assert.equal(vm.runInContext('new SharedWorker("/s.js") instanceof SharedWorker', c2), true);
+  // No binding: the browser's own stays.
+  const c3 = { URL, SharedWorker, location: { href: 'http://h/p' } };
+  vm.createContext(c3);
+  vm.runInContext(workersScript('__r'), c3);
+  assert.equal(c3.SharedWorker, SharedWorker);
+});
+
+test('workersScript: the page\'s Worker starts each Web Worker as asked and numbers it among the document\'s Web Workers at its URL (resolved, no fragment), from 1; the first asks the document\'s number; terminate() calls the browser\'s own, then reports the number, URL and place once for each worker; a refused worker is not numbered; a terminate of no worker throws the browser\'s own error; called without new, Worker throws as the browser\'s does; new, instanceof, constructor, name, length and terminate\'s name, length and flags kept', async () => {
+  const told = [];
+  const stopped = [];
+  class Base {}
+  class Worker extends Base {
+    constructor(url) { super(); if (String(url).endsWith('/refused.js')) throw new SyntaxError('the browser\'s own'); }
+  }
+  Object.defineProperty(Worker.prototype, 'terminate', { value: function terminate() { if (!(this instanceof Worker)) throw new TypeError('Illegal invocation'); stopped.push(this); }, writable: true, enumerable: true, configurable: true });
+  const ctx = { URL, document: { baseURI: 'http://h/a/p' }, location: { href: 'http://h/b/p' }, __r: (...a) => { told.push(a); return Promise.resolve(a[0] === 'd' ? 7 : undefined); } };
+  Object.defineProperty(ctx, 'Worker', { value: Worker, writable: true, enumerable: false, configurable: true });
+  vm.createContext(ctx);
+  vm.runInContext(workersScript('__r'), ctx);
+  assert.throws(() => vm.runInContext('new Worker("/refused.js")', ctx), (e) => e.message === 'the browser\'s own');
+  assert.deepEqual(told, []);
+  vm.runInContext('globalThis.a = new Worker("w.js#x"); globalThis.b = new Worker("/a/w.js"); globalThis.c = new Worker("v.js")', ctx);
+  // The document's number is asked once, at its first Web Worker.
+  assert.deepEqual(told, [['d']]);
+  vm.runInContext('b.terminate(); b.terminate(); a.terminate(); c.terminate()', ctx);
+  assert.deepEqual(stopped, [ctx.b, ctx.b, ctx.a, ctx.c]);
+  await ticks();
+  assert.deepEqual(told.slice(1), [['t', 7, 'http://h/a/w.js', 2], ['t', 7, 'http://h/a/w.js', 1], ['t', 7, 'http://h/a/v.js', 1]]);
+  assert.throws(() => vm.runInContext('Worker.prototype.terminate.call({})', ctx), (e) => e.message === 'Illegal invocation');
+  assert.throws(() => vm.runInContext('Worker("/w.js")', ctx), TypeError);
+  assert.equal(stopped.length, 4);
+  assert.equal(vm.runInContext('a instanceof Worker && Worker.prototype.constructor === Worker && Worker.name === "Worker" && Worker.length === 1 && Worker.prototype.terminate.name === "terminate" && Worker.prototype.terminate.length === 0', ctx), true);
+  assert.equal(vm.runInContext('const d = Object.getOwnPropertyDescriptor(Worker.prototype, "terminate"); JSON.stringify([d.enumerable, d.writable, d.configurable])', ctx), '[true,true,true]');
+  // A document whose number keploy could not give: its terminate reports
+  // nothing, and stops the worker.
+  const t2 = [];
+  const c2 = { URL, Worker, location: { href: 'http://h/p' }, __r: (...a) => { t2.push(a); return Promise.reject(new Error('gone')); } };
+  vm.createContext(c2);
+  vm.runInContext(workersScript('__r'), c2);
+  vm.runInContext('new Worker("/w.js").terminate()', c2);
+  await ticks();
+  assert.deepEqual(t2, [['d']]);
+  assert.equal(stopped.length, 5);
+});
+
+test('settle (Chromium): the script load of a Web Worker its document terminated is dropped, the k-th script request of its frame at that URL (fragment and keploy\'s mark aside) while the document was the frame\'s, reported before the word or after; a load that ended, another place, another frame, another document of the frame (its commit came between), a URL keploy marked for its own route (answered ends it) and another engine are waited for', async () => {
+  const ctx = fakeContext();
+  const inflight = new Inflight(ctx, true);
+  const page = new EventEmitter();
+  ctx.emit('page', page);
+  const f = { page: () => page };
+  const g = { page: () => page };
+  const load = (frame, url, type = 'script') => ({ frame: () => frame, isNavigationRequest: () => false, method: () => 'GET', url: () => url, resourceType: () => type });
+  const doc = inflight.webWorkerDocument(f);
+  const one = load(f, 'http://h/w.js#a');
+  const two = load(f, 'http://h/w.js');
+  const fetched = load(f, 'http://h/w.js', 'fetch');
+  const other = load(g, 'http://h/w.js');
+  for (const r of [one, fetched, two, other]) ctx.emit('request', r);
+  assert.equal(inflight.size, 4);
+  let settled = false;
+  inflight.settled().then(() => { settled = true; });
+  // The first ended; the second is dropped when its worker is terminated.
+  ctx.emit('requestfinished', one);
+  inflight.webWorkerStopped(doc, 'http://h/w.js', 1);
+  assert.equal(inflight.size, 3);
+  inflight.webWorkerStopped(doc, 'http://h/w.js#z', 2);
+  assert.equal(inflight.size, 2);
+  // A place the frame reported no load for yet: dropped when reported.
+  inflight.webWorkerStopped(doc, 'http://h/w.js', 3);
+  ctx.emit('request', load(f, 'http://h/w.js'));
+  assert.equal(inflight.size, 2);
+  // A word with no document, or a place that is no number: nothing.
+  inflight.webWorkerStopped(doc + 9, 'http://h/w.js', 4);
+  inflight.webWorkerStopped(doc, 'http://h/w.js', Number.NaN);
+  inflight.webWorkerStopped(doc, 'http://h/w.js', 0);
+  ctx.emit('request', load(f, 'http://h/w.js'));
+  assert.equal(inflight.size, 3);
+  // keploy's mark for a Web Worker's script counts as its URL, but keploy's
+  // route ends it; its seeding's own load counts nowhere.
+  const t = 'ab'.repeat(16);
+  const marked = load(f, markWorker('http://h/m.js', 'w', t));
+  ctx.emit('request', load(f, markWorker('http://h/m.js', 'q', t, 0)));
+  ctx.emit('request', marked);
+  ctx.emit('request', load(f, 'http://h/m.js'));
+  inflight.webWorkerStopped(doc, 'http://h/m.js', 1);
+  assert.equal(inflight.size, 6);
+  inflight.webWorkerStopped(doc, 'http://h/m.js', 2);
+  assert.equal(inflight.size, 5);
+  // The frame commits a new document: its Web Workers are numbered anew,
+  // and the old document's word names the old one's loads.
+  ctx.emit('response', { request: () => ({ isNavigationRequest: () => true, frame: () => f }), status: () => 200, headers: () => ({}) });
+  page.emit('framenavigated', f);
+  const fresh = load(f, 'http://h/w.js');
+  ctx.emit('request', fresh);
+  const now = inflight.size;
+  inflight.webWorkerStopped(doc, 'http://h/w.js', 1);
+  assert.equal(inflight.size, now);
+  const next = inflight.webWorkerDocument(f);
+  inflight.webWorkerStopped(next, 'http://h/w.js', 1);
+  assert.equal(inflight.size, now - 1);
+  assert.equal(settled, false);
+  // Another engine: no drop.
+  const ctx2 = fakeContext();
+  const off = new Inflight(ctx2);
+  const d2 = off.webWorkerDocument(f);
+  ctx2.emit('request', load(f, 'http://h/w.js'));
+  off.webWorkerStopped(d2, 'http://h/w.js', 1);
+  assert.equal(off.size, 1);
+  // A fetch at a Web Worker's URL is no worker's load: the second worker's
+  // load is the one dropped, and the fetch is still waited for.
+  const ctx3 = fakeContext();
+  const on = new Inflight(ctx3, true);
+  const p3 = new EventEmitter();
+  ctx3.emit('page', p3);
+  const h = { page: () => p3 };
+  const d3 = on.webWorkerDocument(h);
+  const a1 = load(h, 'http://h/w.js');
+  const viaFetch = load(h, 'http://h/w.js', 'fetch');
+  const a2 = load(h, 'http://h/w.js');
+  for (const r of [a1, viaFetch, a2]) ctx3.emit('request', r);
+  on.webWorkerStopped(d3, 'http://h/w.js', 2);
+  assert.equal(on.size, 2);
+  ctx3.emit('requestfinished', viaFetch);
+  ctx3.emit('requestfinished', a1);
+  assert.equal(on.size, 0);
+});
+
+test('settle (Chromium): a commit with no answer (a route change inside the page) keeps the document, so its word still drops the load of a Web Worker it terminated; a load at a URL keploy marked for its own route is waited for though its place was terminated before it was reported (keploy\'s route ends it)', async () => {
+  const ctx = fakeContext();
+  const inflight = new Inflight(ctx, true);
+  const page = new EventEmitter();
+  ctx.emit('page', page);
+  const f = { page: () => page };
+  const load = (url) => ({ frame: () => f, isNavigationRequest: () => false, method: () => 'GET', url: () => url, resourceType: () => 'script' });
+  const doc = inflight.webWorkerDocument(f);
+  ctx.emit('request', load('http://h/a.js'));
+  page.emit('framenavigated', f);
+  ctx.emit('request', load('http://h/w.js'));
+  assert.equal(inflight.size, 2);
+  inflight.webWorkerStopped(doc, 'http://h/w.js', 1);
+  assert.equal(inflight.size, 1);
+  // Its place terminated first, then the load, at a URL keploy marked.
+  inflight.webWorkerStopped(doc, 'http://h/m.js', 1);
+  ctx.emit('request', load(markWorker('http://h/m.js', 'w', 'cd'.repeat(16))));
+  assert.equal(inflight.size, 2);
+  ctx.emit('request', load('http://h/m.js'));
+  assert.equal(inflight.size, 3);
+});
+
+test('settle (Chromium): busyWorkers names each Web Worker script URL (fragment aside) once, when its time has passed with only Web Workers\' script loads in flight, or as a call ends after; not before its time, not beside a fetch at a worker\'s URL or a script at a URL no worker of the test has, not after stop, and not in another engine', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const setup = (stops) => {
+    const ctx = fakeContext();
+    const inflight = new Inflight(ctx, stops);
+    const page = new EventEmitter();
+    ctx.emit('page', page);
+    const f = { page: () => page };
+    const load = (url, type = 'script') => ({ frame: () => f, isNavigationRequest: () => false, method: () => 'GET', url: () => url, resourceType: () => type });
+    return { ctx, inflight, page, load };
+  };
+  // Only a Web Worker's load in flight: said once its time has passed.
+  {
+    const { ctx, inflight, page, load } = setup(true);
+    page.emit('worker', { url: () => 'http://h/w.js#a' });
+    ctx.emit('request', load('http://h/w.js#b'));
+    const said = [];
+    const stop = inflight.busyWorkers(3000, (u) => said.push(u));
+    t.mock.timers.tick(2999);
+    assert.deepEqual(said, []);
+    t.mock.timers.tick(1);
+    assert.deepEqual(said, ['http://h/w.js']);
+    stop();
+  }
+  // Beside a page script at a URL no worker has, and then beside a fetch at
+  // the worker's URL: nothing; said as the last of them ends.
+  {
+    const { ctx, inflight, page, load } = setup(true);
+    page.emit('worker', { url: () => 'http://h/busy.js' });
+    const busy = load('http://h/busy.js');
+    const own = load('http://h/own.js');
+    const fetched = load('http://h/busy.js', 'fetch');
+    for (const r of [busy, own]) ctx.emit('request', r);
+    const said = [];
+    const stop = inflight.busyWorkers(3000, (u) => said.push(u));
+    t.mock.timers.tick(3000);
+    assert.deepEqual(said, []);
+    ctx.emit('request', fetched);
+    ctx.emit('requestfinished', own);
+    assert.deepEqual(said, []);
+    ctx.emit('requestfinished', fetched);
+    assert.deepEqual(said, ['http://h/busy.js']);
+    // A second load at that URL and another worker's: the new URL alone is
+    // said, once, as a call ends; a request that starts says nothing.
+    page.emit('worker', { url: () => 'http://h/two.js' });
+    const again = load('http://h/busy.js');
+    ctx.emit('request', again);
+    ctx.emit('request', load('http://h/two.js'));
+    assert.deepEqual(said, ['http://h/busy.js']);
+    ctx.emit('requestfailed', again);
+    assert.deepEqual(said, ['http://h/busy.js', 'http://h/two.js']);
+    // After stop, nothing more.
+    stop();
+    page.emit('worker', { url: () => 'http://h/three.js' });
+    ctx.emit('request', load('http://h/three.js'));
+    ctx.emit('requestfinished', busy);
+    assert.deepEqual(said, ['http://h/busy.js', 'http://h/two.js']);
+  }
+  // Stopped before its time: nothing.
+  {
+    const { ctx, inflight, page, load } = setup(true);
+    page.emit('worker', { url: () => 'http://h/w.js' });
+    ctx.emit('request', load('http://h/w.js'));
+    const said = [];
+    inflight.busyWorkers(3000, (u) => said.push(u))();
+    t.mock.timers.tick(3000);
+    assert.deepEqual(said, []);
+  }
+  // Another engine reports the load's end as the script arrives: nothing.
+  {
+    const { ctx, inflight, page, load } = setup(false);
+    page.emit('worker', { url: () => 'http://h/w.js' });
+    ctx.emit('request', load('http://h/w.js'));
+    const said = [];
+    const stop = inflight.busyWorkers(3000, (u) => said.push(u));
+    t.mock.timers.tick(3000);
+    assert.deepEqual(said, []);
+    stop();
+  }
+});
+
 test('settle: a cancel that comes while settle already waits wakes it (its page closes; then, for a service worker\'s call, the test closes its context)', async () => {
   for (const worker of [false, true]) {
     const c = worker ? 'a page\'s call and a service worker\'s' : 'a page\'s call';
@@ -254,6 +886,65 @@ test('settle: a frame that is gone drops only its own calls, its own document re
   await ticks();
   assert.equal(inflight.size, 0, 'no call is left in flight');
   assert.equal(settled, true, 'settle is woken');
+});
+
+// A frame's request, its navigation's, and the navigation's answer.
+function frameRequest(frame, url, nav = false) {
+  return { frame: () => frame, isNavigationRequest: () => nav, method: () => 'GET', url: () => `http://localhost${url}` };
+}
+function answer(request, status = 200, headers = {}) {
+  return { request: () => request, status: () => status, headers: () => headers };
+}
+
+// Firefox can report a call the new document makes as it loads (here an
+// image its parser asks for) before it reports the frame's commit: the
+// order a Firefox run gave, made exact. The commit drops only the calls
+// reported before the new document's answer, the old document's, one
+// started while the navigation ran included; the new document's call is
+// waited for. A redirect's answer is not the document's: a call reported
+// after it, before the final answer, is still the old document's.
+test('settle: a frame\'s commit drops only the calls reported before its new document\'s answer (Firefox reports the new document\'s first call before the commit; a redirect\'s answer is not the document\'s)', async () => {
+  for (const redirect of [false, true]) {
+    const c = redirect ? 'redirected' : 'answered at once';
+    const ctx = fakeContext();
+    const inflight = new Inflight(ctx);
+    const page = new EventEmitter();
+    const frame = { page: () => page };
+    ctx.emit('page', page);
+    const old = frameRequest(frame, '/slow');
+    ctx.emit('request', old);
+    const nav = frameRequest(frame, '/next', true);
+    ctx.emit('request', nav);
+    // The old document's poller fires while the navigation runs.
+    const during = frameRequest(frame, '/poll');
+    ctx.emit('request', during);
+    let final = nav;
+    let late = null;
+    if (redirect) {
+      ctx.emit('response', answer(nav, 302, { location: '/moved' }));
+      ctx.emit('requestfinished', nav);
+      late = frameRequest(frame, '/poll2');
+      ctx.emit('request', late);
+      final = frameRequest(frame, '/moved', true);
+      ctx.emit('request', final);
+    }
+    ctx.emit('response', answer(final));
+    ctx.emit('requestfinished', final);
+    const mine = frameRequest(frame, '/hold.png');
+    ctx.emit('request', mine);
+    page.emit('framenavigated', frame);
+    assert.deepEqual(inflight.describe(), ['GET http://localhost/hold.png'], `${c}: only the new document's call is left in flight`);
+    let settled = false;
+    inflight.settled().then(() => { settled = true; });
+    await ticks();
+    assert.equal(settled, false, `${c}: settle waits for the new document's call`);
+    // A route change inside the new document (no answer) drops nothing.
+    page.emit('framenavigated', frame);
+    assert.equal(inflight.size, 1, `${c}: a commit with no answer drops nothing`);
+    ctx.emit('requestfinished', mine);
+    await ticks();
+    assert.equal(settled, true, `${c}: settle is woken once the new document's call ends`);
+  }
 });
 
 test('decide: inert, refused, active', () => {

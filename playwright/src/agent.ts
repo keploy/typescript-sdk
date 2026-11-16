@@ -1,6 +1,6 @@
 // The client of keploy's agent: scope protocol v1, the same wire go-sdk's
 // keploytest speaks (POST /agent/instance, /agent/scope/begin,
-// /agent/scope/end, /agent/scope/given).
+// /agent/scope/end, /agent/scope/given, /agent/refusal).
 //
 // Every answer of the agent carries the protocol version as "v"; an answer
 // without it, or with another version, is an error, so this package on an
@@ -14,6 +14,7 @@ export const PATH_INSTANCE = '/agent/instance';
 export const PATH_BEGIN = '/agent/scope/begin';
 export const PATH_END = '/agent/scope/end';
 export const PATH_GIVEN = '/agent/scope/given';
+export const PATH_REFUSAL = '/agent/refusal';
 
 export const ACTION_SKIP = 'skip';
 export const ACTION_FAIL = 'fail';
@@ -31,7 +32,12 @@ export interface Answer {
   instance?: string;
   timeFile?: string;
   variable?: string;
+  seed?: string;
+  note?: string;
 }
+
+/** The largest note keploy keeps (its models.MaxScopeNote), in UTF-8 bytes. */
+export const MAX_NOTE = 16 << 10;
 
 /** An answer this package cannot trust, or the agent's own refusal. */
 export class KeployError extends Error {
@@ -100,31 +106,37 @@ export class AgentClient {
         `this @keploy/playwright needs a keploy agent that speaks scope protocol v${PROTOCOL_VERSION}: upgrade keploy`, res.status);
     }
     if (v !== PROTOCOL_VERSION) {
+      // oxlint-disable-next-line typescript/no-base-to-string -- the version as the agent sent it; its whole answer follows
       throw new KeployError(`keploy: the keploy agent answered ${path} in scope protocol v${String(v)} (${quoted(data)}); ` +
         `this @keploy/playwright speaks scope protocol v${PROTOCOL_VERSION}: use a keploy and a @keploy/playwright of the same release`, res.status);
     }
     return a as Answer;
   }
 
-  /** Claims keploy's run for this test process (a Playwright worker). */
-  async claim(key: string, dir: string): Promise<Answer> {
-    let a: Answer;
+  /**
+   * Sends a call of the scope protocol's first release. keploy speaks it
+   * only under its proven switch: with the switch off (keploy's default),
+   * the agent has no route for it and answers the mux's plain 404, as a
+   * keploy from before the protocol does. So a plain 404 names the switch,
+   * saying what it stopped (what).
+   */
+  private async onWire(path: string, body: unknown, what: string): Promise<Answer> {
     try {
-      a = await this.post(PATH_INSTANCE, { key, dir });
+      return await this.post(path, body);
     } catch (err) {
       if (err instanceof KeployError && err.status === 404 && err.code === '') {
-        // keploy speaks scope protocol v1 only under its proven switch. With
-        // it off (keploy's default) the agent has no claim route and answers
-        // the mux's plain 404, as a keploy from before the protocol does
-        // (its begin and end answer an older, unversioned wire). The claim is
-        // this package's first call, so it is the one that names the switch.
-        throw new KeployError(`keploy: this keploy agent answered 404 to POST ${PATH_INSTANCE}, so this worker cannot claim keploy's run: ` +
+        throw new KeployError(`keploy: this keploy agent answered 404 to POST ${path}, so ${what}: ` +
           'keploy speaks @keploy/playwright\'s wire, scope protocol v1, only when it runs with KEPLOY_PROVEN=1 ' +
           '(KEPLOY_PROVEN=1 keploy mock record|replay -c "npx playwright test --workers=1 --retries=0"); ' +
           'a keploy run without KEPLOY_PROVEN=1, or one from before scope protocol v1, answers 404 there', 404);
       }
       throw err;
     }
+  }
+
+  /** Claims keploy's run for this test process (a Playwright worker). */
+  async claim(key: string, dir: string): Promise<Answer> {
+    const a = await this.onWire(PATH_INSTANCE, { key, dir }, 'this worker cannot claim keploy\'s run');
     if (!a.instance) {
       throw new KeployError('keploy: the keploy agent answered the claim of this test process without an instance');
     }
@@ -135,21 +147,46 @@ export class AgentClient {
     return a;
   }
 
-  /** Asks the agent to open a test. */
-  async begin(test: TestRef): Promise<Answer> {
-    const a = await this.post(PATH_BEGIN, { ...test, canSkip: true });
+  /**
+   * Asks the agent to open a test. random says how the test's browser means
+   * to draw its random numbers, so a finding that the test's calls vary
+   * between runs can say whether seeding them is left to try. seed, sent
+   * when it means to seed them, is one drawn afresh for this begin; the
+   * answer's seed is the one to draw from: in a record the begin's own, in a
+   * replay the one the test's recording kept, and none when it kept none. An
+   * agent from before either field ignores it and answers no seed. The
+   * answer's note, in a replay, is the one the test's recording's end sent
+   * (end); a record's begin, a recording that kept none and an agent from
+   * before notes answer none.
+   */
+  async begin(test: TestRef, random?: Random, seed?: string): Promise<Answer> {
+    const a = await this.onWire(PATH_BEGIN, { ...test, canSkip: true, ...(random ? { random } : {}), ...(seed ? { seed } : {}) }, `${test.name} cannot begin`);
     if (a.status !== 'ok') {
       throw new KeployError(`keploy: the keploy agent answered the begin of ${test.name} with status ${JSON.stringify(a.status ?? '')}`);
     }
     if (a.action && a.action !== ACTION_SKIP) {
       throw new KeployError(`keploy: the keploy agent answered the begin of ${test.name} with the unknown action ${JSON.stringify(a.action)}`);
     }
+    if (a.seed !== undefined && (typeof a.seed !== 'string' || (a.seed !== '' && !SEED.test(a.seed)))) {
+      throw new KeployError(`keploy: the keploy agent answered the begin of ${test.name} with the seed ${quoted(typeof a.seed === 'string' ? a.seed : String(JSON.stringify(a.seed)))}, ` +
+        'which is no seed keploy keeps (8 to 64 lower-case hex digits)');
+    }
+    if (a.note !== undefined && (typeof a.note !== 'string' || Buffer.byteLength(a.note, 'utf8') > MAX_NOTE)) {
+      throw new KeployError(`keploy: the keploy agent answered the begin of ${test.name} with the note ${quoted(typeof a.note === 'string' ? a.note : String(JSON.stringify(a.note)))}, ` +
+        `which is no note keploy keeps (a string of at most ${MAX_NOTE} bytes)`);
+    }
     return a;
   }
 
-  /** Tells the agent the test ended, with its outcome. */
-  async end(test: TestRef, outcome: Outcome): Promise<Answer> {
-    const a = await this.post(PATH_END, { ...test, outcome });
+  /**
+   * Tells the agent the test ended, with its outcome, and, when it is known,
+   * how its browser drew its random numbers (random), which replaces what its
+   * begin meant to do, and the note (note.ts) keploy keeps with a record and
+   * answers to the test's replay's begin, which it never reads. An agent
+   * from before notes ignores it.
+   */
+  async end(test: TestRef, outcome: Outcome, random?: Random, note?: string): Promise<Answer> {
+    const a = await this.onWire(PATH_END, { ...test, outcome, ...(random ? { random } : {}), ...(note ? { note } : {}) }, `${test.name} cannot end`);
     if (a.status !== 'ok') {
       throw new KeployError(`keploy: the keploy agent answered the end of ${test.name} with status ${JSON.stringify(a.status ?? '')}`);
     }
@@ -157,6 +194,17 @@ export class AgentClient {
       throw new KeployError(`keploy: the keploy agent answered the end of ${test.name} with the unknown action ${JSON.stringify(a.action)}`);
     }
     return a;
+  }
+
+  /**
+   * Tells keploy this package refused something keploy cannot judge (a
+   * test Playwright retried), so keploy's verdict on the run names it.
+   */
+  async refuse(code: string, message: string, remedy: string): Promise<void> {
+    const a = await this.onWire(PATH_REFUSAL, { code, message, remedy }, 'keploy cannot be told of the refusal');
+    if (a.status !== 'ok') {
+      throw new KeployError(`keploy: the keploy agent answered the refusal ${code} with status ${JSON.stringify(a.status ?? '')}`);
+    }
   }
 
   /** Gives the open test a value it made itself. Returns the agent's variable name. */
@@ -191,6 +239,20 @@ export interface TestRef {
 }
 
 export type Outcome = 'passed' | 'failed' | 'skipped';
+
+/**
+ * How a test's browser draws its random numbers: RANDOM_SEEDED from the
+ * seed keploy answered its begin with, RANDOM_OWN the browser's own
+ * (KEPLOY_SEED_RANDOM=off, the keploySeedRandom option false, or keploy
+ * answered no seed). Sent with the begin, it is what the test means to do;
+ * with the end, what its pages did.
+ */
+export type Random = typeof RANDOM_SEEDED | typeof RANDOM_OWN;
+export const RANDOM_SEEDED = 'seeded';
+export const RANDOM_OWN = 'own';
+
+/** A seed as keploy keeps and answers one: 8 to 64 lower-case hex digits. */
+export const SEED = /^[0-9a-f]{8,64}$/;
 
 async function readBounded(res: Response): Promise<string> {
   if (!res.body) return '';
