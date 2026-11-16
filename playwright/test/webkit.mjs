@@ -7,7 +7,7 @@
  * /rds/v2/s.js, gets that script, and then does nothing more, with no
  * request for the h.js the script imports first, no error event and no
  * message. The same happens with plain Playwright and no keploy, on a busy
- * machine. The rows accept a missing answer only on exactly that record:
+ * machine (microsoft/playwright#44134). The rows accept a missing answer only on exactly that record:
  * engine is WebKit, got (what the fixture kept for the worker) is 'none'
  * (neither a message nor an error event came), and the server (seen: every
  * URL it was asked for in the run) served /rds/s.js and /rds/v2/s.js once

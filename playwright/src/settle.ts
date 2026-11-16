@@ -14,6 +14,8 @@ export class Inflight {
   private waiters: (() => void)[] = [];
   // The calls keploy's own route answered whole (answered).
   private readonly ended = new WeakSet<Request>();
+  // The routes a continue() or abort() of returned for (routed).
+  private readonly sent = new WeakSet<Route>();
   // The script URLs, with no fragment, that each frame started a Shared
   // Worker at, for the test's life (sharedWorker).
   private readonly shared = new Map<Frame | null, Set<string>>();
@@ -107,9 +109,10 @@ export class Inflight {
     };
     // Nor for a request a route answers itself with a redirect (Chromium,
     // for a Web Worker's script: its worker never starts, with no keploy
-    // too; Firefox, for the redirect's first request), nor for one a route
-    // holds after its handler threw (WebKit refuses a redirect, and
-    // Playwright's fulfill throws): routed watches each route a page's
+    // too; Firefox, for the redirect's first request), nor for one whose
+    // route's handler threw before a continue() or abort() of it returned
+    // (WebKit refuses a redirect, and Playwright's fulfill throws; a handler
+    // falls back and then throws): routed watches each route a page's
     // routes, and then its context's, are handed.
     onRoute(context, (r, threw) => this.routed(r, threw));
     context.pages().forEach(watch);
@@ -263,28 +266,39 @@ export class Inflight {
    * Watches route, a request's route. Once its fulfill returns, the
    * request has the whole answer the route gave, and nothing of it is in
    * flight, whatever the browser reports after. threw: the routes' handler
-   * threw (called again, after the first call); a request its route still
-   * holds then (no route answered it or sent it on: the browser refused
-   * its answer, as WebKit refuses a redirect, or the handler threw first)
-   * goes nowhere, as Playwright sends it on no further. A handler that
+   * threw (called again, after the first call). Once a handler throws,
+   * Playwright hands the request to no other route and sends it on only
+   * through a continue() or abort() of its route: a request no continue()
+   * or abort() of its route returned for by then goes nowhere (the browser
+   * refused its answer, as WebKit refuses a redirect; the handler fell
+   * back, or threw first), and is not waited for. One that one of them
+   * sent on is waited for, as the browser goes on with it. A handler that
    * returns and leaves the request held keeps it in flight, as one that
    * still might send it on: the test's timeout ends that wait, naming it.
    */
   private routed(route: Route, threw: boolean): void {
     const r = route.request();
     if (threw) {
-      // Playwright's own, past its API: set while the handler may still
-      // answer the request, cleared once a route answered it or sent it on.
-      if ((route as unknown as { _handlingPromise?: unknown })._handlingPromise) this.answered(r);
+      if (!this.sent.has(route)) this.answered(r);
       return;
     }
-    // Bound, not called through Function.prototype.call: Playwright names
-    // an API call by how its caller invoked it, and its error must read as
-    // Playwright's own (route.fulfill: ...), as with no keploy.
-    const fulfill = route.fulfill.bind(route);
+    // Each bound and called by its own name (own.fulfill), never through
+    // Function.prototype.call or another name: Playwright can name an API
+    // call by the name its caller called it by, and its error must read as
+    // Playwright's own (route.fulfill: ..., route.continue: ...), as with no
+    // keploy.
+    const own = { fulfill: route.fulfill.bind(route), continue: route.continue.bind(route), abort: route.abort.bind(route) };
     route.fulfill = async (o) => {
-      await fulfill(o);
+      await own.fulfill(o);
       this.answered(r);
+    };
+    route.continue = async (o) => {
+      await own.continue(o);
+      this.sent.add(route);
+    };
+    route.abort = async (e) => {
+      await own.abort(e);
+      this.sent.add(route);
     };
   }
 

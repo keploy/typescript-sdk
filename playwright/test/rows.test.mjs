@@ -595,6 +595,43 @@ test("settle, in webkit: a call the test's own route tries to send on after WebK
   } finally { await p.close(); await a.close(); }
 });
 
+// So does its abort() there: route.abort: Route is already handled!, named
+// as the test called it, and settle does not wait on the call.
+test("settle, in webkit: a call the test's own route tries to fail after WebKit refused its redirect fails with Playwright's own error, and is not waited for", async () => {
+  const j = journal();
+  const a = await fakeAgent(j);
+  const p = await pageServer(j);
+  try {
+    const title = "a call the test's route tries to fail after the browser refused its answer";
+    const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, PW_BROWSER: 'webkit' });
+    const t = tests[title];
+    assert.equal(t.status, 'failed', out);
+    assert.match(t.error, /^Error: route\.abort: Route is already handled!\n/, out);
+    assert.deepEqual(t.steps.filter((x) => x.startsWith('keploy: wait for') && /\/slow(,|\s|$)/.test(x)), [], t.steps.join('\n'));
+  } finally { await p.close(); await a.close(); }
+});
+
+// A test's route falls back and then throws: Playwright sends the call
+// nowhere, so settle does not wait on it, and the test fails at once with
+// the handler's error, as with no keploy (0.1.1 waited on the call until
+// the test's timeout, naming it in settle's step).
+for (const engine of ['chromium', 'firefox', 'webkit']) {
+  test(`settle, in ${engine}: a call the test's own route falls back on and then throws is not waited for, and the test fails at once with the handler's error`, async () => {
+    const j = journal();
+    const a = await fakeAgent(j);
+    const p = await pageServer(j);
+    try {
+      const title = "a call the test's route falls back on and then throws";
+      const { tests, out } = await playwright(['settle.spec.ts', '-g', title], { ...keployEnv(a.url), SLOW_BASE: p.url, PW_BROWSER: engine, PW_TIMEOUT: '20000' });
+      const t = tests[title];
+      assert.equal(t.status, 'failed', out);
+      assert.match(t.error, /^Error: the test's route handler threw after its fallback(\n|$)/, out);
+      assert.doesNotMatch(t.error, /exceeded|Test timeout/, out);
+      assert.deepEqual(t.steps.filter((x) => x.startsWith('keploy: wait for') && /\/slow(,|\s|$)/.test(x)), [], t.steps.join('\n'));
+    } finally { await p.close(); await a.close(); }
+  });
+}
+
 // Settle rows where a call is still waited for: the page server answers it
 // only once settle's step has begun (the rows' reporter asks /release then),
 // so the test ends by settle's own wait, with no deadline on its body. The
@@ -1881,8 +1918,8 @@ for (const engine of ENGINES) {
           assert.deepEqual(r.drew.redirect, ['error', 'error', 'error', 'error'], mode);
         } else {
           const [rd, rdm, rds, rd2] = r.drew.redirect;
-          // WebKit sometimes never runs this Shared Worker, with no keploy too (test/webkit.mjs): only that record is
-          // taken in place of its answer, and the row says so.
+          // WebKit sometimes never runs this Shared Worker, with no keploy too (test/webkit.mjs,
+          // microsoft/playwright#44134): only that record is taken in place of its answer, and the row says so.
           const dropped = webkitDroppedSharedWorker(engine, rds, r.seen);
           if (dropped) t.diagnostic(webkitDroppedLine(mode));
           assert.deepEqual([rd.k, rd.H, rdm.k, rdm.H, rd2.k, rd2.H], ['rd', 'v2', 'rdm', 'v2', 'rd', 'v2'], mode);
@@ -1953,7 +1990,7 @@ for (const engine of ENGINES) {
         assert.deepEqual(kinds(r), kinds(o1), mode);
         assert.deepEqual(kinds(r), names, mode);
         assert.deepEqual(r.seen.filter((u) => u.includes('__keploy_worker')), [], mode);
-        // Each script loaded once by the browser, as off (a Shared Worker's twice seeded in Chromium and WebKit: keploy asks it too).
+        // Each Web Worker's script loaded once by the browser, as off (the row counts no Shared Worker's loads).
         for (const p of ['/mc/s.js', '/mc/sd.js', '/mc/sdc.js']) assert.equal(r.seen.filter((u) => u === p).length, 1, `${mode} ${p}`);
       }
       const at = (r, i) => r.drew.own[i];

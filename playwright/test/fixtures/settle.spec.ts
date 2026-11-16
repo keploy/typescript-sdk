@@ -365,6 +365,36 @@ test("a call the test's route tries to send on after the browser refused its ans
   await sent;
   await returned;
 });
+// The same with the route's abort(), which fails with Playwright's own
+// error too.
+test("a call the test's route tries to fail after the browser refused its answer", async ({ page }) => {
+  await page.goto(`${base}/page`);
+  let end = (): void => {};
+  const returned = new Promise<void>((resolve) => { end = resolve; });
+  await page.route('**/slow', async (r) => {
+    await r.fulfill({ status: 302, headers: { location: `${base}/page` } }).catch(() => {});
+    await r.abort();
+    end();
+  });
+  const sent = page.waitForRequest(/\/slow$/);
+  await page.evaluate(() => { void fetch('/slow').catch(() => {}); });
+  await sent;
+  await returned;
+});
+// A route falls back, then throws: Playwright hands the call to no other
+// route and sends it nowhere, and the handler's error fails the test. The
+// body never ends: Playwright's runner ends the test at that error.
+test("a call the test's route falls back on and then throws", async ({ page }) => {
+  await page.goto(`${base}/page`);
+  await page.route('**/slow', async (r) => {
+    await r.fallback();
+    throw new Error("the test's route handler threw after its fallback");
+  });
+  const sent = page.waitForRequest(/\/slow$/);
+  await page.evaluate(() => { void fetch('/slow').catch(() => {}); });
+  await sent;
+  await new Promise<void>(() => {});
+});
 // A route sends the call on, then tries to answer it too: Playwright's
 // fulfill throws (the route is already handled), and so does the handler,
 // which fails the test.
