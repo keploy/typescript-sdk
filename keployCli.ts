@@ -75,6 +75,9 @@ export const Test = async (appCmd: string, runOptions: RunOptions, callback: (er
                 }
             }
 
+            await StopUserApplication(appId);
+            await UpdateReportWithCoverage(testRunId, testSet)
+
             if (status !== TestRunStatus.PASSED) {
                 result = false;
                 console.error(`Test set: ${testSet} failed with status: ${status}`);
@@ -84,7 +87,6 @@ export const Test = async (appCmd: string, runOptions: RunOptions, callback: (er
                 console.log(`Test set: ${testSet} passed`);
             }
             testResult = testResult && result;
-            await StopUserApplication(appId);
         }
     } catch (error) {
         callback(error as Error, false);
@@ -131,6 +133,16 @@ const RunTestSet = async (testRunId: string, testSet: string, appId: string): Pr
 
     if (!(response.status >= 200 && response.status < 300 && response.data.data.runTestSet)) {
         throw new Error(`Failed to run test set. Status code: ${response.status}`);
+    }
+};
+
+const UpdateReportWithCoverage = async (testRunId: string, testSet: string): Promise<void> => {
+    const client = await setHttpClient();
+    const response = await client.post('', {
+        query: `mutation UpdateReportWithCov { updateReportWithCov(testRunId: "${testRunId}", testSetId: "${testSet}", language: "typescript")}`
+    });
+    if (!(response.status >= 200 && response.status < 300 && response.data.data.runTestSet)) {
+        throw new Error(`Failed to update report with coverage data. Status code: ${response.status}`);
     }
 };
 
