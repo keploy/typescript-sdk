@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { AgentClient, KeployError } from '../dist/agent.js';
 import { decide } from '../dist/join.js';
-import { Inflight, workersScript } from '../dist/settle.js';
+import { Inflight, isDownloadDisposition, workersScript } from '../dist/settle.js';
 import { markWorker } from '../dist/random.js';
 import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
@@ -944,6 +944,57 @@ test('settle: a frame\'s commit drops only the calls reported before its new doc
     ctx.emit('requestfinished', mine);
     await ticks();
     assert.equal(settled, true, `${c}: settle is woken once the new document's call ends`);
+  }
+});
+
+test('isDownloadDisposition: classifies by disposition type, not parameter values', () => {
+  assert.equal(isDownloadDisposition(undefined), false);
+  assert.equal(isDownloadDisposition(''), false);
+  assert.equal(isDownloadDisposition('   '), false);
+  assert.equal(isDownloadDisposition('inline'), false);
+  assert.equal(isDownloadDisposition('INLINE; filename="attachment-page.html"'), false);
+  assert.equal(isDownloadDisposition('  inline ; filename="attachment.bin"'), false);
+  assert.equal(isDownloadDisposition('; filename="attachment.bin"'), false);
+  assert.equal(isDownloadDisposition('filename="attachment.bin"'), false);
+  assert.equal(isDownloadDisposition('attachment, attachment'), false);
+  assert.equal(isDownloadDisposition('bad value; filename="a.bin"'), false);
+  assert.equal(isDownloadDisposition('att/ach; filename="a.bin"'), false);
+  assert.equal(isDownloadDisposition('attachment'), true);
+  assert.equal(isDownloadDisposition('Attachment; filename="d.bin"'), true);
+  assert.equal(isDownloadDisposition('attachment; filename="e.bin"'), true);
+  assert.equal(isDownloadDisposition('attachment\t; filename=a.bin'), true);
+  assert.equal(isDownloadDisposition('x-download; filename="a.html"'), true);
+  assert.equal(isDownloadDisposition('form-data; name="field"'), true);
+});
+
+test('settle: Inflight classifies navigation downloads by disposition type', async () => {
+  for (const [header, keeps] of [
+    ['inline; filename="attachment-page.html"', false],
+    ['attachment; filename="d.bin"', true],
+    ['x-download; filename="a.html"', true],
+  ]) {
+    const ctx = fakeContext();
+    const inflight = new Inflight(ctx);
+    const page = new EventEmitter();
+    const frame = { page: () => page };
+    ctx.emit('page', page);
+    const slow = frameRequest(frame, '/slow');
+    ctx.emit('request', slow);
+    const nav = frameRequest(frame, '/doc', true);
+    ctx.emit('request', nav);
+    ctx.emit('response', answer(nav, 200, { 'content-disposition': header }));
+    ctx.emit('requestfinished', nav);
+    page.emit('framenavigated', frame);
+    assert.deepEqual(inflight.describe(), keeps ? ['GET http://localhost/slow'] : [], `${header}: keeps=${keeps}`);
+    let settled = false;
+    inflight.settled().then(() => { settled = true; });
+    await ticks();
+    assert.equal(settled, !keeps, `${header}: settled=${!keeps}`);
+    if (keeps) {
+      ctx.emit('requestfinished', slow);
+      await ticks();
+      assert.equal(settled, true, `${header}: wakes once slow ends`);
+    }
   }
 });
 

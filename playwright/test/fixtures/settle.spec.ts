@@ -23,6 +23,14 @@ test('a call its page cancelled by loading another document', async ({ page }) =
   await reached();
   await page.goto(`${base}/page?next`);
 });
+test('a call its page cancelled by loading an inline document with attachment in its filename', async ({ page }) => {
+  await page.goto(`${base}/page`);
+  const sent = page.waitForRequest(/\/slow$/);
+  await page.evaluate(() => { void fetch('/slow'); });
+  await sent;
+  await reached();
+  await page.goto(`${base}/inline-attachment-name`);
+});
 test('a call its new document makes as it loads', async ({ page }) => {
   // The document's image, which its parser asks for as it loads, is still
   // in flight when the body ends. The body ends once the test has seen the
@@ -246,6 +254,21 @@ test('a call in flight across a lowercase attachment download', async ({ page })
   await sent;
   // The common spelling, "attachment", is a download as "Attachment" is.
   await page.evaluate(() => { location.href = '/download-lower'; });
+  await answered;
+  await downloaded;
+  const routed = page.waitForEvent('framenavigated');
+  await page.evaluate(() => { history.pushState({}, '', '/page?route'); });
+  await routed;
+});
+test('a call in flight across an unknown disposition type download', async ({ page }) => {
+  await page.goto(`${base}/page`);
+  const sent = page.waitForRequest(/\/slow$/);
+  const answered = page.waitForResponse(/\/download-x$/);
+  const downloaded = page.waitForEvent('download');
+  await page.evaluate(() => { void fetch('/slow'); });
+  await sent;
+  // Browsers treat an unknown disposition type as attachment (RFC 6266 §4.2): still a download.
+  await page.evaluate(() => { location.href = '/download-x'; });
   await answered;
   await downloaded;
   const routed = page.waitForEvent('framenavigated');
