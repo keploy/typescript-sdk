@@ -61,6 +61,7 @@ import { test as base, expect } from '@playwright/test';
 import type { Page, PlaywrightTestArgs, PlaywrightTestOptions, PlaywrightWorkerArgs, PlaywrightWorkerOptions, TestInfo, TestType } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ACTION_FAIL, ACTION_SKIP, AgentClient, KeployError, RANDOM_OWN, RANDOM_SEEDED } from './agent';
 import type { Outcome, Random, TestRef } from './agent';
 import { ENV_TEST_PID, decide } from './join';
@@ -604,15 +605,43 @@ export function outcomeOf(ti: Pick<TestInfo, 'status' | 'expectedStatus'>): Outc
   return ti.status === ti.expectedStatus ? 'passed' : 'failed';
 }
 
+function unwrapLocation(body: string): string | null {
+  if (!body.endsWith(')')) return body;
+  let depth = 0;
+  for (let i = body.length - 1; i >= 0; i--) {
+    const ch = body[i];
+    if (ch === ')') depth++;
+    else if (ch === '(') {
+      depth--;
+      if (depth === 0 && (i === 0 || body[i - 1] === ' ')) {
+        return body.slice(i + 1, -1);
+      }
+    }
+  }
+  const sep = body.startsWith('(') ? 0 : body.indexOf(' (');
+  if (sep === -1) return null;
+  return body.slice(sep === 0 ? 1 : sep + 2, -1);
+}
+
 // The caller of given, as file:line relative to the project: the first
 // frame of the stack outside this package.
 const SOURCE_MAX = 1024;
 export function sourceOf(stack: string, dir = projectDir): string {
   const own = path.dirname(__filename);
   for (const line of stack.split('\n').slice(1)) {
-    const m = /\(?((?:file:\/\/)?[^\s()]+):(\d+):\d+\)?\s*$/.exec(line.trim());
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('at ')) continue;
+    const body = trimmed.slice(3).trimStart().replace(/^async\s+/, '');
+    const locAndPos = unwrapLocation(body);
+    if (locAndPos === null) continue;
+    const m = /^(.+):(\d+):\d+$/.exec(locAndPos);
     if (!m) continue;
-    let file = m[1].startsWith('file://') ? new URL(m[1]).pathname : m[1];
+    let file: string;
+    try {
+      file = m[1].startsWith('file://') ? fileURLToPath(m[1]) : m[1];
+    } catch {
+      continue;
+    }
     if (!path.isAbsolute(file) || path.dirname(file) === own || file.startsWith('node:')) continue;
     file = toSlash(path.relative(dir || process.cwd(), file));
     const s = `${file}:${m[2]}`;
