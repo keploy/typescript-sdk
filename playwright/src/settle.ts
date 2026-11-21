@@ -7,6 +7,22 @@
 import type { BrowserContext, Frame, Page, Request, Route } from '@playwright/test';
 import { workerMark } from './random';
 
+// RFC 7230 OWS + token characters (tchar) for Content-Disposition's disposition-type.
+const DISPOSITION_TYPE = /^[ \t]*([!#$%&'*+.^_`|~0-9A-Za-z-]+)[ \t]*$/;
+
+/**
+ * Reports whether a Content-Disposition header triggers a browser download
+ * (RFC 6266 §4.2): any valid disposition-type token other than "inline"
+ * (case-insensitive) is handled as an attachment. Missing, empty, or malformed
+ * disposition types render inline, regardless of parameters such as filename.
+ */
+export function isDownloadDisposition(header: string | undefined): boolean {
+  if (!header) return false;
+  const semi = header.indexOf(';');
+  const match = DISPOSITION_TYPE.exec(semi === -1 ? header : header.slice(0, semi));
+  return match !== null && match[1].toLowerCase() !== 'inline';
+}
+
 export class Inflight {
   // Each call's number, in the order the browser reported it.
   private readonly open = new Map<Request, { frame: Frame | null; nav: boolean; n: number }>();
@@ -64,7 +80,7 @@ export class Inflight {
       let f: Frame | null = null;
       try { f = r.frame(); } catch { f = null; }
       // A 204 or 205 answer, or a download, leaves the document in place.
-      const keeps = res.status() === 204 || res.status() === 205 || /attachment/i.test(res.headers()['content-disposition'] ?? '');
+      const keeps = res.status() === 204 || res.status() === 205 || isDownloadDisposition(res.headers()['content-disposition']);
       if (f && !keeps) loading.set(f, this.reported);
     });
     const watch = (p: Page): void => {
