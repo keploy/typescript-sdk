@@ -42,6 +42,7 @@ function start() {
     // file of the app it marks itself, synchronously, before that code
     // runs, so the measured process fails closed on the tests it ran in.
     markOnRootCompile(root, control, writePeerMark);
+    markOnRootImport(root, control, writePeerMark);
     return globalThis[KEY];
   }
   let disabled = '';
@@ -84,15 +85,16 @@ function start() {
   agent.hookCompile();
   agent.hookWorkers();
   agent.hookLoaders();
+  agent.hookAsync();
   agent.hookRequests();
   // Marked now, before the socket is tried: a process that does its work
   // and exits before it learns it is no owner still shows to the owner.
   agent.markPeer();
-  agent.listen((owner) => {
+  agent.own(() => agent.listen((owner) => {
     // The table is made once this process owns the socket, after the
     // app's main module has run, a file at a time between the app's events.
     if (owner && !agent.disabled) agent.makeTable();
-  });
+  }));
   process.on('exit', () => agent.close());
   return globalThis[KEY];
 }
@@ -125,6 +127,81 @@ function markOnRootCompile(root, control, writePeerMark) {
   };
   hooked.__keployCoverageMark = true;
   Module.prototype._compile = hooked;
+}
+
+// markOnRootImport marks a process that is not measured when it first loads
+// an ES module of the app (an .mjs, a "type": "module" package anywhere, a
+// .js Node reads as ESM by its syntax): by a load hook, which sees every
+// load (module.registerHooks in the thread, else module.register), or, on a
+// Node with neither, at once (fail closed).
+function markOnRootImport(root, control, writePeerMark) {
+  const Module = require('module');
+  const path = require('path');
+  const { fileURLToPath } = require('url');
+  let marked = false;
+  const isApp = (url) => {
+    if (typeof url !== 'string' || !url.startsWith('file:')) return false;
+    let f;
+    try { f = fileURLToPath(url); } catch { return false; }
+    const rel = path.relative(root, f);
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || rel.split(path.sep).includes('node_modules')) return false;
+    // The same files the CommonJS path counts: no test file, no tool's.
+    return !isTooling(rel.split(path.sep).join('/'));
+  };
+  const { excluder, skippedPath } = require('./lib/table');
+  const excluded = excluder(process.env);
+  const isTooling = (rel) => excluded(rel) || skippedPath(rel);
+  try {
+    if (typeof Module.registerHooks === 'function') {
+      Module.registerHooks({
+        load(url, context, nextLoad) {
+          if (!marked && isApp(url)) { marked = true; writePeerMark(control); }
+          return nextLoad(url, context);
+        },
+      });
+      return;
+    }
+    if (typeof Module.register === 'function') {
+      const dir = `${control}.peers`;
+      // The hook runs on Node's loader thread: it writes this process's mark
+      // itself, the first time it loads an app file.
+      const hook = [
+        "import fs from 'node:fs'; import path from 'node:path'; import { fileURLToPath } from 'node:url';",
+        'let root = ""; let dir = ""; let done = false;',
+        'let excl = [];',
+        'export function initialize(d) { root = d.root; dir = d.dir; excl = d.excl.map((x) => new RegExp(x)); }',
+        'export async function load(url, context, next) {',
+        '  if (!done && url.startsWith("file:")) {',
+        '    try {',
+        '      const rel = path.relative(root, fileURLToPath(url));',
+        '      const parts = rel.split(path.sep); const r = parts.join("/"); const base = parts[parts.length - 1];',
+        '      const tooling = /\\.(test|spec)\\.[^.]+$/.test(base) || /\\.min\\.js$/.test(base) || (parts.length === 1 && /\\.config\\.[^.]+$/.test(base)) ||',
+        '        parts[0] === "coverage" || parts.some((x) => x.startsWith(".") || x === "node_modules" || x === "__tests__") || excl.some((e) => e.test(r) || e.test(base));',
+        '      if (rel && !rel.startsWith("..") && !path.isAbsolute(rel) && !tooling) {',
+        '        done = true;',
+        '        const c = fs.constants; fs.closeSync(fs.openSync(path.join(dir, String(process.pid)), c.O_WRONLY | c.O_CREAT | c.O_EXCL | (c.O_NOFOLLOW || 0), 0o644));',
+        '      }',
+        '    } catch {}',
+        '  }',
+        '  return next(url, context);',
+        '}',
+      ].join('\n');
+      // The dir and its trust are this thread's: a mark written there is checked by the owner.
+      const ag = require('./lib/agent');
+      ag.makePeersDir(dir);
+      // The loader thread writes the mark with O_EXCL|O_NOFOLLOW; the dir's
+      // owner and mode are checked here first: an untrusted dir gets no
+      // mark (the owner fails closed on it anyway).
+      if (ag.untrusted(dir)) { writePeerMark(control); return; }
+      const { globRe } = require('./lib/table');
+      const excl = (process.env.KEPLOY_COVERAGE_EXCLUDE || '').split(',').map((g) => g.trim()).filter(Boolean).map((g) => globRe(g).source);
+      Module.register('data:text/javascript,' + encodeURIComponent(hook), { data: { root, dir, excl } });
+      return;
+    }
+  } catch {
+    // no hook: marked below
+  }
+  writePeerMark(control);
 }
 
 try {

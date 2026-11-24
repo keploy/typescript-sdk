@@ -32,6 +32,28 @@ const SKIP_DIRS = new Set(['node_modules', '__tests__']);
 // or a control character, or a leaf past this line: such files and lines
 // are left out (and said), never sent.
 const MAX_LINE = 1 << 20;
+// A map with no sourcesContent (tsc's default) is used only when every
+// mapped place where both the generated code and the source hold an
+// identifier holds the same one, and there are at least this many.
+const MAP_MIN_CHECKS = 5;
+
+// Words that are no identifiers: a compiler maps its own code onto them
+// (tsc maps exports.x onto "export", a field's assignment onto "private").
+const KEYWORDS = new Set(('break case catch class const continue debugger default delete do else enum export extends false ' +
+  'finally for function if import in instanceof new null return super switch this throw true try typeof var void while ' +
+  'with yield let static implements interface package private protected public await async of get set declare readonly ' +
+  'abstract override type namespace module as from satisfies keyof infer is asserts unique accessor').split(' '));
+
+// identAt(line, col) -> the identifier that starts at col, or "".
+function identAt(line, col) {
+  if (!line || col >= line.length) return '';
+  const id = /[A-Za-z_$][\w$]*/y;
+  if (col > 0 && /[\w$]/.test(line[col - 1])) return '';
+  id.lastIndex = col;
+  const m = id.exec(line);
+  return m && !KEYWORDS.has(m[0]) ? m[0] : '';
+}
+
 const BAD_NAME = /[\\\u0000-\u001f\u007f]/;
 
 /**
@@ -303,15 +325,49 @@ function analyzeScript(root, rel, excluded) {
   // points past a source's end, or past the end of a line, is stale (the
   // source changed after the build). Only the bytes decide, never mtimes,
   // so one build always has one table.
-  const lens = srcs.map((s, i) => (s.text && map.contents[i] === null ? s.text.split('\n').map((l) => l.length) : null));
+  // A map with no sourcesContent is verified by its bytes alone: every
+  // segment must fit the source, and the identifiers the generated code and
+  // the source hold at each mapped place must agree. A map that cannot be
+  // verified so (no identifier to check, or too few agree) is not used: the
+  // generated file is measured as itself.
+  const srcLines = srcs.map((s, i) => (s.text && map.contents[i] === null ? s.text.split('\n') : null));
+  const genLines = text.split('\n');
   const past = new Set();
-  for (const segs of map.lines) {
-    for (const [, src, sl, sc] of segs) {
-      const L = src >= 0 ? lens[src] : null;
-      if (L && (sl >= L.length || sc > L[sl])) past.add(src);
+  const checked = srcs.map(() => 0);
+  const agreed = srcs.map(() => 0);
+  const firstBad = srcs.map(() => '');
+  const srcWords = srcs.map((s, i) => (srcLines[i] ? new Set(s.text.match(/[A-Za-z_$][\w$]*/g) || []) : null));
+  map.lines.forEach((segs, g) => {
+    const gl = genLines[g];
+    for (const [col, src, sl, sc] of segs) {
+      const L = src >= 0 ? srcLines[src] : null;
+      if (!L) continue;
+      if (sl >= L.length || sc > L[sl].length) { past.add(src); continue; }
+      // A closing bracket the generated code holds maps onto the same
+      // bracket in the source.
+      const gch = gl ? gl[col] : '';
+      if (gch === '}') {
+        checked[src]++;
+        if (L[sl][sc] === gch) agreed[src]++;
+        else if (!firstBad[src]) firstBad[src] = `${gch} at ${g + 1}:${col + 1} against ${JSON.stringify(L[sl][sc] || '')} at ${sl + 1}:${sc + 1}`;
+        continue;
+      }
+      const gi = identAt(gl, col);
+      const si = gi ? identAt(L[sl], sc) : '';
+      // A name the compiler made (exports, svc_1, __decorate) is in no
+      // source: only names the source holds are checked.
+      if (!gi || !srcWords[src].has(gi)) continue;
+      checked[src]++;
+      if (si === gi) agreed[src]++;
+      else if (!firstBad[src]) firstBad[src] = `${gi} at ${g + 1}:${col + 1} against ${si} at ${sl + 1}:${sc + 1}`;
     }
-  }
-  for (const i of past) srcs[i] = { srel: srcs[i].srel, stale: 'it maps to places past the source\'s end (the source changed after the build)' };
+  });
+  srcs.forEach((s, i) => {
+    if (!srcLines[i]) return;
+    if (past.has(i)) srcs[i] = { srel: s.srel, stale: 'it maps to places past the source\'s end (the source changed after the build)' };
+    else if (checked[i] < MAP_MIN_CHECKS) srcs[i] = { srel: s.srel, stale: `it has no sourcesContent and too few identifiers to verify it by (${checked[i]}, at least ${MAP_MIN_CHECKS})` };
+    else if (agreed[i] < checked[i]) srcs[i] = { srel: s.srel, stale: `its identifiers do not match the source (${agreed[i]} of ${checked[i]} agree; ${firstBad[i]}): the source changed after the build` };
+  });
   const usable = srcs.filter((s) => s.srel && s.text !== undefined);
   for (const s of srcs) if (!s.srel) out.notes.push(`${rel}: its map's source ${s.why} is not a file of the app`);
   const missing = srcs.filter((s) => s.missing);
@@ -468,6 +524,7 @@ async function build(rootIn, env, runtime, sdk, pause, opts = {}) {
   }
   records.sort((a, b) => comparePkg(a.pkg, b.pkg) || compareBytes(a.id, b.id));
   const names = records.filter((u) => u.state === 'ok').map((u) => u.path);
+  const hashOf = new Map(records.map((u) => [u.path, u.hash]));
   const index = new Map(names.map((n, i) => [n, i]));
   const gen = new Map();
   for (const a of analyzed) {
@@ -508,7 +565,7 @@ async function build(rootIn, env, runtime, sdk, pause, opts = {}) {
     const d = [...a.units.keys()].filter((u) => notMeasured.has(u));
     if (d.length) dead.set(a.abs, [...new Set([...(dead.get(a.abs) || []), ...d])].sort());
   }
-  return { root, build: buildID, ndjson, unitCount: records.length, names, gen, failed, notes, appScript, dead };
+  return { root, build: buildID, ndjson, unitCount: records.length, names, hashOf, gen, failed, notes, appScript, dead };
 }
 
 module.exports = {

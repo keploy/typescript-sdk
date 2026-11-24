@@ -22,6 +22,8 @@ class FakeAgent {
     this.dataPath = dataPath;
     this.records = [];
     this.indexes = [];
+    this.startups = [];
+    this.amends = [];
     this.parts = {}; // part -> {build, payload, records, sha256}
     this.frameErrors = [];
     this.cur = null;
@@ -76,7 +78,9 @@ class FakeAgent {
     c.on('end', () => {
       if (buf.length === 0 || buf[0] === 0x4b) return;
       const v = JSON.parse(buf.toString('utf8'));
-      if (buf.toString('utf8').startsWith('{"kind"')) this.indexes.push(v);
+      if (v.kind === 'startup') this.startups.push(v);
+      else if (v.kind === 'amend') this.amends.push(v);
+      else if (buf.toString('utf8').startsWith('{"kind"')) this.indexes.push(v);
       else this.records.push(v);
       this.notify();
     });
@@ -136,12 +140,33 @@ function get(port, p) {
  * startApp(opts) -> {child, port, stderr(), stop()}: the fixture app under
  * the preload, its sockets in dir.
  */
+// The process groups of the apps still running: killed on every way out of
+// the test process (its exit, an uncaught error, a signal).
+const live = new Set();
+function killGroup(pid, sig) {
+  try {
+    process.kill(-pid, sig);
+  } catch {
+    // the group is gone
+  }
+}
+function killAll() {
+  for (const pid of live) killGroup(pid, 'SIGKILL');
+  live.clear();
+}
+process.on('exit', killAll);
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.once(sig, () => { killAll(); process.kill(process.pid, sig); });
+}
+
 function startApp({ dir, requires = [REGISTER], env = {}, cwd = APP, script = 'server.js', nodeArgs = [] }) {
   const args = [...nodeArgs];
   for (const r of requires) args.push('--require', r);
   args.push(script);
+  // A process group of its own: every process the app starts goes with it.
   const child = spawn(process.execPath, args, {
     cwd,
+    detached: true,
     env: {
       ...process.env,
       KEPLOY_COVERAGE_CONTROL_SOCKET: path.join(dir, 'control.sock'),
@@ -149,6 +174,12 @@ function startApp({ dir, requires = [REGISTER], env = {}, cwd = APP, script = 's
       ...env,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  live.add(child.pid);
+  child.on('exit', () => {
+    // The app is gone; its group may not be (a child it forked): kill it.
+    killGroup(child.pid, 'SIGKILL');
+    live.delete(child.pid);
   });
   let err = '';
   child.stderr.on('data', (d) => { err += d; });
@@ -166,9 +197,13 @@ function startApp({ dir, requires = [REGISTER], env = {}, cwd = APP, script = 's
     port,
     stderr: () => err,
     stop: () => new Promise((resolve) => {
-      if (child.exitCode !== null) return resolve();
-      child.on('exit', () => resolve());
-      child.kill('SIGTERM');
+      if (child.exitCode !== null || child.signalCode !== null) {
+        killGroup(child.pid, 'SIGKILL');
+        return resolve();
+      }
+      const t = setTimeout(() => killGroup(child.pid, 'SIGKILL'), 3000);
+      child.on('exit', () => { clearTimeout(t); resolve(); });
+      killGroup(child.pid, 'SIGTERM');
     }),
   };
 }

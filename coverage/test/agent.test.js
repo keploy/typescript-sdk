@@ -13,8 +13,23 @@ const { FakeAgent, command, get, startApp, waitFor, tmpDir, REGISTER, APP } = re
 const { Agent } = require('../lib/agent');
 
 const ACK = 'ACK proto=2';
+// Node 18 is end of life: no async tracking there, and every window is
+// partial with that reason.
+const EOL = Number(process.versions.node.split('.')[0]) < 20;
+const EOL_RE = /^Node 18\.[\d.]+ is end of life: keploy cannot tell its async work apart; use Node 20\+$/;
+// whole(r): the record has no partial (on Node 18: only the end-of-life one).
+function whole(r, msg = '') {
+  if (EOL) assert.match(r.partial || '', EOL_RE, msg + JSON.stringify(r));
+  else assert.strictEqual(r.partial, undefined, msg + JSON.stringify(r));
+}
 const T = { timeout: 30000 };
+// TA: the rows of the async tracking, which Node 18 does not get (skipped
+// by option: a skip called inside a test makes Node 18's runner exit 1).
+const TA = { ...T, skip: EOL ? 'Node 18: no async tracking (end of life)' : false };
 const BUNDLE = path.join(__dirname, 'fixtures', 'bundle');
+
+// lines(r) -> the record's id and lines only.
+const lines = (r) => ({ id: r.id, executedLinesByFile: r.executedLinesByFile });
 
 async function withApp(t, opts, fn) {
   const dir = opts.dir || tmpDir();
@@ -51,7 +66,7 @@ test('each window sends the lines its test ran, and only those', T, async (t) =>
     await agent.until(() => agent.records.length === 4);
     const [a, b, p, none] = agent.records;
     assert.strictEqual(a.id, 'set-1/test-a');
-    assert.deepStrictEqual(Object.keys(a), ['id', 'executedLinesByFile']);
+    assert.deepStrictEqual(Object.keys(a), EOL ? ['id', 'pid', 'build', 'executedLinesByFile', 'fileHashes', 'partial'] : ['id', 'pid', 'build', 'executedLinesByFile', 'fileHashes']);
     assert.deepStrictEqual(a.executedLinesByFile['lib.js'], [4, 5, 6]);
     assert.deepStrictEqual(b.executedLinesByFile['lib.js'], [9, 10, 11]);
     const sa = new Set(a.executedLinesByFile['server.js']);
@@ -274,7 +289,7 @@ test('a live owner keeps the socket', T, async (t) => {
     while (!/another process serves/.test(app.stderr()) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
     assert.match(app.stderr(), /another process serves .*control\.sock: this process \(pid \d+\) is not measured/);
     assert.strictEqual(await command(control, 'START s/1'), 'ACK proto=2 owner');
-    assert.ok(fs.existsSync(path.join(dir, `control.sock.peers-${process.getuid()}`, String(app.child.pid))), 'it marks itself a peer');
+    assert.ok(fs.existsSync(path.join(dir, 'control.sock.peers', String(app.child.pid))), 'it marks itself a peer');
   } finally {
     await app.stop();
     await new Promise((r) => owner.close(r));
@@ -340,7 +355,7 @@ test('an ES module app: its file: URLs map to its files', T, async (t) => {
   await withApp(t, { cwd, script: 'server.mjs' }, async ({ agent, port, control }) => {
     assert.deepStrictEqual(await window(control, port, 's/hi', '/hi'), [ACK, ACK]);
     await agent.until(() => agent.records.length === 1);
-    assert.deepStrictEqual(agent.records[0], { id: 's/hi', executedLinesByFile: { 'greet.mjs': [1, 2, 3], 'server.mjs': [6] } });
+    assert.deepStrictEqual(lines(agent.records[0]), { id: 's/hi', executedLinesByFile: { 'greet.mjs': [1, 2, 3], 'server.mjs': [6] } });
   });
 });
 
@@ -361,7 +376,7 @@ test('a file whose mtime is ahead of the app\'s clock is measured (KEPLOY_PROVEN
   await withApp(t, { cwd, script: 'server.mjs' }, async ({ agent, port, control }) => {
     assert.deepStrictEqual(await window(control, port, 's/hi', '/hi'), [ACK, ACK]);
     await agent.until(() => agent.records.length === 1);
-    assert.deepStrictEqual(agent.records[0], { id: 's/hi', executedLinesByFile: { 'greet.mjs': [1, 2, 3], 'server.mjs': [6] } });
+    assert.deepStrictEqual(lines(agent.records[0]), { id: 's/hi', executedLinesByFile: { 'greet.mjs': [1, 2, 3], 'server.mjs': [6] } });
   });
 });
 
@@ -399,7 +414,7 @@ test('a peer process of the app: every window is IGNORED while it lives, whateve
     const peer = startApp({ dir });
     try {
       await peer.port;
-      const mark = path.join(dir, `control.sock.peers-${process.getuid()}`, String(peer.child.pid));
+      const mark = path.join(dir, 'control.sock.peers', String(peer.child.pid));
       assert.ok(fs.existsSync(mark), 'marked at its preload');
       const re = /^IGNORED proto=2 the app serves requests in other processes \(workers, pids \d+\) that keploy cannot measure; run one process/;
       assert.match((await window(control, port, 's/empty', null))[1], re);
@@ -437,15 +452,15 @@ test('a peer forked for one request that exits before END: the window is IGNORED
   });
 });
 
-test('a peers dir that is not this user\'s own 0700 dir: no peer is trusted, the owner fails closed', T, async (t) => {
+test('a peers dir that is not a shared sticky 1777 dir: no peer is trusted, the owner fails closed', T, async (t) => {
   const dir = tmpDir();
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  fs.mkdirSync(path.join(dir, `control.sock.peers-${process.getuid()}`), { mode: 0o755 });
-  fs.chmodSync(path.join(dir, `control.sock.peers-${process.getuid()}`), 0o755);
+  fs.mkdirSync(path.join(dir, 'control.sock.peers'), { mode: 0o755 });
+  fs.chmodSync(path.join(dir, 'control.sock.peers'), 0o755);
   await withApp(t, { dir }, async ({ port, control }) => {
     const [a, b] = await window(control, port, 's/1', '/a');
     assert.strictEqual(a, ACK);
-    assert.match(b, /^IGNORED proto=2 .*control\.sock\.peers-\d+ is not this user's own 0700 dir/);
+    assert.match(b, /^IGNORED proto=2 .*control\.sock\.peers is not a shared sticky dir \(1777\)/);
   });
 });
 
@@ -494,7 +509,7 @@ test('an extensionless main script (bin/www) is a unit of the table, and measure
   await withApp(t, { cwd: root, script: 'bin/www', dir: tmpDir() }, async ({ agent, port, control }) => {
     assert.deepStrictEqual(await window(control, port, 's/w', '/'), [ACK, ACK]);
     await agent.until(() => agent.records.length === 1);
-    assert.deepStrictEqual(agent.records[0], { id: 's/w', executedLinesByFile: { 'bin/www': [4] } });
+    assert.deepStrictEqual(lines(agent.records[0]), { id: 's/w', executedLinesByFile: { 'bin/www': [4] } });
   });
 });
 
@@ -557,9 +572,9 @@ test('a root preload that came before keploy\'s: held not measured, every other 
   });
 });
 
-test('Node\'s own TypeScript (type stripping): not measured, with the reason', T, async (t) => {
-  const [maj, min] = process.versions.node.split('.').map(Number);
-  if (maj < 22 || (maj === 22 && min < 6)) return t.skip('this Node has no type stripping');
+const [NODE_MAJ, NODE_MIN] = process.versions.node.split('.').map(Number);
+test('Node\'s own TypeScript (type stripping): not measured, with the reason', { ...T, skip: NODE_MAJ < 22 || (NODE_MAJ === 22 && NODE_MIN < 6) ? 'this Node has no type stripping' : false }, async (t) => {
+  const [maj, min] = [NODE_MAJ, NODE_MIN];
   const cwd = path.join(__dirname, 'fixtures', 'ts');
   const nodeArgs = maj === 22 || (maj === 23 && min < 6) ? ['--experimental-strip-types', '--no-warnings'] : [];
   await withApp(t, { cwd, script: 'main.ts', nodeArgs }, async ({ agent, port, control }) => {
@@ -672,4 +687,690 @@ test('an ES module loader by --experimental-loader, or module.register called by
       assert.ok(!r.executedLinesByFile['greet.mjs'], c.name);
     });
   }
+});
+
+test('records carry pid, build and fileHashes; the first START sends the STARTUP record', T, async (t) => {
+  await withApp(t, {}, async ({ agent, port, app, control }) => {
+    assert.deepStrictEqual(await window(control, port, 's/a', '/a'), [ACK, ACK]);
+    assert.deepStrictEqual(await window(control, port, 's/b', '/b'), [ACK, ACK]);
+    await agent.until(() => agent.records.length === 2 && agent.indexes.length === 1);
+    const [a] = agent.records;
+    assert.strictEqual(a.pid, app.child.pid);
+    assert.strictEqual(a.build, agent.indexes[0].build);
+    const sha = (f) => require('crypto').createHash('sha256').update(fs.readFileSync(path.join(APP, f))).digest('hex');
+    assert.deepStrictEqual(a.fileHashes, { 'lib.js': sha('lib.js'), 'server.js': sha('server.js') });
+    whole(a);
+    assert.strictEqual(agent.startups.length, 1, 'once per process');
+    const st = agent.startups[0];
+    assert.deepStrictEqual(Object.keys(st), ['kind', 'v', 'pid', 'build', 'executedLinesByFile', 'fileHashes']);
+    assert.deepStrictEqual([st.kind, st.v, st.pid, st.build], ['startup', 1, app.child.pid, a.build]);
+    // The app's top level ran before the first window: never a test's.
+    assert.deepStrictEqual(st.executedLinesByFile['lib.js'], [1, 14]);
+    assert.ok(st.executedLinesByFile['server.js'].includes(25));
+    assert.ok(!a.executedLinesByFile['server.js'].includes(25));
+  });
+});
+
+test('timers and consumers: work that is not the test\'s in its window makes it partial', TA, async (t) => {
+  const root = tmpDir();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, 'main.js'), [
+    "'use strict';",
+    "const net = require('net');",
+    'let ticks = 0;',
+    'let job = null;',
+    "const feed = net.createServer((c) => c.end('m')).listen(0, '127.0.0.1');",
+    "const s = require('http').createServer((q, r) => {",
+    "  if (q.url === '/job') {",
+    '    job = setInterval(() => {',
+    '      ticks++;',
+    '    }, 20);',
+    "  } else if (q.url === '/stop') {",
+    '    clearInterval(job);',
+    "  } else if (q.url === '/later') {",
+    '    setTimeout(() => {',
+    '      ticks++;',
+    '    }, 300);',
+    "  } else if (q.url === '/consume') {",
+    "    const c = net.connect(feed.address().port, '127.0.0.1');",
+    '    c.on(\'data\', () => { ticks++; });',
+    "  } else if (q.url === '/own') {",
+    '    setTimeout(() => r.end(String(ticks)), 10);',
+    '    return;',
+    '  }',
+    "  r.end('ok');",
+    '});',
+    "s.listen(0, '127.0.0.1', () => process.stdout.write(`PORT ${s.address().port}\\n`));",
+  ].join('\n'));
+  await withApp(t, { cwd: root, script: 'main.js', dir: tmpDir() }, async ({ agent, port, app, control }) => {
+    const rec = async (id, route, wait = 0, before = 0) => {
+      const n = agent.records.length;
+      assert.strictEqual(await command(control, `START ${id}`), ACK);
+      if (before) await new Promise((r) => setTimeout(r, before));
+      if (route) await get(port, route);
+      if (wait) await new Promise((r) => setTimeout(r, wait));
+      assert.strictEqual(await command(control, `END ${id}`), ACK);
+      await agent.until(() => agent.records.length === n + 1);
+      return agent.records[n];
+    };
+    const why = () => app.stderr().split('\n').filter((l) => /partial:|pending at END/.test(l)).join('\n');
+    assert.strictEqual((await rec('s/plain', '/')).partial, undefined, 'a plain request' + why());
+    assert.strictEqual((await rec('s/own', '/own')).partial, undefined, 'a timer the request set and that ran' + why());
+    assert.match((await rec('s/later', '/later')).partial || '', /work the test's requests started \(Timeout\) was still running at END/);
+    await new Promise((r) => setTimeout(r, 350));
+    assert.match((await rec('s/job', '/job')).partial || '', /was still running at END/, 'an interval it set');
+    assert.match((await rec('s/during', null, 100)).partial || '', /work that is not the test's \([^)]*Timeout[^)]*\) ran app code in its window \(main\.js\)/, 'an interval set before the window');
+    // The interval the s/job test set keeps firing in the next windows: they
+    // are partial until a test clears it.
+    // (The window waits before the request, so the interval fires in it
+    // for sure: it fires every 20 ms.)
+    assert.match((await rec('s/stop', '/stop', 0, 100)).partial || '', /ran app code in its window \(main\.js\)/);
+    assert.strictEqual((await rec('s/after-stop', '/')).partial, undefined, 'once the interval is cleared');
+    // A socket the test opens and that gets its data in the window is the test's.
+    assert.strictEqual((await rec('s/consume', '/consume', 100)).partial, undefined);
+  });
+});
+
+test('a preload that came before keploy\'s ran in the test: the record is partial', TA, async (t) => {
+  const root = tmpDir();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.cpSync(APP, root, { recursive: true, preserveTimestamps: true });
+  fs.writeFileSync(path.join(root, 'instrument.js'), "'use strict';\nconst http = require('http');\nconst emit = http.Server.prototype.emit;\nfunction sample(name) {\n  return name === 'request';\n}\nhttp.Server.prototype.emit = function (name, ...args) {\n  sample(name);\n  return emit.call(this, name, ...args);\n};\n");
+  await withApp(t, { cwd: root, requires: [path.join(root, 'instrument.js'), REGISTER], dir: tmpDir() }, async ({ agent, port, control }) => {
+    assert.deepStrictEqual(await window(control, port, 's/a', '/a'), [ACK, ACK]);
+    await agent.until(() => agent.records.length === 1);
+    assert.match(agent.records[0].partial || '', /instrument\.js ran in the test, and it was loaded before keploy's coverage preload/);
+  });
+});
+
+test('a peers dir is shared (1777, sticky), made so by the first process of the app', T, async (t) => {
+  await withApp(t, {}, async ({ dir }) => {
+    const st = fs.statSync(path.join(dir, 'control.sock.peers'));
+    assert.strictEqual(st.mode & 0o7777, 0o1777);
+  });
+});
+
+test('an ES module of the app loaded by a process whose main script is outside the root: the window is IGNORED', T, async (t) => {
+  const root = tmpDir();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, 'node_modules/esmq'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'node_modules/esmq/master.js'), "'use strict';\nimport(require('url').pathToFileURL(process.argv[2]).href).then(() => process.exit(0));\n");
+  fs.writeFileSync(path.join(root, 'job.mjs'), 'export default 6 * 7;\n');
+  fs.writeFileSync(path.join(root, 'main.js'), [
+    "'use strict';",
+    "const path = require('path');",
+    "const { fork } = require('child_process');",
+    "const s = require('http').createServer((q, r) => {",
+    "  if (q.url === '/esm') {",
+    "    fork(path.join(__dirname, 'node_modules/esmq/master.js'), [path.join(__dirname, 'job.mjs')]).once('exit', () => r.end('esm'));",
+    '    return;',
+    '  }',
+    "  r.end('x');",
+    '});',
+    "s.listen(0, '127.0.0.1', () => process.stdout.write(`PORT ${s.address().port}\\n`));",
+  ].join('\n'));
+  await withApp(t, { cwd: root, script: 'main.js', dir: tmpDir() }, async ({ port, control }) => {
+    assert.deepStrictEqual(await window(control, port, 's/plain', '/'), [ACK, ACK]);
+    const [a, b] = await window(control, port, 's/esm', '/esm');
+    assert.strictEqual(a, ACK);
+    assert.match(b, /^IGNORED proto=2 the app serves requests in other processes/);
+  });
+});
+
+test('a queue consumer opened at startup that gets a message in a window: partial', TA, async (t) => {
+  const root = tmpDir();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, 'main.js'), [
+    "'use strict';",
+    "const net = require('net');",
+    'let got = 0;',
+    'const feed = net.createServer((c) => {',
+    "  const i = setInterval(() => c.write('m'), 30);",
+    "  c.on('close', () => clearInterval(i));",
+    "  c.on('error', () => {});",
+    "}).listen(0, '127.0.0.1', () => {",
+    "  const sub = net.connect(feed.address().port, '127.0.0.1');",
+    "  sub.on('data', () => {",
+    '    got++;',
+    '  });',
+    "  const s = require('http').createServer((q, r) => r.end(String(got)));",
+    "  s.listen(0, '127.0.0.1', () => process.stdout.write(`PORT ${s.address().port}\\n`));",
+    '});',
+  ].join('\n'));
+  await withApp(t, { cwd: root, script: 'main.js', dir: tmpDir() }, async ({ agent, port, app, control }) => {
+    assert.strictEqual(await command(control, 'START s/1'), ACK);
+    await get(port, '/');
+    await new Promise((r) => setTimeout(r, 120));
+    assert.strictEqual(await command(control, 'END s/1'), ACK);
+    await agent.until(() => agent.records.length === 1);
+    assert.match(agent.records[0].partial || '', /work that is not the test's \([^)]*\) ran app code in its window \(main\.js\)/, app.stderr().split('\n').filter((l) => /partial|bracket/.test(l)).slice(0, 20).join('\n'));
+  });
+});
+
+// A pooled "DB": a socket to a local echo server opened at startup, with a
+// promise driver (in node_modules) or a callback driver that calls the app's
+// callback inside the socket's data callback.
+function dbApp(root) {
+  fs.mkdirSync(path.join(root, 'node_modules/fakedb'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'node_modules/fakedb/index.js'), [
+    "'use strict';",
+    "const net = require('net');",
+    'exports.connect = (port) => {',
+    "  const sock = net.connect(port, '127.0.0.1');",
+    '  const waiting = [];',
+    "  sock.on('data', (d) => { for (const _ of String(d)) { const w = waiting.shift(); if (w) w(); } });",
+    '  return {',
+    "    query: () => new Promise((r) => { waiting.push(r); sock.write('q'); }),",
+    "    queryCb: (cb) => { waiting.push(cb); sock.write('q'); },",
+    '  };',
+    '};',
+  ].join('\n'));
+  fs.writeFileSync(path.join(root, 'main.js'), [
+    "'use strict';",
+    "const net = require('net');",
+    "const fakedb = require('fakedb');",
+    "const echo = net.createServer((c) => c.on('data', (d) => c.write(d))).listen(0, '127.0.0.1', () => {",
+    '  const db = fakedb.connect(echo.address().port);',
+    "  const s = require('http').createServer(async (q, r) => {",
+    "    if (q.url === '/pool') {",
+    '      for (let i = 0; i < 20; i++) {',
+    '        await db.query();',
+    '      }',
+    "      r.end('pool');",
+    "    } else if (q.url === '/cb') {",
+    '      db.queryCb(() => {',
+    "        r.end('cb');",
+    '      });',
+    "    } else if (q.url === '/body' || q.url === '/put') {",
+    "      let body = '';",
+    "      q.on('data', (d) => { body += d; });",
+    "      q.on('end', () => {",
+    '        setTimeout(() => {',
+    '          r.end(String(body.length));',
+    '        }, 5);',
+    '      });',
+    "    } else if (q.url === '/two') {",
+    "      require('http').get({ host: '127.0.0.1', port: s.address().port, path: '/' }, (x) => { x.resume(); x.on('end', () => r.end('two')); });",
+    "    } else if (q.url === '/child') {",
+    "      require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 3000)'], { stdio: 'ignore' });",
+    "      r.end('child');",
+    "    } else if (q.url === '/sock') {",
+    "      net.connect(echo.address().port, '127.0.0.1');",
+    "      r.end('fs');",
+    '    } else {',
+    "      r.end('x');",
+    '    }',
+    '  });',
+    "  s.listen(0, '127.0.0.1', () => process.stdout.write(`PORT ${s.address().port}\\n`));",
+    '});',
+  ].join('\n'));
+}
+
+function send(port, method, p, body) {
+  return new Promise((resolve, reject) => {
+    const r = require('http').request({ host: '127.0.0.1', port, method, path: p, headers: { 'content-type': 'application/json' } }, (res) => {
+      let b = '';
+      res.on('data', (d) => { b += d; });
+      res.on('end', () => resolve(b));
+    });
+    r.on('error', reject);
+    r.end(body);
+  });
+}
+
+test('the delta rule: a pooled socket with a promise driver is the test\'s; a callback driver, a second request, pending work are partial', TA, async (t) => {
+  const root = tmpDir();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  dbApp(root);
+  await withApp(t, { cwd: root, script: 'main.js', dir: tmpDir() }, async ({ agent, port, app, control }) => {
+    const why = () => app.stderr().split('\n').filter((l) => /partial:|pending at END/.test(l)).join('\n');
+    const rec = async (id, method, route, body) => {
+      const n = agent.records.length;
+      assert.strictEqual(await command(control, `START ${id}`), ACK);
+      await send(port, method, route, body);
+      assert.strictEqual(await command(control, `END ${id}`), ACK);
+      await agent.until(() => agent.records.length === n + 1);
+      return agent.records[n];
+    };
+    for (let i = 0; i < 3; i++) {
+      const r = await rec(`s/pool${i}`, 'GET', '/pool');
+      assert.strictEqual(r.partial, undefined, JSON.stringify(r) + why());
+      assert.ok(r.executedLinesByFile['main.js'].includes(9) && r.executedLinesByFile['main.js'].includes(11), JSON.stringify(r));
+    }
+    const cb = await rec('s/cb', 'GET', '/cb');
+    assert.match(cb.partial || '', /work that is not the test's \([^)]*\) ran app code in its window \(main\.js\)/);
+    assert.ok(!(cb.executedLinesByFile['main.js'] || []).includes(14), 'the callback\'s app line is never credited');
+    for (const [m, route] of [['POST', '/body'], ['PUT', '/put']]) {
+      const r = await rec(`s/${m}`, m, route, JSON.stringify({ a: 'x'.repeat(5000) }));
+      assert.strictEqual(r.partial, undefined, `${m}: ${JSON.stringify(r)}${why()}`);
+      assert.ok(r.executedLinesByFile['main.js'].includes(21), `${m}: the body's timer callback is the test's: ${JSON.stringify(r)}`);
+    }
+    assert.match((await rec('s/two', 'GET', '/two')).partial || '', /more than one request ran in the test's window/);
+    // Work the test started that cannot be done by END (a child process, a
+    // socket it opened and left open): deterministic, unlike a fast file read.
+    assert.match((await rec('s/child', 'GET', '/child')).partial || '', /work the test's requests started \(PROCESSWRAP\) was still running at END/);
+    // A socket the test opened and left open is no work by itself.
+    assert.strictEqual((await rec('s/sock', 'GET', '/sock')).partial, undefined);
+  });
+});
+
+test('Node 18: no async tracking, and every window is partial with the end-of-life reason', { ...T, skip: EOL ? false : 'Node 20+ has async tracking' }, async (t) => {
+  await withApp(t, {}, async ({ agent, port, control }) => {
+    assert.deepStrictEqual(await window(control, port, 's/a', '/a'), [ACK, ACK]);
+    await agent.until(() => agent.records.length === 1);
+    assert.match(agent.records[0].partial, EOL_RE);
+    assert.deepStrictEqual(agent.records[0].executedLinesByFile['lib.js'], [4, 5, 6]);
+  });
+});
+
+test('a test that dies early leaves no process of its app behind', T, async (t) => {
+  const dir = tmpDir();
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const marker = `kcov-orphan-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(path.join(dir, 'spawner.js'), [
+    "'use strict';",
+    "const { spawn } = require('child_process');",
+    `spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', ${JSON.stringify(marker)}], { stdio: 'ignore' });`,
+    "process.stdout.write('PORT 1\\n');",
+    'setInterval(() => {}, 1000);',
+  ].join('\n'));
+  // A test process that starts the app (which starts a child) and dies.
+  const runner = [
+    `const h = require(${JSON.stringify(path.join(__dirname, 'helpers.js'))});`,
+    `const app = h.startApp({ dir: ${JSON.stringify(dir)}, cwd: ${JSON.stringify(dir)}, script: 'spawner.js', requires: [] });`,
+    "app.port.then(() => setTimeout(() => { throw new Error('the test died'); }, 300));",
+  ].join('\n');
+  const r = spawnSync(process.execPath, ['-e', runner], { encoding: 'utf8', timeout: 20000 });
+  assert.match(r.stderr, /the test died/);
+  await new Promise((res) => setTimeout(res, 500));
+  const left = fs.readdirSync('/proc').filter((p) => /^\d+$/.test(p)).filter((p) => {
+    try { return fs.readFileSync(`/proc/${p}/cmdline`, 'utf8').includes(marker); } catch { return false; }
+  });
+  assert.deepStrictEqual(left, [], 'no process of the app is left');
+});
+
+// An app with the outbound work a real handler does: a keep-alive HTTP
+// call, compression, fs.promises, AbortSignal.timeout, a pool connection
+// opened on first use, and work after the response (an audit query, a
+// crypto job).
+function workApp(root) {
+  fs.mkdirSync(path.join(root, 'node_modules/fakedb'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'node_modules/fakedb/index.js'), [
+    "'use strict';",
+    "const net = require('net');",
+    'exports.connect = (port) => {',
+    "  const sock = net.connect(port, '127.0.0.1');",
+    '  const waiting = [];',
+    "  sock.on('data', (d) => { for (const _ of String(d)) { const w = waiting.shift(); if (w) w(); } });",
+    "  return { query: (q = 'q') => new Promise((r) => { waiting.push(r); sock.write(q); }) };",
+    '};',
+  ].join('\n'));
+  fs.writeFileSync(path.join(root, 'main.js'), [
+    "'use strict';",
+    "const net = require('net');",
+    "const http = require('http');",
+    "const zlib = require('zlib');",
+    "const fsp = require('fs').promises;",
+    "const crypto = require('crypto');",
+    "const fakedb = require('fakedb');",
+    '// An echo "DB" that answers at once, and one that answers after 200 ms.',
+    "const echo = net.createServer((c) => c.on('data', (d) => c.write(d))).listen(0, '127.0.0.1');",
+    "const slow = net.createServer((c) => c.on('data', (d) => setTimeout(() => c.write(d), 200))).listen(0, '127.0.0.1');",
+    "// The upstream is another service: a process of its own, with no preload.",
+    "const up = require('child_process').spawn(process.execPath, ['-e', \"const s = require('http').createServer((q, r) => r.end('up')).listen(0, '127.0.0.1', () => process.stdout.write(String(s.address().port)))\"], { stdio: ['ignore', 'pipe', 'inherit'] });",
+    'let upPort = 0;',
+    'const agent = new http.Agent({ keepAlive: true });',
+    'let db = null;',
+    'let slowdb = null;',
+    'let lazy = null;',
+    "const call = () => new Promise((res) => http.get({ host: '127.0.0.1', port: upPort, agent }, (x) => { x.resume(); x.on('end', res); }));",
+    "echo.on('listening', () => { db = fakedb.connect(echo.address().port); });",
+    "slow.on('listening', () => { slowdb = fakedb.connect(slow.address().port); });",
+    'const s = http.createServer(async (q, r) => {',
+    "  if (q.url === '/ka') {",
+    '    await call();',
+    "    r.end('ka');",
+    "  } else if (q.url === '/gz') {",
+    "    zlib.gzip(Buffer.alloc(20000, 'x'), (e, b) => {",
+    "      r.setHeader('content-encoding', 'gzip');",
+    '      r.end(b);',
+    '    });',
+    "  } else if (q.url === '/fsp') {",
+    '    const b = await fsp.readFile(__filename);',
+    '    r.end(String(b.length));',
+    "  } else if (q.url === '/abort') {",
+    '    const sig = AbortSignal.timeout(5000);',
+    '    r.end(String(sig.aborted));',
+    "  } else if (q.url === '/lazy') {",
+    '    if (!lazy) {',
+    '      lazy = fakedb.connect(echo.address().port);',
+    '    }',
+    '    await lazy.query();',
+    "    r.end('lazy');",
+    "  } else if (q.url === '/audit') {",
+    "    r.end('ok');",
+    '    await db.query();',
+    '    audited();',
+    "  } else if (q.url === '/slowaudit') {",
+    "    r.end('ok');",
+    '    await slowdb.query();',
+    '    audited();',
+    "  } else if (q.url === '/pbkdf') {",
+    "    r.end('ok');",
+    "    crypto.pbkdf2('pw', 'salt', 1, 32, 'sha256', () => {",
+    '      audited();',
+    '    });',
+    "  } else if (q.url === '/gc') {",
+    '    global.gc();',
+    '    global.gc();',
+    "    r.end('gc');",
+    '  } else {',
+    "    r.end('x');",
+    '  }',
+    '});',
+    'function audited() {',
+    '  return 1;',
+    '}',
+    "up.stdout.once('data', (d) => { upPort = Number(String(d)); s.listen(0, '127.0.0.1', () => process.stdout.write(`PORT ${s.address().port}\\n`)); });",
+  ].join('\n'));
+}
+
+test('pending is work that will still run code: keep-alive calls, compression, fs.promises, AbortSignal, a lazy pool are no partial', TA, async (t) => {
+  const root = tmpDir();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  workApp(root);
+  await withApp(t, { cwd: root, script: 'main.js', dir: tmpDir() }, async ({ agent, port, app, control }) => {
+    const why = () => app.stderr().split('\n').filter((l) => /partial:|pending at END/.test(l)).join('\n');
+    const rec = async (id, route) => {
+      const n = agent.records.length;
+      assert.strictEqual(await command(control, `START ${id}`), ACK);
+      await get(port, route);
+      assert.strictEqual(await command(control, `END ${id}`), ACK);
+      await agent.until(() => agent.records.length === n + 1);
+      return agent.records[n];
+    };
+    for (const route of ['/ka', '/ka', '/gz', '/fsp', '/abort', '/lazy', '/lazy', '/x']) {
+      const r = await rec(`s${route}`, route);
+      assert.strictEqual(r.partial, undefined, `${route}: ${JSON.stringify(r)} ${why()}`);
+    }
+    // Work after the response, done within the settle: its lines are the test's.
+    const auditLine = fs.readFileSync(path.join(root, 'main.js'), 'utf8').split('\n').indexOf('  return 1;') + 1;
+    const audit = await rec('s/audit', '/audit');
+    assert.strictEqual(audit.partial, undefined, JSON.stringify(audit) + why());
+    await new Promise((r) => setTimeout(r, 100));
+    // Its line is the test's: in the record if it ran by END, else amended.
+    assert.ok(audit.executedLinesByFile['main.js'].includes(auditLine) || agent.amends.some((a) => a.test === 's/audit'), `the audit: ${JSON.stringify(audit)} ${JSON.stringify(agent.amends)}`);
+    const pb = await rec('s/pbkdf', '/pbkdf');
+    assert.strictEqual(pb.partial, undefined, JSON.stringify(pb) + why());
+    assert.ok(pb.executedLinesByFile['main.js'].includes(auditLine), `the crypto callback's line is credited: ${JSON.stringify(pb)}`);
+    // Work after the response whose reply comes after END: not judged at
+    // END (a promise); its app code after END amends the test.
+    const sa = await rec('s/slowaudit', '/slowaudit');
+    assert.strictEqual(sa.partial, undefined, JSON.stringify(sa));
+    await agent.until(() => agent.amends.some((a) => a.test === 's/slowaudit'), 3000);
+    assert.match(agent.amends.find((a) => a.test === 's/slowaudit').partial, /^work the test started ran app code after its end \(.*\): main\.js$/);
+  });
+});
+
+test('pending resources are held weakly: compressed responses leave nothing behind after GC', TA, async (t) => {
+  const root = tmpDir();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  workApp(root);
+  await withApp(t, { cwd: root, script: 'main.js', dir: tmpDir(), nodeArgs: ['--expose-gc'], env: { KEPLOY_COVERAGE_DEBUG: '1' } }, async ({ port, app, control }) => {
+    const tagsNow = () => {
+      const m = [...app.stderr().matchAll(/async tags (\d+)/g)];
+      return Number(m[m.length - 1][1]);
+    };
+    const win = async (id, route) => {
+      await command(control, `START ${id}`);
+      await get(port, route);
+      await command(control, `END ${id}`);
+    };
+    for (let i = 0; i < 20; i++) await win(`w/${i}`, '/gz');
+    await win('w/gc0', '/gc');
+    const base = tagsNow();
+    for (let i = 0; i < 300; i++) await win(`z/${i}`, '/gz');
+    await win('w/gc1', '/gc');
+    await win('w/gc2', '/gc');
+    const after = tagsNow();
+    assert.ok(after <= base + 50, `async tags ${base} before 300 compressed responses, ${after} after GC`);
+  });
+});
+
+test('should-fixes: a connection listener, nested scopes both ways, an app timer named resetCache', TA, async (t) => {
+  const root = tmpDir();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, 'node_modules/scoped'), { recursive: true });
+  // A library (node_modules) that runs a callback in the scope of an async
+  // resource it made at startup.
+  fs.writeFileSync(path.join(root, 'node_modules/scoped/index.js'), [
+    "'use strict';",
+    "const { AsyncResource } = require('async_hooks');",
+    "const res = new AsyncResource('LIBSCOPE');",
+    'exports.run = (fn) => res.runInAsyncScope(fn);',
+  ].join('\n'));
+  fs.writeFileSync(path.join(root, 'main.js'), [
+    "'use strict';",
+    "const http = require('http');",
+    "const { AsyncResource } = require('async_hooks');",
+    "const scoped = require('scoped');",
+    'let conns = 0;',
+    'function mark() {',
+    '  return 1;',
+    '}',
+    'const s = http.createServer(async (q, r) => {',
+    "  if (q.url === '/nested') {",
+    '    mark();',
+    '    scoped.run(() => 0);',
+    '    mark();',
+    "    r.end('nested');",
+    "  } else if (q.url === '/inside') {",
+    "    const mine = new AsyncResource('MINE');",
+    '    scoped.run(() => mine.runInAsyncScope(() => {',
+    '      mark();',
+    '    }));',
+    "    r.end('inside');",
+    "  } else if (q.url === '/reset') {",
+    '    setTimeout(function resetCache() {',
+    '      mark();',
+    '    }, 300);',
+    "    r.end('reset');",
+    '  } else {',
+    "    r.end('x');",
+    '  }',
+    '});',
+    "s.on('connection', () => {",
+    '  conns++;',
+    '});',
+    "s.listen(0, '127.0.0.1', () => process.stdout.write(`PORT ${s.address().port}\\n`));",
+  ].join('\n'));
+  await withApp(t, { cwd: root, script: 'main.js', dir: tmpDir() }, async ({ agent, port, app, control }) => {
+    const why = () => app.stderr().split('\n').filter((l) => /partial:|pending at END/.test(l)).join('\n');
+    // A new connection per test, as keploy makes: its 'connection' listener is the test's.
+    const fresh = (p) => new Promise((resolve, reject) => {
+      require('http').get({ host: '127.0.0.1', port, path: p, agent: false }, (res) => { res.resume(); res.on('end', resolve); }).on('error', reject);
+    });
+    const rec = async (id, route) => {
+      const n = agent.records.length;
+      assert.strictEqual(await command(control, `START ${id}`), ACK);
+      await fresh(route);
+      assert.strictEqual(await command(control, `END ${id}`), ACK);
+      await agent.until(() => agent.records.length === n + 1);
+      return agent.records[n];
+    };
+    const src = fs.readFileSync(path.join(root, 'main.js'), 'utf8').split('\n');
+    const line = (text, from = 0) => src.indexOf(text, from) + 1;
+    const c = await rec('s/conn', '/x');
+    assert.strictEqual(c.partial, undefined, JSON.stringify(c) + why());
+    assert.ok(c.executedLinesByFile['main.js'].includes(line('  conns++;')), 'the connection listener is credited');
+    const n = await rec('s/nested', '/nested');
+    assert.strictEqual(n.partial, undefined, JSON.stringify(n) + why());
+    const ln = line('    mark();');
+    assert.ok(n.executedLinesByFile['main.js'].includes(ln) && n.executedLinesByFile['main.js'].includes(line('    mark();', ln)), `lines before and after a foreign scope are the test's: ${JSON.stringify(n)}`);
+    const i = await rec('s/inside', '/inside');
+    assert.strictEqual(i.partial, undefined, JSON.stringify(i) + why());
+    assert.ok(i.executedLinesByFile['main.js'].includes(line('      mark();')), `the test's own scope inside a foreign one is credited: ${JSON.stringify(i)}`);
+    assert.match((await rec('s/reset', '/reset')).partial || '', /work the test's requests started \(Timeout\) was still running at END/, 'an app timer named resetCache is the app\'s');
+  });
+});
+
+// The TLS row makes its certificate and key at test time (never a key in the
+// repo), with openssl; with no openssl on PATH it is skipped.
+const OPENSSL = spawnSync('openssl', ['version'], { encoding: 'utf8' }).status === 0;
+test('an outbound TLS keep-alive call in a window is no partial', { ...TA, skip: TA.skip || (OPENSSL ? false : 'openssl is not on PATH: no certificate for the TLS row') }, async (t) => {
+  const root = tmpDir();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const key = path.join(root, 'key.pem');
+  const cert = path.join(root, 'cert.pem');
+  const g = spawnSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=localhost', '-days', '1', '-keyout', key, '-out', cert], { encoding: 'utf8' });
+  assert.strictEqual(g.status, 0, g.stderr);
+  const upCode = `const fs = require('fs'); const s = require('https').createServer({ key: fs.readFileSync(${JSON.stringify(key)}), cert: fs.readFileSync(${JSON.stringify(cert)}) }, (q, r) => r.end('tls')).listen(0, '127.0.0.1', () => process.stdout.write(String(s.address().port)))`;
+  fs.writeFileSync(path.join(root, 'main.js'), [
+    "'use strict';",
+    "const http = require('http');",
+    "const https = require('https');",
+    `const up = require('child_process').spawn(process.execPath, ['-e', ${JSON.stringify(upCode)}], { stdio: ['ignore', 'pipe', 'inherit'] });`,
+    'const agent = new https.Agent({ keepAlive: true, rejectUnauthorized: false });',
+    'let upPort = 0;',
+    'const s = http.createServer(async (q, r) => {',
+    "  await new Promise((res) => https.get({ host: '127.0.0.1', port: upPort, agent }, (x) => { x.resume(); x.on('end', res); }));",
+    "  r.end('tls');",
+    '});',
+    "up.stdout.once('data', (d) => { upPort = Number(String(d)); s.listen(0, '127.0.0.1', () => process.stdout.write(`PORT ${s.address().port}\\n`)); });",
+  ].join('\n'));
+  await withApp(t, { cwd: root, script: 'main.js', dir: tmpDir() }, async ({ agent, port, app, control }) => {
+    const why = () => app.stderr().split('\n').filter((l) => /partial:|pending at END/.test(l)).join('\n');
+    for (const k of [1, 2]) {
+      assert.deepStrictEqual(await window(control, port, `s/tls${k}`, '/'), [ACK, ACK]);
+      await agent.until(() => agent.records.length === k);
+      const r = agent.records[k - 1];
+      assert.strictEqual(r.partial, undefined, `TLS keep-alive call ${k}: ${JSON.stringify(r)}${why()}`);
+    }
+  });
+});
+
+test('a pm2-runtime-like launcher in node_modules that loads the root config (require, import) does not make the tests IGNORED', T, async (t) => {
+  for (const kind of ['require', 'import']) {
+    const root = tmpDir();
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    fs.mkdirSync(path.join(root, 'node_modules/pm2like'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'ecosystem.config.js'), "module.exports = { script: 'server.js' };\n");
+    fs.writeFileSync(path.join(root, 'ecosystem.config.mjs'), "export default { script: 'server.js' };\n");
+    fs.cpSync(APP, root, { recursive: true, filter: (p) => !p.includes('exits.test') });
+    const load = kind === 'require'
+      ? "const conf = require(require('path').join(process.cwd(), 'ecosystem.config.js'));"
+      : "const conf = (await import(require('url').pathToFileURL(require('path').join(process.cwd(), 'ecosystem.config.mjs')).href)).default;";
+    fs.writeFileSync(path.join(root, 'node_modules/pm2like/runtime.js'), [
+      "'use strict';",
+      '(async () => {',
+      `  ${load}`,
+      "  const child = require('child_process').fork(require('path').join(process.cwd(), conf.script), [], { stdio: 'inherit' });",
+      "  process.on('SIGTERM', () => { child.kill('SIGTERM'); process.exit(0); });",
+      '})();',
+    ].join('\n'));
+    await withApp(t, { cwd: root, script: 'node_modules/pm2like/runtime.js', dir: tmpDir() }, async ({ agent, port, control }) => {
+      let ans;
+      for (let i = 0; i < 20; i++) {
+        ans = await window(control, port, `p/${kind}${i}`, '/a');
+        if (ans[0] === ACK) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      assert.deepStrictEqual(ans, [ACK, ACK], kind);
+      await agent.until(() => agent.records.length >= 1);
+      assert.deepStrictEqual(agent.records[agent.records.length - 1].executedLinesByFile['lib.js'], [4, 5, 6], kind);
+    });
+  }
+});
+
+test('after END: a never-settled promise and a Promise.race timeout are no partial; late app code of the test is amended', TA, async (t) => {
+  const root = tmpDir();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, 'node_modules/cbdb'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'node_modules/cbdb/index.js'), [
+    "'use strict';",
+    "const net = require('net');",
+    'exports.connect = (port) => {',
+    "  const sock = net.connect(port, '127.0.0.1');",
+    '  const waiting = [];',
+    "  sock.on('data', (d) => { for (const _ of String(d)) { const w = waiting.shift(); if (w) w(); } });",
+    "  return { queryCb: (cb) => { waiting.push(cb); sock.write('q'); } };",
+    '};',
+  ].join('\n'));
+  fs.writeFileSync(path.join(root, 'main.js'), [
+    "'use strict';",
+    "const net = require('net');",
+    "const cbdb = require('cbdb');",
+    "const slow = net.createServer((c) => c.on('data', (d) => setTimeout(() => c.write(d), 150))).listen(0, '127.0.0.1');",
+    'let db = null;',
+    "slow.on('listening', () => { db = cbdb.connect(slow.address().port); });",
+    'function late() {',
+    '  return 1;',
+    '}',
+    "const s = require('http').createServer(async (q, r) => {",
+    "  if (q.url === '/never') {",
+    '    const p = new Promise(() => {});',
+    "    r.end(String(typeof p));",
+    "  } else if (q.url === '/race') {",
+    '    let timer;',
+    "    const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('t')), 5000); });",
+    "    await Promise.race([Promise.resolve('fast'), timeout]);",
+    '    clearTimeout(timer);',
+    "    r.end('race');",
+    "  } else if (q.url === '/cb') {",
+    "    r.end('cb');",
+    '    db.queryCb(() => {',
+    '      late();',
+    '    });',
+    "  } else if (q.url === '/sock') {",
+    "    const c = net.connect(slow.address().port, '127.0.0.1');",
+    "    c.on('data', () => {",
+    '      late();',
+    '    });',
+    "    c.write('x');",
+    "    r.end('sock');",
+    "  } else if (q.url === '/unref') {",
+    '    setTimeout(() => {',
+    '      late();',
+    '    }, 100).unref();',
+    "    r.end('unref');",
+    "  } else if (q.url === '/refresh') {",
+    '    const tm = setTimeout(() => {',
+    '      late();',
+    '    }, 60);',
+    '    tm.unref();',
+    '    tm.refresh();',
+    "    r.end('refresh');",
+    '  } else {',
+    "    r.end('x');",
+    '  }',
+    '});',
+    "s.listen(0, '127.0.0.1', () => process.stdout.write(`PORT ${s.address().port}\\n`));",
+  ].join('\n'));
+  await withApp(t, { cwd: root, script: 'main.js', dir: tmpDir() }, async ({ agent, port, app, control }) => {
+    const rec = async (id, route) => {
+      const n = agent.records.length;
+      assert.strictEqual(await command(control, `START ${id}`), ACK);
+      await get(port, route);
+      const t0 = Date.now();
+      assert.strictEqual(await command(control, `END ${id}`), ACK);
+      const ms = Date.now() - t0;
+      await agent.until(() => agent.records.length === n + 1);
+      return [agent.records[n], ms];
+    };
+    const [nv, nms] = await rec('a/never', '/never');
+    assert.strictEqual(nv.partial, undefined, JSON.stringify(nv));
+    assert.ok(nms < 45, `END did not wait for the never-settled promise (${nms} ms)`);
+    const [rc] = await rec('a/race', '/race');
+    assert.strictEqual(rc.partial, undefined, JSON.stringify(rc));
+    for (const route of ['/cb', '/sock', '/unref', '/refresh']) {
+      const [r] = await rec(`a${route}`, route);
+      assert.strictEqual(r.partial, undefined, `${route}: ${JSON.stringify(r)}`);
+      await agent.until(() => agent.amends.some((a) => a.test === `a${route}`), 3000).catch(() => {});
+      const am = agent.amends.find((a) => a.test === `a${route}`);
+      assert.ok(am, `${route}: amended (${JSON.stringify(agent.amends)}) ${app.stderr().split('\n').filter((l) => /amend|partial/.test(l)).join(' | ')}`);
+      assert.match(am.partial, /^work the test started ran app code after its end \(.*\): main\.js$/);
+      assert.deepStrictEqual(Object.keys(am), ['kind', 'v', 'test', 'partial']);
+    }
+    assert.strictEqual(agent.amends.filter((a) => a.test === 'a/never' || a.test === 'a/race').length, 0, 'no amend for the clean tests');
+  });
 });

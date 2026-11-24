@@ -308,7 +308,7 @@ test('mapped sources under node_modules, hidden dirs or excluded are left out, a
     fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
     fs.writeFileSync(path.join(dir, rel), 'go();\n');
   }
-  const map = { version: 3, sources: ['src/ok.ts', 'src/x.test.ts', 'node_modules/lib/x.ts', '.cache/y.ts'], mappings: 'AAAA,CCAA,CCAA,CCAA' };
+  const map = { version: 3, sources: ['src/ok.ts', 'src/x.test.ts', 'node_modules/lib/x.ts', '.cache/y.ts'], sourcesContent: ['go();\n', 'go();\n', 'go();\n', 'go();\n'], mappings: 'AAAA,CCAA,CCAA,CCAA' };
   fs.writeFileSync(path.join(dir, 'gen.js'), `go(); a(); b(); c();\n//# sourceMappingURL=data:application/json;base64,${Buffer.from(JSON.stringify(map)).toString('base64')}\n`);
   const a = table.analyzeScript(fs.realpathSync(dir), 'gen.js', table.excluder({}));
   assert.deepStrictEqual([...a.units.keys()], ['src/ok.ts']);
@@ -343,4 +343,54 @@ test('a file whose name holds a backslash or a control character is left out, an
   assert.strictEqual(t.appScript(path.join(fs.realpathSync(dir), 'new.js')), 'new.js');
   assert.strictEqual(t.appScript(path.join(fs.realpathSync(dir), 'x.test.js')), null, 'excluded by name');
   assert.strictEqual(t.appScript(path.join(fs.realpathSync(dir), 'node_modules/m.js')), null);
+});
+
+test('a map with no sourcesContent whose identifiers no longer match its source: the generated file is measured as itself', async () => {
+  const dir = tmpDir();
+  fs.cpSync(APP, dir, { recursive: true, preserveTimestamps: true });
+  // An edit that keeps every position inside the file: identifiers move.
+  const ts = path.join(dir, 'src/price.ts');
+  fs.writeFileSync(ts, fs.readFileSync(ts, 'utf8').replace('let sum = 0;', 'let tot = 0;').replace('sum += it.cents;', 'tot += it.cents;').replace('return sum;', 'return tot;').replace('cents * (100 - pct)', 'pct * (100 - cents)').replace('this.items.push(item);', 'this.items.unshift(item);').replace('return this.items.length;', 'return this.items.size;!'));
+  const t = await build(dir);
+  const units = unitsOf(t).map((u) => u.path);
+  assert.ok(units.includes('compiled/price.js') && !units.includes('src/price.ts'), units.join(', '));
+  assert.ok(t.notes.some((n) => /compiled\/price\.js: measured as itself: its map is stale for src\/price\.ts \((its identifiers do not match|it maps to places past)/.test(n)), t.notes.join('\n'));
+  // The fixture as built: its map's identifiers agree, so it is mapped.
+  assert.ok(unitsOf(await build(APP)).some((u) => u.path === 'src/price.ts'));
+});
+
+test('the exact identifier check: real tsc output (imports, decorators) is mapped; one stale edit is not', async () => {
+  const deco = path.join(__dirname, 'fixtures', 'tsdeco');
+  const t = await build(deco);
+  assert.deepStrictEqual(unitsOf(t).map((u) => u.path), ['src/main.ts', 'src/svc.ts'], t.notes.join('\n'));
+  // One identifier changed in place, every position still inside the file.
+  const dir = tmpDir();
+  fs.cpSync(deco, dir, { recursive: true, preserveTimestamps: true });
+  const f = path.join(dir, 'src/svc.ts');
+  fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace('const total = cents * this.rate;', 'const tutal = cents * this.rate;'));
+  const s = await build(dir);
+  assert.ok(unitsOf(s).some((u) => u.path === 'compiled/svc.js') && !unitsOf(s).some((u) => u.path === 'src/svc.ts'), unitsOf(s).map((u) => u.path).join(', '));
+  assert.ok(s.notes.some((n) => /compiled\/svc\.js: measured as itself: its map is stale for src\/svc\.ts \(its identifiers do not match the source \(\d+ of \d+ agree; total at/.test(n)), s.notes.join('\n'));
+});
+
+test('round 1\'s stale map: a line inserted and a blank line removed, positions still in bounds: not mapped', async () => {
+  const dir = tmpDir();
+  fs.cpSync(APP, dir, { recursive: true, preserveTimestamps: true });
+  const f = path.join(dir, 'src/price.ts');
+  let ts = fs.readFileSync(f, 'utf8');
+  ts = ts.replace('add(item: Item): void {\n', "add(item: Item): void {\n    console.log(item.sku, 'added to the cart now');\n");
+  ts = ts.replace('  }\n\n  get count()', '  }\n  get count()');
+  fs.writeFileSync(f, ts);
+  const t = await build(dir);
+  const units = unitsOf(t).map((u) => u.path);
+  assert.ok(units.includes('compiled/price.js') && !units.includes('src/price.ts'), units.join(', '));
+});
+
+test('the reviewer\'s stale map: a call added at the end of a getter, the brackets no longer match: not mapped', async () => {
+  const dir = tmpDir();
+  fs.cpSync(APP, dir, { recursive: true, preserveTimestamps: true });
+  const f = path.join(dir, 'src/price.ts');
+  fs.writeFileSync(f, fs.readFileSync(f, 'utf8').replace('    return this.items.length;\n  }', '    return this.items.length;\n    audit(this.items);\n  }'));
+  const units = unitsOf(await build(dir)).map((u) => u.path);
+  assert.ok(units.includes('compiled/price.js') && !units.includes('src/price.ts'), units.join(', '));
 });
