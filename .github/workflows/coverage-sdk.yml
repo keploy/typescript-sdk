@@ -1,0 +1,40 @@
+name: "@keploy/coverage"
+
+on:
+  pull_request:
+    paths:
+      - "coverage/**"
+      - ".github/workflows/coverage-sdk.yml"
+  push:
+    branches: [main]
+    paths:
+      - "coverage/**"
+      - ".github/workflows/coverage-sdk.yml"
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  rows:
+    name: rows (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    # The rows take seconds (no install: the package has no dependency); one
+    # past 10 minutes is a hang.
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # package.json engines: Node 18 or later.
+        node: [18, 20, 22, 24]
+    defaults:
+      run:
+        working-directory: coverage
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm test

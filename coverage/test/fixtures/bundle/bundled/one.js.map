@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../src/entry.ts", "../src/calc.ts"],
+  "sourcesContent": ["import http from 'http';\nimport { add, mul } from './calc';\n\nconst server = http.createServer((req, res) => {\n  if (req.url === '/add') {\n    res.end(String(add(2, 3)));\n    return;\n  }\n  if (req.url === '/mul') {\n    res.end(String(mul(2, 3)));\n    return;\n  }\n  res.statusCode = 404;\n  res.end('no');\n});\n\nserver.listen(0, '127.0.0.1', () => {\n  process.stdout.write(`PORT ${(server.address() as { port: number }).port}\\n`);\n});\n", "// Arithmetic, each function on lines of its own.\nexport function add(a: number, b: number): number {\n  const sum = a + b;\n  return sum;\n}\n\nexport function mul(a: number, b: number): number {\n  const product = a * b;\n  return product;\n}\n"],
+  "mappings": "2cAAA,IAAAA,EAAiB,mBCCV,SAASC,EAAIC,EAAWC,EAAmB,CAEhD,OADYD,EAAIC,CAElB,CAEO,SAASC,EAAIF,EAAWC,EAAmB,CAEhD,OADgBD,EAAIC,CAEtB,CDNA,IAAME,EAAS,EAAAC,QAAK,aAAa,CAACC,EAAKC,IAAQ,CAC7C,GAAID,EAAI,MAAQ,OAAQ,CACtBC,EAAI,IAAI,OAAOC,EAAI,EAAG,CAAC,CAAC,CAAC,EACzB,MACF,CACA,GAAIF,EAAI,MAAQ,OAAQ,CACtBC,EAAI,IAAI,OAAOE,EAAI,EAAG,CAAC,CAAC,CAAC,EACzB,MACF,CACAF,EAAI,WAAa,IACjBA,EAAI,IAAI,IAAI,CACd,CAAC,EAEDH,EAAO,OAAO,EAAG,YAAa,IAAM,CAClC,QAAQ,OAAO,MAAM,QAASA,EAAO,QAAQ,EAAuB,IAAI;AAAA,CAAI,CAC9E,CAAC",
+  "names": ["import_http", "add", "a", "b", "mul", "server", "http", "req", "res", "add", "mul"]
+}

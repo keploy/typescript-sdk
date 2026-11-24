@@ -1,0 +1,9 @@
+var p=Object.create;var o=Object.defineProperty;var c=Object.getOwnPropertyDescriptor;var a=Object.getOwnPropertyNames;var b=Object.getPrototypeOf,f=Object.prototype.hasOwnProperty;var l=(r,t,n,e)=>{if(t&&typeof t=="object"||typeof t=="funct\
+ion")for(let u of a(t))!f.call(r,u)&&u!==n&&o(r,u,{get:()=>t[u],
+enumerable:!(e=c(t,u))||e.enumerable});return r};var S=(r,t,n)=>(n=r!=null?p(b(r)):{},l(t||!r||!r.__esModule?
+o(n,"default",{value:r,enumerable:!0}):n,r));var i=S(require("http"));function m(r,t){return r+t}function d(r,t){return r*t}var s=i.default.createServer((r,t)=>{if(r.url==="/add"){t.end(
+String(m(2,3)));return}if(r.url==="/mul"){t.end(String(d(2,3)));
+return}t.statusCode=404,t.end("no")});s.listen(0,"127.0.0.1",
+()=>{process.stdout.write(`PORT ${s.address().port}
+`)});
+//# sourceMappingURL=wrapped.js.map

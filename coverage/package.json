@@ -1,0 +1,28 @@
+{
+  "name": "@keploy/coverage",
+  "version": "0.1.0",
+  "description": "Per-test code coverage of a Node app for keploy test --dedup and keploy's code coverage: V8 precise coverage in the app's process, mapped through source maps.",
+  "license": "Apache-2.0",
+  "author": "Keploy <dev@keploy.io>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/keploy/typescript-sdk.git",
+    "directory": "coverage"
+  },
+  "main": "register.js",
+  "exports": {
+    ".": "./register.js",
+    "./register": "./register.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "register.js",
+    "lib"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

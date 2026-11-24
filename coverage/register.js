@@ -1,0 +1,134 @@
+'use strict';
+// Preload: node --require @keploy/coverage/register (or the absolute path of
+// this file, appended to NODE_OPTIONS). It starts keploy's coverage adapter
+// in the app's process, once, however often it is required, and only in the
+// app: the main thread of a process whose main script is under the app's
+// root (KEPLOY_APP_SOURCE_DIR, else the working directory), not under
+// node_modules. KEPLOY_COVERAGE=0 turns it off; KEPLOY_COVERAGE=all
+// measures any process. Nothing here throws into the app.
+//
+// What it cannot measure it says, and keploy shows: the adapter then binds
+// the control socket all the same and answers every START IGNORED with the
+// reason (a root of / or a system dir, NODE_V8_COVERAGE set, TypeScript
+// compiled in memory).
+
+const KEY = Symbol.for('keploy.coverage.agent');
+
+function start() {
+  if (globalThis[KEY]) return globalThis[KEY];
+  const env = process.env;
+  const mode = (env.KEPLOY_COVERAGE || '').toLowerCase();
+  globalThis[KEY] = { started: false };
+  if (mode === '0' || mode === 'off' || mode === 'false') return globalThis[KEY];
+  const { isMainThread } = require('worker_threads');
+  if (!isMainThread) return globalThis[KEY];
+  const fs = require('fs');
+  const path = require('path');
+  const { Agent, mainInRoot, mainScript, writePeerMark, SYSTEM_DIRS } = require('./lib/agent');
+  let root;
+  try {
+    // KEPLOY_COVERAGE_ROOT: set by the measured process for the processes
+    // it starts, so their working directory never decides the root.
+    root = fs.realpathSync(path.resolve(env.KEPLOY_APP_SOURCE_DIR || env.KEPLOY_COVERAGE_ROOT || process.cwd()));
+  } catch (e) {
+    process.stderr.write(`[keploy coverage] no app root to measure: ${e.message}\n`);
+    return globalThis[KEY];
+  }
+  const main = mainScript();
+  const control = env.KEPLOY_COVERAGE_CONTROL_SOCKET || '/tmp/coverage_control.sock';
+  if (mode !== 'all' && !mainInRoot(root, main)) {
+    // Not the app's own process (a queue's sandboxed processor forked from
+    // node_modules, node -e): it is not measured, but once it compiles a
+    // file of the app it marks itself, synchronously, before that code
+    // runs, so the measured process fails closed on the tests it ran in.
+    markOnRootCompile(root, control, writePeerMark);
+    return globalThis[KEY];
+  }
+  let disabled = '';
+  if (!env.KEPLOY_APP_SOURCE_DIR && SYSTEM_DIRS.has(root)) {
+    disabled = `the app's root would be ${root} (the working directory): set KEPLOY_APP_SOURCE_DIR to the app's folder`;
+  } else if (env.NODE_V8_COVERAGE) {
+    disabled = 'NODE_V8_COVERAGE is set (c8): keploy would reset the counts it reports; unset it for per-test coverage';
+  }
+  // Root files already loaded (another --require that came first, such as
+  // an APM's instrument.js) were compiled before V8's precise coverage: the
+  // table holds them not measured, with the reason.
+  const held = new Set();
+  for (const f of Object.keys(require.cache)) {
+    const rel = path.relative(root, f);
+    if (rel && !rel.startsWith('..') && !path.isAbsolute(rel) && !rel.split(path.sep).includes('node_modules') &&
+      !f.startsWith(__dirname + path.sep)) held.add(f);
+  }
+  const agent = new Agent({
+    root,
+    env,
+    main,
+    disabled,
+    held,
+    control,
+    data: env.KEPLOY_COVERAGE_DATA_SOCKET || '/tmp/coverage_data.sock',
+  });
+  globalThis[KEY] = { started: true, agent };
+  // Processes the app starts (a queue's sandboxed processor, node -e) read
+  // the app's root from here, whatever their working directory.
+  process.env.KEPLOY_COVERAGE_ROOT = root;
+  if (disabled) process.stderr.write(`[keploy coverage] not measured: ${disabled}\n`);
+  // Before the app's first module: every app function is counted from its
+  // first compile, and every CommonJS source V8 compiles is seen.
+  try {
+    agent.startProfiler();
+  } catch (e) {
+    agent.disabled = `V8 precise coverage could not start: ${e.message}`;
+    process.stderr.write(`[keploy coverage] ${agent.disabled}\n`);
+  }
+  agent.hookCompile();
+  agent.hookWorkers();
+  agent.hookLoaders();
+  agent.hookRequests();
+  // Marked now, before the socket is tried: a process that does its work
+  // and exits before it learns it is no owner still shows to the owner.
+  agent.markPeer();
+  agent.listen((owner) => {
+    // The table is made once this process owns the socket, after the
+    // app's main module has run, a file at a time between the app's events.
+    if (owner && !agent.disabled) agent.makeTable();
+  });
+  process.on('exit', () => agent.close());
+  return globalThis[KEY];
+}
+
+function markOnRootCompile(root, control, writePeerMark) {
+  const path = require('path');
+  const Module = require('module');
+  const orig = Module.prototype._compile;
+  if (typeof orig !== 'function' || orig.__keployCoverageMark) return;
+  let marked = false;
+  // A file the table never counts (a test file a runner compiles, a tool's
+  // config) does not make the process one of the app's.
+  const { excluder, skippedPath } = require('./lib/table');
+  const excluded = excluder(process.env);
+  const isTooling = (rel) => excluded(rel) || skippedPath(rel);
+  const hooked = function (content, filename) {
+    try {
+      if (!marked && typeof filename === 'string') {
+        const rel = path.relative(root, filename);
+        if (rel && !rel.startsWith('..') && !path.isAbsolute(rel) && !rel.split(path.sep).includes('node_modules') &&
+          !isTooling(rel.split(path.sep).join('/'))) {
+          marked = true;
+          writePeerMark(control);
+        }
+      }
+    } catch {
+      // never in the app's way
+    }
+    return orig.apply(this, arguments);
+  };
+  hooked.__keployCoverageMark = true;
+  Module.prototype._compile = hooked;
+}
+
+try {
+  module.exports = start();
+} catch (e) {
+  process.stderr.write(`[keploy coverage] did not start: ${e && e.message}\n`);
+}
